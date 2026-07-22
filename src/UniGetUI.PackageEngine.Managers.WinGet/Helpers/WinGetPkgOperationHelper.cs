@@ -1,4 +1,4 @@
-using Microsoft.Management.Deployment;
+﻿using Microsoft.Management.Deployment;
 using Microsoft.Win32;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
@@ -121,7 +121,10 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
                 }
                 else if (
                     options.CustomInstallLocation != ""
-                    && Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
+                    && (
+                        options.CustomInstallLocationIsExplicit
+                        || Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
+                    )
                 )
                 {
                     parameters.AddRange(["--location", $"\"{options.CustomInstallLocation}\""]);
