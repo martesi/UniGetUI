@@ -315,6 +315,9 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
                 }
             }
 
+            if (operation is OperationType.Update)
+                SuppressPhantomUpgrade(package);
+
             Logger.Warn(
                 $"Update for {package.Id} is not applicable to this system, even without scope/architecture constraints"
             );
@@ -418,6 +421,17 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             Settings.K.WinGetUpgradeAttempts,
             id,
             $"{count}{AttemptSeparator}{version}"
+        );
+    }
+
+    public static void SuppressPhantomUpgrade(IPackage package)
+    {
+        if (IsUnknownVersion(package.NewVersionString))
+            return;
+        Settings.SetDictionaryItem<string, string>(
+            Settings.K.WinGetUpgradeAttempts,
+            package.Id,
+            $"{StuckUpgradeThreshold}{AttemptSeparator}{package.NewVersionString}"
         );
     }
 
