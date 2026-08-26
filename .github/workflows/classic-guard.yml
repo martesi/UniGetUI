@@ -13,7 +13,7 @@ jobs:
   policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Verify Classic base metadata
         shell: bash
@@ -27,6 +27,27 @@ jobs:
         run: |
           set -euo pipefail
           grep -q '<BundleModernApp>false</BundleModernApp>' src/Directory.Build.targets
+
+      - name: Verify Classic updater identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          updater='src/UniGetUI/AutoUpdater.Helpers.cs'
+          grep -q 'Software\\martesi\\UniGetUIClassic' "$updater"
+          grep -q 'github.com/martesi/UniGetUI/releases/latest/download/productinfo.json' "$updater"
+          grep -q 'martesi.UniGetUI.Classic' "$updater"
+
+      - name: Verify hash-only release policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          updater='src/UniGetUI/AutoUpdater.Helpers.cs'
+          # Release UpdaterOverrides must keep hash validation enabled (false) and signer validation skipped (true).
+          grep -A8 'Classic releases are currently unsigned' "$updater" | grep -q 'false,'
+          grep -A10 'Classic releases are currently unsigned' "$updater" | grep -q 'true,'
+          test -s .github/workflows/classic-release.yml
+          grep -q 'productinfo.json' .github/workflows/classic-release.yml
+          grep -q 'Get-FileHash .*SHA256' .github/workflows/classic-release.yml
 
       - name: Verify maintenance ledger exists
         shell: bash
