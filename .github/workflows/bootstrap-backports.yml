@@ -38,9 +38,11 @@ jobs:
         if: steps.state.outputs.applied != 'true'
         shell: pwsh
         run: |
+          $locationCommit = '905bcd14ab6ac7ffa4e712889c7c34c12f30309f'
+          $locationHelper = 'src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs'
           $commits = @(
             '21116375c8299d1db38a3c3b4c2eb7e18bc97c4e',
-            '905bcd14ab6ac7ffa4e712889c7c34c12f30309f',
+            $locationCommit,
             'c0ddaa670523bd69fa5a036b3c18b2e96fb9c665'
           )
 
@@ -53,6 +55,38 @@ jobs:
               $conflicts | Where-Object { $_ -notlike 'src/UniGetUI.PackageEngine.Tests/*' }
             )
 
+            $isKnownLocationConflict = (
+              $commit -eq $locationCommit -and
+              $productionConflicts.Count -eq 1 -and
+              $productionConflicts[0] -eq $locationHelper
+            )
+
+            if ($isKnownLocationConflict) {
+              Write-Host 'Adapting PR 5173 to the inline v2026.2.1 WinGet update-location logic.'
+              git checkout --ours -- $locationHelper
+
+              $content = Get-Content $locationHelper -Raw
+              $old = @'
+                    options.CustomInstallLocation != ""
+                    && Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
+'@
+              $new = @'
+                    options.CustomInstallLocation != ""
+                    && (
+                        options.CustomInstallLocationIsExplicit
+                        || Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
+                    )
+'@
+              if (-not $content.Contains($old)) {
+                git cherry-pick --abort
+                throw 'Expected v2026.2.1 WinGet update-location condition was not found.'
+              }
+              $content = $content.Replace($old, $new)
+              Set-Content $locationHelper $content -Encoding utf8BOM -NoNewline
+              git add -- $locationHelper
+              $productionConflicts = @()
+            }
+
             if ($productionConflicts.Count -gt 0) {
               Write-Host 'Production-code conflicts:'
               $productionConflicts | ForEach-Object { Write-Host "  $_" }
@@ -60,13 +94,13 @@ jobs:
               throw "Production backport conflict: $commit"
             }
 
-            if ($conflicts.Count -eq 0) {
-              git cherry-pick --abort
-              throw "Backport failed without a resolvable test conflict: $commit"
-            }
-
-            Write-Host "Keeping Classic-side regression test files for $commit; production hunks applied cleanly."
-            foreach ($path in $conflicts) {
+            $remainingConflicts = @(git diff --name-only --diff-filter=U)
+            foreach ($path in $remainingConflicts) {
+              if ($path -notlike 'src/UniGetUI.PackageEngine.Tests/*') {
+                git cherry-pick --abort
+                throw "Unexpected unresolved production conflict: $path"
+              }
+              Write-Host "Keeping Classic-side regression test file: $path"
               git checkout --ours -- $path
               git add -- $path
             }
@@ -74,7 +108,7 @@ jobs:
             git -c core.editor=true cherry-pick --continue
             if ($LASTEXITCODE -ne 0) {
               git cherry-pick --abort
-              throw "Could not continue backport after resolving test drift: $commit"
+              throw "Could not continue adapted backport: $commit"
             }
           }
 
