@@ -2,8 +2,10 @@ name: Fix bootstrap syntax
 
 on:
   push:
-    branches: [bootstrap-backports]
-    paths: [.github/workflows/fix-bootstrap-syntax.yml]
+    branches:
+      - bootstrap-backports
+    paths:
+      - .github/workflows/fix-bootstrap-syntax.yml
 
 permissions:
   contents: write
@@ -15,30 +17,23 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: bootstrap-backports
+
       - name: Fix missing WinGet condition parenthesis
-        shell: python
+        shell: bash
         run: |
+          set -euo pipefail
+          python - <<'PY'
           from pathlib import Path
+
           path = Path('src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs')
           text = path.read_text(encoding='utf-8')
-          old = '''                        || !string.Equals(
-                            installerType,
-                            "portable",
-                            StringComparison.OrdinalIgnoreCase
-                        )
-                        return null;
-'''
-          new = '''                        || !string.Equals(
-                            installerType,
-                            "portable",
-                            StringComparison.OrdinalIgnoreCase
-                        )
-                    )
-                        return null;
-'''
+          old = '                            StringComparison.OrdinalIgnoreCase\n                        )\n                        return null;'
+          new = '                            StringComparison.OrdinalIgnoreCase\n                        )\n                    )\n                        return null;'
           if old not in text:
               raise SystemExit('expected syntax pattern not found')
           path.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+          PY
+
       - name: Commit fix
         shell: bash
         run: |
