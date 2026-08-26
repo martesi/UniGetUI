@@ -66,22 +66,21 @@ jobs:
               git checkout --ours -- $locationHelper
 
               $content = Get-Content $locationHelper -Raw
-              $old = @'
-                    options.CustomInstallLocation != ""
-                    && Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
-'@
-              $new = @'
-                    options.CustomInstallLocation != ""
-                    && (
-                        options.CustomInstallLocationIsExplicit
-                        || Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
-                    )
-'@
-              if (-not $content.Contains($old)) {
+              $pattern = '(?m)^(?<indent>\s*)options\.CustomInstallLocation != ""\r?\n\k<indent>&& Settings\.Get\(Settings\.K\.WinGetForceLocationOnUpdate\)'
+              $match = [regex]::Match($content, $pattern)
+              if (-not $match.Success) {
                 git cherry-pick --abort
                 throw 'Expected v2026.2.1 WinGet update-location condition was not found.'
               }
-              $content = $content.Replace($old, $new)
+
+              $indent = $match.Groups['indent'].Value
+              $nl = [Environment]::NewLine
+              $replacement = $indent + 'options.CustomInstallLocation != ""' + $nl +
+                $indent + '&& (' + $nl +
+                $indent + '    options.CustomInstallLocationIsExplicit' + $nl +
+                $indent + '    || Settings.Get(Settings.K.WinGetForceLocationOnUpdate)' + $nl +
+                $indent + ')'
+              $content = $content.Remove($match.Index, $match.Length).Insert($match.Index, $replacement)
               Set-Content $locationHelper $content -Encoding utf8BOM -NoNewline
               git add -- $locationHelper
               $productionConflicts = @()
@@ -134,11 +133,12 @@ jobs:
         if: steps.state.outputs.applied != 'true'
         shell: pwsh
         run: |
-          @'
-          21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
-          905bcd14ab6ac7ffa4e712889c7c34c12f30309f
-          c0ddaa670523bd69fa5a036b3c18b2e96fb9c665
-          '@ | Set-Content 'maintenance/.bootstrap-backports-applied' -Encoding utf8NoBOM
+          $commits = @(
+            '21116375c8299d1db38a3c3b4c2eb7e18bc97c4e',
+            '905bcd14ab6ac7ffa4e712889c7c34c12f30309f',
+            'c0ddaa670523bd69fa5a036b3c18b2e96fb9c665'
+          )
+          $commits | Set-Content 'maintenance/.bootstrap-backports-applied' -Encoding utf8NoBOM
           git add maintenance/.bootstrap-backports-applied
           git commit -m 'Classic: mark bootstrap backports applied'
           git push origin HEAD:bootstrap-backports
