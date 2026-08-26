@@ -46,10 +46,35 @@ jobs:
 
           foreach ($commit in $commits) {
             git cherry-pick -x $commit
-            if ($LASTEXITCODE -ne 0) {
-              git status --short
+            if ($LASTEXITCODE -eq 0) { continue }
+
+            $conflicts = @(git diff --name-only --diff-filter=U)
+            $productionConflicts = @(
+              $conflicts | Where-Object { $_ -notlike 'src/UniGetUI.PackageEngine.Tests/*' }
+            )
+
+            if ($productionConflicts.Count -gt 0) {
+              Write-Host 'Production-code conflicts:'
+              $productionConflicts | ForEach-Object { Write-Host "  $_" }
               git cherry-pick --abort
-              throw "Backport failed: $commit"
+              throw "Production backport conflict: $commit"
+            }
+
+            if ($conflicts.Count -eq 0) {
+              git cherry-pick --abort
+              throw "Backport failed without a resolvable test conflict: $commit"
+            }
+
+            Write-Host "Keeping Classic-side regression test files for $commit; production hunks applied cleanly."
+            foreach ($path in $conflicts) {
+              git checkout --ours -- $path
+              git add -- $path
+            }
+
+            git -c core.editor=true cherry-pick --continue
+            if ($LASTEXITCODE -ne 0) {
+              git cherry-pick --abort
+              throw "Could not continue backport after resolving test drift: $commit"
             }
           }
 
