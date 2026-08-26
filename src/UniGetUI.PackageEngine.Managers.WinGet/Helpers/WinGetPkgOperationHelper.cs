@@ -431,6 +431,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
                             "portable",
                             StringComparison.OrdinalIgnoreCase
                         )
+                    )
                         return null;
 
                     if (
