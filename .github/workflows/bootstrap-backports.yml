@@ -1,0 +1,85 @@
+name: Bootstrap backports
+
+on:
+  push:
+    branches: [bootstrap-backports]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check whether backports are already applied
+        id: state
+        shell: pwsh
+        run: |
+          if (Test-Path 'maintenance/.bootstrap-backports-applied') {
+            "applied=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "applied=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Configure Git
+        if: steps.state.outputs.applied != 'true'
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin upstream
+
+      - name: Apply independent upstream backports
+        if: steps.state.outputs.applied != 'true'
+        shell: pwsh
+        run: |
+          $commits = @(
+            '21116375c8299d1db38a3c3b4c2eb7e18bc97c4e',
+            '905bcd14ab6ac7ffa4e712889c7c34c12f30309f',
+            'c0ddaa670523bd69fa5a036b3c18b2e96fb9c665'
+          )
+
+          foreach ($commit in $commits) {
+            git cherry-pick -x $commit
+            if ($LASTEXITCODE -ne 0) {
+              git status --short
+              git cherry-pick --abort
+              throw "Backport failed: $commit"
+            }
+          }
+
+      - name: Install .NET
+        if: steps.state.outputs.applied != 'true'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Restore tests
+        if: steps.state.outputs.applied != 'true'
+        working-directory: src
+        shell: pwsh
+        run: dotnet restore UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj /p:Platform=x64
+
+      - name: Run package-engine tests
+        if: steps.state.outputs.applied != 'true'
+        working-directory: src
+        shell: pwsh
+        run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64
+
+      - name: Mark and push validated backports
+        if: steps.state.outputs.applied != 'true'
+        shell: pwsh
+        run: |
+          @'
+          21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
+          905bcd14ab6ac7ffa4e712889c7c34c12f30309f
+          c0ddaa670523bd69fa5a036b3c18b2e96fb9c665
+          '@ | Set-Content 'maintenance/.bootstrap-backports-applied' -Encoding utf8NoBOM
+          git add maintenance/.bootstrap-backports-applied
+          git commit -m 'Classic: mark bootstrap backports applied'
+          git push origin HEAD:bootstrap-backports
