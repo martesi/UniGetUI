@@ -1,0 +1,47 @@
+name: Classic guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Classic base metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '"base_tag": "v2026.2.1"' maintenance/upstream-base.json
+          grep -q '"base_commit": "68411409d001b9f34cfb896af1543a1d7067ca5e"' maintenance/upstream-base.json
+
+      - name: Verify Avalonia bundling stays disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '<BundleModernApp>false</BundleModernApp>' src/Directory.Build.targets
+
+      - name: Verify maintenance ledger exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s maintenance/backports.yml
+          test -s maintenance/PATCH_POLICY.md
+          test -s CLASSIC.md
+
+      - name: Block accidental upstream merge commits
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git log --merges --pretty='%P' "origin/${{ github.base_ref }}..HEAD" | awk 'NF > 2 { found=1 } END { exit found ? 0 : 1 }'; then
+            echo 'Merge commits detected in Classic changes. Import upstream fixes selectively instead of merging upstream.' >&2
+            exit 1
+          fi

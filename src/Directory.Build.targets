@@ -1,0 +1,10 @@
+<Project>
+  <!--
+    UniGetUI Classic intentionally ships the WinUI frontend from the v2026.2.1 base.
+    Upstream v2026.2.1 can bundle the Avalonia frontend during publish; force that
+    downstream-only option off without modifying the upstream project file.
+  -->
+  <PropertyGroup>
+    <BundleModernApp>false</BundleModernApp>
+  </PropertyGroup>
+</Project>

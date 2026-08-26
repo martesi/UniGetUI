@@ -1,0 +1,46 @@
+upstream_base:
+  tag: v2026.2.1
+  commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
+
+backports:
+  - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
+    upstream_pr: 5072
+    status: candidate
+    class: backend
+    reason: WinGet already-upgraded cache fix; package-engine only plus tests.
+
+  - commit: 905bcd14ab6ac7ffa4e712889c7c34c12f30309f
+    upstream_pr: 5173
+    status: candidate
+    class: backend-shared-model
+    reason: Honors explicit per-package install location on WinGet update.
+
+  - commit: c0ddaa670523bd69fa5a036b3c18b2e96fb9c665
+    upstream_pr: 5169
+    status: candidate
+    class: backend
+    reason: Preserves PowerShell module scope during update discovery.
+
+  - commit: 26c93b859babdc831b2d8462048d3e5f85d3da67
+    upstream_pr: 5199
+    status: candidate
+    class: backend
+    reason: Suppresses non-applicable WinGet phantom updates.
+
+  - commit: 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
+    upstream_pr: 5167
+    status: partial
+    class: backend-plus-ui
+    reason: Backport stuck-upgrade detection/settings storage; port Classic settings UI separately.
+
+  - commit: fce15a3b10e630b269ce6e59be3c6522e3b0ea94
+    upstream_pr: 5114
+    status: partial
+    class: backend-plus-ui
+    reason: Backport manager capability and PowerShell operation fixes; adapt WinUI options UI separately.
+
+  - commit: 9ae64515163e2d1021301ff48e4c47435b7da1f0
+    upstream_pr: 5077
+    status: inspect-classic
+    class: avalonia-orchestration
+    reason: Upstream fix lives only in Avalonia pages; verify whether the equivalent Classic workflow has the same bug before porting.
