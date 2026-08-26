@@ -1,4 +1,4 @@
-﻿using Microsoft.Management.Deployment;
+using Microsoft.Management.Deployment;
 using Microsoft.Win32;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
@@ -431,7 +431,6 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
                             "portable",
                             StringComparison.OrdinalIgnoreCase
                         )
-                    )
                         return null;
 
                     if (
