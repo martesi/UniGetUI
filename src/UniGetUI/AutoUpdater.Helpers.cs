@@ -9,9 +9,10 @@ namespace UniGetUI;
 
 public partial class AutoUpdater
 {
-    private const string REGISTRY_PATH = @"Software\Devolutions\UniGetUI";
-    private const string DEFAULT_PRODUCTINFO_URL = "https://devolutions.net/productinfo.json";
-    private const string DEFAULT_PRODUCTINFO_KEY = "Devolutions.UniGetUI";
+    private const string REGISTRY_PATH = @"Software\martesi\UniGetUIClassic";
+    private const string DEFAULT_PRODUCTINFO_URL =
+        "https://github.com/martesi/UniGetUI/releases/latest/download/productinfo.json";
+    private const string DEFAULT_PRODUCTINFO_KEY = "martesi.UniGetUI.Classic";
 
     private const string REG_PRODUCTINFO_URL = "UpdaterProductInfoUrl";
     private const string REG_PRODUCTINFO_KEY = "UpdaterProductKey";
@@ -174,12 +175,14 @@ public partial class AutoUpdater
         string productInfoUrl =
             GetRegistryString(key, REG_PRODUCTINFO_URL) ?? DEFAULT_PRODUCTINFO_URL;
 
+        // Classic releases are currently unsigned. Keep TLS and SHA-256 validation mandatory,
+        // but deliberately skip the inherited Devolutions Authenticode thumbprint check.
         return new UpdaterOverrides(
             productInfoUrl,
             DEFAULT_PRODUCTINFO_KEY,
             false,
             false,
-            false,
+            true,
             false
         );
 #endif
