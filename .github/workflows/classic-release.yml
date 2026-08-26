@@ -64,6 +64,7 @@ jobs:
         run: dotnet restore UniGetUI.Windows.slnx /p:Platform=${{ matrix.platform }}
 
       - name: Test package engine
+        if: matrix.platform == 'x64'
         working-directory: src
         shell: pwsh
         run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64
@@ -102,6 +103,7 @@ jobs:
           }
 
           Copy-Item 'unigetui_bin/UniGetUI.exe' 'unigetui_bin/WingetUI.exe' -Force
+          ./scripts/refresh-integrity-tree.ps1 -Path $PWD/unigetui_bin -FailOnUnexpectedFiles
 
       - name: Build unsigned installer
         shell: pwsh
