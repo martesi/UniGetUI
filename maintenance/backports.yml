@@ -21,17 +21,19 @@ backports:
     class: backend
     reason: Preserves PowerShell module scope during update discovery.
 
-  - commit: 26c93b859babdc831b2d8462048d3e5f85d3da67
-    upstream_pr: 5199
-    status: candidate
-    class: backend
-    reason: Suppresses non-applicable WinGet phantom updates.
-
   - commit: 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
     upstream_pr: 5167
     status: partial
     class: backend-plus-ui
-    reason: Backport stuck-upgrade detection/settings storage; port Classic settings UI separately.
+    reason: Backport stuck-upgrade detection/settings storage first; port Classic settings UI separately. Required before PR 5199.
+
+  - commit: 26c93b859babdc831b2d8462048d3e5f85d3da67
+    upstream_pr: 5199
+    status: blocked-by-5167
+    class: backend
+    depends_on:
+      - 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
+    reason: Suppresses non-applicable WinGet phantom updates using the stuck-upgrade machinery introduced by PR 5167.
 
   - commit: fce15a3b10e630b269ce6e59be3c6522e3b0ea94
     upstream_pr: 5114
