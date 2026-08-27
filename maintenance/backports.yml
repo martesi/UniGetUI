@@ -5,35 +5,42 @@ upstream_base:
 backports:
   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
     upstream_pr: 5072
-    status: candidate
+    status: applied
     class: backend
     reason: WinGet already-upgraded cache fix; package-engine only plus tests.
 
   - commit: 905bcd14ab6ac7ffa4e712889c7c34c12f30309f
     upstream_pr: 5173
-    status: candidate
+    status: applied-semantic
     class: backend-shared-model
-    reason: Honors explicit per-package install location on WinGet update.
+    reason: Honors explicit per-package install location on WinGet update; adapted to Classic's inline location logic.
 
   - commit: c0ddaa670523bd69fa5a036b3c18b2e96fb9c665
     upstream_pr: 5169
-    status: candidate
+    status: applied
     class: backend
     reason: Preserves PowerShell module scope during update discovery.
 
   - commit: 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
     upstream_pr: 5167
-    status: partial
+    status: applied-backend
     class: backend-plus-ui
-    reason: Backport stuck-upgrade detection/settings storage first; port Classic settings UI separately. Required before PR 5199.
+    reason: Stuck-upgrade detection, settings storage, language, and backend behavior are applied; the Avalonia settings control is intentionally excluded from Classic. Classic currently uses the backend default threshold of 3.
+
+  - commit: 249cc4d0d4c947dbe03b998ff392933f8aab15b6
+    upstream_pr: 4998
+    status: applied-semantic
+    class: backend
+    reason: Retries WinGet/Pinget updates reported as not applicable once without forced scope/architecture, then reports a real failure instead of faking success.
 
   - commit: 26c93b859babdc831b2d8462048d3e5f85d3da67
     upstream_pr: 5199
-    status: blocked-by-5167
+    status: applied-semantic
     class: backend
     depends_on:
       - 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
-    reason: Suppresses non-applicable WinGet phantom updates using the stuck-upgrade machinery introduced by PR 5167.
+      - 249cc4d0d4c947dbe03b998ff392933f8aab15b6
+    reason: Suppresses non-applicable WinGet COM phantom updates using stuck-upgrade tracking after the relaxed not-applicable retry path has been exhausted.
 
   - commit: fce15a3b10e630b269ce6e59be3c6522e3b0ea94
     upstream_pr: 5114
