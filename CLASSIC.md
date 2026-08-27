@@ -40,6 +40,25 @@ Upstream should continue to own, whenever practical:
 
 The upstream `v2026.2.1` WinUI project can bundle the Avalonia app during publish. Classic overrides `BundleModernApp=false` in `src/Directory.Build.targets`, so Classic builds remain WinUI-only without rewriting the upstream project file.
 
+## Installed app identity
+
+Classic is a separate installed application and is intended to coexist with upstream UniGetUI rather than replace its installation.
+
+- Display name: `UniGetUI Classic`.
+- Publisher: `Martes`.
+- Inno Setup AppId: `{E385AFF5-90A4-4296-8702-EC129F9DC40B}`.
+- Default install directory: `Program Files\UniGetUI Classic`.
+- Startup registry value: `UniGetUIClassic`.
+- Writable local data directory: `%LOCALAPPDATA%\UniGetUIClassic`.
+- Runtime app identifier: `Martes.UniGetUIClassic`.
+- Main-window identifier: `Martes.UniGetUIClassic.MainInterface`.
+
+Classic does not automatically move or copy upstream UniGetUI's writable data. An explicit import can be added later if needed without making the two applications share live state.
+
+The existing `unigetui://` protocol and `.ubundle`/`UniGetUI.PackageBundle` identifiers are intentionally retained for compatibility rather than renamed. These are shared Windows integration surfaces, so only one installed application can be the active handler at a time; they are not part of the isolated installer/runtime identity boundary.
+
+The Classic installer also avoids broad image-name `taskkill` operations and does not run the old `--migrate-wingetui-to-unigetui` post-install migration, because either behavior could affect an upstream installation running alongside Classic.
+
 ## Auto-update policy
 
 Classic uses its own GitHub Releases channel:
