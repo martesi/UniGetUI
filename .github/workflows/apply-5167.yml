@@ -44,10 +44,7 @@ jobs:
               raise SystemExit(f'line anchor not found: {text}')
 
           def wrap_call(lines, marker, condition):
-              marker_index = next(
-                  (i for i, line in enumerate(lines) if marker in line),
-                  None,
-              )
+              marker_index = next((i for i, line in enumerate(lines) if marker in line), None)
               if marker_index is None:
                   raise SystemExit(f'call marker not found: {marker}')
               start = marker_index
@@ -58,13 +55,12 @@ jobs:
               end = line_index(lines, ');', start + 1)
               base_indent = lines[start][:-len(lines[start].lstrip())]
               block = [base_indent + '    ' + line[len(base_indent):] for line in lines[start:end + 1]]
-              replacement = [
+              lines[start:end + 1] = [
                   base_indent + f'if ({condition})\n',
                   base_indent + '{\n',
                   *block,
                   base_indent + '}\n',
               ]
-              lines[start:end + 1] = replacement
 
           options = options_path.read_text(encoding='utf-8')
           field = '    public bool WinGet_DropArchAndScope = false;\n'
@@ -101,17 +97,9 @@ jobs:
                   *original,
                   base_indent + '}\n',
               ]
+              wrap_call(lines, 'options.Architecture switch', '!package.OverridenOptions.WinGet_DropArchAndScope')
 
-              wrap_call(
-                  lines,
-                  'options.Architecture switch',
-                  '!package.OverridenOptions.WinGet_DropArchAndScope',
-              )
-
-          old_start = next(
-              (i for i, line in enumerate(lines) if line.strip() == 'if (uintCode is 0x8A15002B)'),
-              None,
-          )
+          old_start = next((i for i, line in enumerate(lines) if line.strip() == 'if (uintCode is 0x8A15002B)'), None)
           if old_start is not None:
               base_indent = lines[old_start][:-len(lines[old_start].lstrip())]
               old_end = next(
@@ -138,8 +126,6 @@ jobs:
 
                   if (uintCode is 0x8A15002B || pingetReportedNotApplicable)
                   {
-                      // A forced scope/architecture may exclude the only installer. Retry once without
-                      // those constraints, matching WinGet's normal selection behavior (#4998).
                       if (
                           operation is OperationType.Update
                           && !package.OverridenOptions.WinGet_DropArchAndScope
@@ -220,12 +206,12 @@ jobs:
                       var package = new PackageBuilder()
                           .WithManager(manager)
                           .WithId("Klocman.BulkCrapUninstaller")
-                          .WithVersion("5.8")
-                          .WithNewVersion("5.9")
+                          .WithVersion("6.1")
+                          .WithNewVersion("6.2")
                           .Build();
+                      package.OverridenOptions.Scope = PackageScope.Machine;
                       var options = new InstallOptions
                       {
-                          InstallationScope = PackageScope.Machine,
                           Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
                       };
 
@@ -260,13 +246,13 @@ jobs:
                   public void WinGetUpdateNotApplicableDoesNotRetryASecondTime()
                   {
                       var manager = new WinGet();
-                      SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
                       var package = new PackageBuilder()
                           .WithManager(manager)
                           .WithId("Klocman.BulkCrapUninstaller")
-                          .WithVersion("5.8")
-                          .WithNewVersion("5.9")
+                          .WithVersion("6.1")
+                          .WithNewVersion("6.2")
                           .Build();
+                      package.OverridenOptions.Scope = PackageScope.Machine;
                       package.OverridenOptions.WinGet_DropArchAndScope = true;
 
                       var veredict = manager.OperationHelper.GetResult(
@@ -280,32 +266,76 @@ jobs:
                   }
 
                   [Fact]
-                  public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
+                  public void WinGetUpdateNotApplicableFailsWhenThereIsNothingToRelax()
                   {
                       var manager = new WinGet();
-                      SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
                       var package = new PackageBuilder()
                           .WithManager(manager)
                           .WithId("Contoso.Tool")
                           .WithVersion("1.0.0")
                           .WithNewVersion("2.0.0")
                           .Build();
-                      var options = new InstallOptions
-                      {
-                          InstallationScope = PackageScope.Machine,
-                          Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
-                      };
-                      _ = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
 
                       var veredict = manager.OperationHelper.GetResult(
                           package,
                           OperationType.Update,
-                          ["No applicable installer found"],
+                          [],
+                          unchecked((int)0x8A15002B)
+                      );
+
+                      OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+                      Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+                  }
+
+                  [Fact]
+                  public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
+                  {
+                      var manager = new WinGet();
+                      SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+                      var package = new PackageBuilder()
+                          .WithManager(manager)
+                          .WithId("JRSoftware.InnoSetup")
+                          .WithVersion("6.7.1")
+                          .WithNewVersion("6.7.3")
+                          .Build();
+                      package.OverridenOptions.Scope = PackageScope.Machine;
+
+                      var veredict = manager.OperationHelper.GetResult(
+                          package,
+                          OperationType.Update,
+                          [
+                              "Selecting applicable installer for this system...",
+                              "Error upgrading JRSoftware.InnoSetup: No applicable installer found",
+                          ],
                           1
                       );
 
                       OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
                       Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
+                  }
+
+                  [Fact]
+                  public void WinGetGenericPingetFailureDoesNotRetry()
+                  {
+                      var manager = new WinGet();
+                      SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+                      var package = new PackageBuilder()
+                          .WithManager(manager)
+                          .WithId("JRSoftware.InnoSetup")
+                          .WithVersion("6.7.1")
+                          .WithNewVersion("6.7.3")
+                          .Build();
+                      package.OverridenOptions.Scope = PackageScope.Machine;
+
+                      var veredict = manager.OperationHelper.GetResult(
+                          package,
+                          OperationType.Update,
+                          ["error: download failed"],
+                          1
+                      );
+
+                      OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+                      Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
                   }
 
                   [Fact]
