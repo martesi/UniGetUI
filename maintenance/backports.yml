@@ -44,9 +44,9 @@ backports:
 
   - commit: fce15a3b10e630b269ce6e59be3c6522e3b0ea94
     upstream_pr: 5114
-    status: partial
+    status: applied-semantic
     class: backend-plus-ui
-    reason: Backport manager capability and PowerShell operation fixes; adapt WinUI options UI separately.
+    reason: PowerShell scope handling and operation-specific capabilities are backported with upstream regression tests; Avalonia ScopeEnabled behavior is translated to the Classic WinUI scope selector.
 
   - commit: 9ae64515163e2d1021301ff48e4c47435b7da1f0
     upstream_pr: 5077
