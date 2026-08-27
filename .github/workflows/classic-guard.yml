@@ -65,6 +65,15 @@ jobs:
 
           grep -Fq 'Software\Classes\unigetui' "$installer"
           grep -Fq 'UniGetUI.PackageBundle' "$installer"
+          grep -Fq 'Check: ShouldRegisterUniGetUIProtocol;' "$installer"
+          grep -Fq 'Check: ShouldRegisterPackageBundle;' "$installer"
+          grep -Fq 'function ClassicOwnsRegistryCommand' "$installer"
+          grep -Fq 'procedure CurUninstallStepChanged' "$installer"
+          if grep -E 'Software\\Classes\\(unigetui|UniGetUI\.PackageBundle).*uninsdeletekey' "$installer"; then
+            echo 'Shared Classic/upstream handler keys must not be deleted unconditionally.' >&2
+            exit 1
+          fi
+
           grep -Fq 'Martes.UniGetUIClassic' "$core"
           grep -Fq 'Martes.UniGetUIClassic.MainInterface' "$core"
           grep -Fq 'Path.Join(GetLocalDataRoot(), "UniGetUIClassic")' "$core"
