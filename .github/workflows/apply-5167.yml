@@ -39,11 +39,11 @@ jobs:
           options = options_path.read_text(encoding='utf-8')
           old = '''    public bool? WinGet_SpecifyVersion = null;
               public bool Pip_BreakSystemPackages = false;
-          '''.replace('              ', '    ')
+          '''
           new = '''    public bool? WinGet_SpecifyVersion = null;
               public bool Pip_BreakSystemPackages = false;
               public bool WinGet_DropArchAndScope = false;
-          '''.replace('              ', '    ')
+          '''
           if old not in options:
               raise SystemExit('OverridenInstallationOptions field anchor not found')
           options = options.replace(old, new, 1)
@@ -64,7 +64,7 @@ jobs:
                       _ => [],
                   }
               );
-          '''.replace('              ', '        ')
+          '''
           new = '''        // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
               // WinGet_DropArchAndScope is set after an "update not applicable" result so the retry
               // lets WinGet choose a compatible installer instead of repeating the same constraints.
@@ -79,12 +79,24 @@ jobs:
                       }
                   );
               }
-          '''.replace('              ', '        ')
+          '''
           if old not in helper:
               raise SystemExit('scope parameter anchor not found')
           helper = helper.replace(old, new, 1)
 
           old = '''            parameters.AddRange(
+                  options.Architecture switch
+                  {
+                      Architecture.x86 => ["--architecture", "x86"],
+                      Architecture.x64 => ["--architecture", "x64"],
+                      Architecture.arm64 => ["--architecture", "arm64"],
+                      _ => [],
+                  }
+              );
+          '''
+          new = '''            if (!package.OverridenOptions.WinGet_DropArchAndScope)
+              {
+                  parameters.AddRange(
                       options.Architecture switch
                       {
                           Architecture.x86 => ["--architecture", "x86"],
@@ -93,20 +105,8 @@ jobs:
                           _ => [],
                       }
                   );
-          '''.replace('                      ', '            ')
-          new = '''            if (!package.OverridenOptions.WinGet_DropArchAndScope)
-                  {
-                      parameters.AddRange(
-                          options.Architecture switch
-                          {
-                              Architecture.x86 => ["--architecture", "x86"],
-                              Architecture.x64 => ["--architecture", "x64"],
-                              Architecture.arm64 => ["--architecture", "arm64"],
-                              _ => [],
-                          }
-                      );
-                  }
-          '''.replace('                  ', '            ')
+              }
+          '''
           if old not in helper:
               raise SystemExit('architecture parameter anchor not found')
           helper = helper.replace(old, new, 1)
@@ -126,7 +126,7 @@ jobs:
                   //}
                   //return OperationVeredict.Failure;
               }
-          '''.replace('              ', '        ')
+          '''
           new = '''        // WinGet (CLI/COM) reports "not applicable" as 0x8A15002B; bundled pinget instead exits
               // non-zero with "No applicable installer found" in its output (#4998).
               bool pingetReportedNotApplicable =
@@ -140,14 +140,18 @@ jobs:
               {
                   // A forced scope/architecture may exclude the only installer. Retry once without
                   // those constraints, matching WinGet's normal selection behavior (#4998).
-                  if (operation is OperationType.Update && !package.OverridenOptions.WinGet_DropArchAndScope)
+                  if (
+                      operation is OperationType.Update
+                      && !package.OverridenOptions.WinGet_DropArchAndScope
+                  )
                   {
                       var options = InstallOptionsFactory.LoadApplicable(package);
                       bool hasScope =
                           (package.OverridenOptions.Scope ?? options.InstallationScope)
                           is PackageScope.User or PackageScope.Machine;
                       bool hasArch =
-                          options.Architecture is Architecture.x86 or Architecture.x64 or Architecture.arm64;
+                          options.Architecture
+                          is Architecture.x86 or Architecture.x64 or Architecture.arm64;
 
                       if (hasScope || hasArch)
                       {
@@ -167,17 +171,15 @@ jobs:
                   );
                   return OperationVeredict.Failure;
               }
-          '''.replace('              ', '        ')
+          '''
           if old not in helper:
               raise SystemExit('not-applicable result anchor not found')
           helper = helper.replace(old, new, 1)
 
           marker = '''    // An update WinGet keeps offering even after enough "successful" upgrades to it (#5158).
               public static bool IsStuckUpgradeLoop(IPackage package)
-          '''.replace('              ', '    ')
-          addition = '''    // Mark the currently offered version as already having reached the stuck-update threshold.
-              // This lets COM phantom updates disappear immediately after WinGet reports that no newer
-              // applicable installer actually exists (#5199).
+          '''
+          addition = '''    // Mark the offered version as already having reached the stuck-update threshold (#5199).
               public static void SuppressPhantomUpgrade(IPackage package)
               {
                   if (IsUnknownVersion(package.NewVersionString))
@@ -189,7 +191,7 @@ jobs:
                   );
               }
 
-          '''.replace('              ', '    ')
+          '''
           if marker not in helper:
               raise SystemExit('stuck-upgrade method anchor not found')
           helper = helper.replace(marker, addition + marker, 1)
@@ -198,7 +200,7 @@ jobs:
           tests = tests_path.read_text(encoding='utf-8')
           marker = '''    private static void SetCliToolKind(WinGet manager, WinGetCliToolKind kind)
           '''
-          addition = r'''    [Fact]
+          addition = '''    [Fact]
               public void WinGetUpdateNotApplicableRetriesOnceWithoutScopeAndArchitecture()
               {
                   var manager = new WinGet();
@@ -215,7 +217,11 @@ jobs:
                       Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
                   };
 
-                  var firstAttempt = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+                  var firstAttempt = manager.OperationHelper.GetParameters(
+                      package,
+                      options,
+                      OperationType.Update
+                  );
                   Assert.Contains("--scope", firstAttempt);
                   Assert.Contains("--architecture", firstAttempt);
 
@@ -229,7 +235,11 @@ jobs:
                   OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
                   Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
 
-                  var retryAttempt = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+                  var retryAttempt = manager.OperationHelper.GetParameters(
+                      package,
+                      options,
+                      OperationType.Update
+                  );
                   Assert.DoesNotContain("--scope", retryAttempt);
                   Assert.DoesNotContain("--architecture", retryAttempt);
               }
@@ -319,7 +329,7 @@ jobs:
                   Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
               }
 
-          '''.replace('              ', '    ')
+          '''
           if marker not in tests:
               raise SystemExit('test insertion anchor not found')
           tests = tests.replace(marker, addition + marker, 1)
