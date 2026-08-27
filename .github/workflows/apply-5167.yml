@@ -1,4 +1,4 @@
-name: Apply PR 5167 backport
+name: Apply PR 5199 backport
 
 on:
   push:
@@ -26,18 +26,17 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin upstream
 
-      - name: Cherry-pick upstream PR 5167
+      - name: Cherry-pick upstream PR 5199
         shell: pwsh
         run: |
-          $commit = '4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d'
-          $avalonia = 'src/UniGetUI.Avalonia/Views/Pages/SettingsPages/PackageManagerPage.axaml.cs'
+          $commit = '26c93b859babdc831b2d8462048d3e5f85d3da67'
 
           git cherry-pick -x $commit
           if ($LASTEXITCODE -ne 0) {
             $conflicts = @(git diff --name-only --diff-filter=U)
             foreach ($path in $conflicts) {
-              if ($path -eq $avalonia -or $path -like 'src/UniGetUI.PackageEngine.Tests/*') {
-                Write-Host "Keeping Classic-side file for expected conflict: $path"
+              if ($path -like 'src/UniGetUI.PackageEngine.Tests/*') {
+                Write-Host "Keeping Classic-side test file for expected layout drift: $path"
                 git checkout --ours -- $path
                 git add -- $path
                 continue
@@ -45,21 +44,15 @@ jobs:
 
               Write-Host "Unexpected production conflict: $path"
               git cherry-pick --abort
-              throw "PR 5167 requires semantic adaptation in $path"
+              throw "PR 5199 requires semantic adaptation in $path"
             }
 
             git -c core.editor=true cherry-pick --continue
             if ($LASTEXITCODE -ne 0) {
               git cherry-pick --abort
-              throw 'Could not continue PR 5167 cherry-pick.'
+              throw 'Could not continue PR 5199 cherry-pick.'
             }
           }
-
-          # Classic deliberately keeps the WinUI settings surface. If the Avalonia hunk applied
-          # cleanly, remove it from this backport while retaining language/backend changes.
-          git restore --source=HEAD^ -- $avalonia
-          git add -- $avalonia
-          git commit --amend --no-edit
 
       - name: Install .NET
         uses: actions/setup-dotnet@v5
