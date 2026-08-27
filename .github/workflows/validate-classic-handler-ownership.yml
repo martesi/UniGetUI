@@ -1,0 +1,92 @@
+name: Validate Classic handler ownership
+
+on:
+  push:
+    branches:
+      - classic-app-identity
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Apply shared handler ownership
+        shell: pwsh
+        run: ./scripts/apply-classic-shared-handler-ownership.ps1
+
+      - name: Publish WinUI Classic x64
+        shell: pwsh
+        run: |
+          [xml]$props = Get-Content 'src/Directory.Build.props'
+          $portable = @($props.Project.PropertyGroup | Where-Object { $_.PortableTargetFramework } | Select-Object -First 1).PortableTargetFramework
+          $windows = @($props.Project.PropertyGroup | Where-Object { $_.WindowsTargetPlatformVersion } | Select-Object -First 1).WindowsTargetPlatformVersion
+          if ([string]::IsNullOrWhiteSpace($portable) -or [string]::IsNullOrWhiteSpace($windows)) {
+            throw 'Could not resolve Windows target framework.'
+          }
+          $tfm = "$portable-windows$windows"
+
+          dotnet publish src/UniGetUI/UniGetUI.csproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:RuntimeIdentifier=win-x64 `
+            /p:BundleModernApp=false `
+            --verbosity minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Classic x64 publish failed.' }
+
+          $publishDir = "src/UniGetUI/bin/x64/Release/$tfm/win-x64/publish"
+          if (-not (Test-Path $publishDir)) { throw "Publish directory not found: $publishDir" }
+          if (Test-Path 'unigetui_bin') { Remove-Item 'unigetui_bin' -Recurse -Force }
+          New-Item 'unigetui_bin' -ItemType Directory | Out-Null
+          Copy-Item "$publishDir/*" 'unigetui_bin' -Recurse -Force
+          if (Test-Path 'unigetui_bin/Avalonia' -or Test-Path 'unigetui_bin/UniGetUI.Avalonia.exe') {
+            throw 'Avalonia was included in Classic validation output.'
+          }
+          Copy-Item 'unigetui_bin/UniGetUI.exe' 'unigetui_bin/WingetUI.exe' -Force
+          ./scripts/refresh-integrity-tree.ps1 -Path $PWD/unigetui_bin -FailOnUnexpectedFiles
+
+      - name: Compile unsigned Classic installer
+        shell: pwsh
+        run: |
+          $issPath = 'UniGetUI.iss'
+          $original = Get-Content $issPath -Raw
+          New-Item output -ItemType Directory -Force | Out-Null
+          try {
+            $unsigned = $original -Replace '(?m)^SignTool=.*$', '; SignTool disabled for validation'
+            $unsigned = $unsigned -Replace '(?m)^SignedUninstaller=yes', 'SignedUninstaller=no'
+            Set-Content $issPath $unsigned -NoNewline
+            & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' $issPath /F'UniGetUI.Classic.Validation' /O"$PWD\output"
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup validation failed with exit code $LASTEXITCODE" }
+            if (-not (Test-Path 'output/UniGetUI.Classic.Validation.exe')) { throw 'Validation installer was not produced.' }
+          }
+          finally {
+            Set-Content $issPath $original -NoNewline
+          }
+
+      - name: Commit handler ownership fix
+        shell: pwsh
+        run: |
+          if (git diff --quiet -- UniGetUI.iss) {
+            Write-Host 'No handler ownership changes to commit.'
+            exit 0
+          }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add UniGetUI.iss
+          git commit -m 'fix(classic): avoid stealing shared Windows handlers' -m 'Keep unigetui:// and UniGetUI.PackageBundle compatibility identifiers, but register them only when unclaimed and remove them only while their command still points to this Classic installation.'
+          git push origin HEAD:classic-app-identity
