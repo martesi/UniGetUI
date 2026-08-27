@@ -94,6 +94,20 @@ Name: "Ukrainian"; MessagesFile: "compiler:Languages\Ukrainian.isl"
 #include "InstallerExtras\CustomMessages.iss"
 
 [Code]
+var
+  RegisterUniGetUIProtocol: Boolean;
+  RegisterPackageBundle: Boolean;
+
+function ShouldRegisterUniGetUIProtocol(): Boolean;
+begin
+  Result := RegisterUniGetUIProtocol;
+end;
+
+function ShouldRegisterPackageBundle(): Boolean;
+begin
+  Result := RegisterPackageBundle;
+end;
+
 procedure InitializeWizard;
 begin
   WizardForm.Bevel.Visible := False;
@@ -197,6 +211,12 @@ end;
 
 function InitializeSetup: Boolean;
 begin
+  // Do not steal shared compatibility handlers from an existing upstream installation.
+  RegisterUniGetUIProtocol := not RegKeyExists(HKA, 'Software\Classes\unigetui');
+  RegisterPackageBundle :=
+    not RegKeyExists(HKA, 'Software\Classes\UniGetUI.PackageBundle') and
+    not RegValueExists(HKA, 'Software\Classes\.ubundle', '');
+
   try
     if not CmdLineParamExists('/NoVCRedist') then
     begin
@@ -213,6 +233,41 @@ begin
 end;
 
 
+function ClassicOwnsRegistryCommand(const SubKey: String): Boolean;
+var
+  Command, ClassicExecutable: String;
+begin
+  Result := False;
+  if RegQueryStringValue(HKA, SubKey, '', Command) then
+  begin
+    ClassicExecutable := ExpandConstant('{app}\UniGetUI.exe');
+    Result := Pos(Lowercase(ClassicExecutable), Lowercase(Command)) > 0;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  BundleProgId: String;
+begin
+  if CurUninstallStep <> usUninstall then
+    Exit;
+
+  // Delete shared handlers only when their command still points to this Classic installation.
+  if ClassicOwnsRegistryCommand('Software\Classes\unigetui\shell\open\command') then
+    RegDeleteKeyIncludingSubkeys(HKA, 'Software\Classes\unigetui');
+
+  if ClassicOwnsRegistryCommand('Software\Classes\UniGetUI.PackageBundle\shell\open\command') then
+  begin
+    RegDeleteKeyIncludingSubkeys(HKA, 'Software\Classes\UniGetUI.PackageBundle');
+    if RegQueryStringValue(HKA, 'Software\Classes\.ubundle', '', BundleProgId) and
+       (CompareText(BundleProgId, 'UniGetUI.PackageBundle') = 0) then
+    begin
+      RegDeleteValue(HKA, 'Software\Classes\.ubundle', '');
+      RegDeleteKeyIfEmpty(HKA, 'Software\Classes\.ubundle');
+    end;
+  end;
+end;
+
 [Tasks]
 Name: "portableinstall"; Description: "{cm:PortInst}"; GroupDescription: "{cm:InstallType}"; Flags: unchecked exclusive
 Name: "regularinstall"; Description: "{cm:RegInst}"; GroupDescription: "{cm:InstallType}"; Flags: exclusive   
@@ -224,16 +279,16 @@ Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: binary; ValueName: "UniGetUIClassic"; ValueData: "03"; Flags: uninsdeletevalue; Tasks: regularinstall; Check: CmdLineParamExists('/NoRunOnStartup');
 
 // Register the unigetui:// deep link
-Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueData: "URL:UniGetUI Protocol"; Flags: uninsdeletekey; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\unigetui\DefaultIcon"; ValueType: "string"; ValueData: "{app}\{#MyAppExeName},0"; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\unigetui\shell\open\command"; ValueType: "string"; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: regularinstall;
+Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueData: "URL:UniGetUI Protocol"; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
+Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
+Root: HKA; Subkey: "Software\Classes\unigetui\DefaultIcon"; ValueType: "string"; ValueData: "{app}\{#MyAppExeName},0"; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
+Root: HKA; Subkey: "Software\Classes\unigetui\shell\open\command"; ValueType: "string"; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
 
 // Register the .ubundle file type
-Root: HKA; Subkey: "Software\Classes\.ubundle"; ValueType: string; ValueData: "UniGetUI.PackageBundle"; Flags: uninsdeletekey; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle"; ValueType: string; ValueData: {cm:PackageBundleName}; Flags: uninsdeletekey; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"; Flags: uninsdeletekey; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: regularinstall;
+Root: HKA; Subkey: "Software\Classes\.ubundle"; ValueType: string; ValueData: "UniGetUI.PackageBundle"; Tasks: regularinstall; Check: ShouldRegisterPackageBundle;
+Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle"; ValueType: string; ValueData: {cm:PackageBundleName}; Tasks: regularinstall; Check: ShouldRegisterPackageBundle;
+Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"; Tasks: regularinstall; Check: ShouldRegisterPackageBundle;
+Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: regularinstall; Check: ShouldRegisterPackageBundle;
 
 
 [Files]
