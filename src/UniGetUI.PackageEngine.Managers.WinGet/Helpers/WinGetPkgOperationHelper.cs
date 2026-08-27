@@ -63,14 +63,19 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         }
 
         // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
-        parameters.AddRange(
-            (package.OverridenOptions.Scope ?? options.InstallationScope) switch
-            {
-                PackageScope.User => ["--scope", "user"],
-                PackageScope.Machine => ["--scope", "machine"],
-                _ => [],
-            }
-        );
+        // WinGet_DropArchAndScope is set after an "update not applicable" result so the retry
+        // lets WinGet choose a compatible installer instead of repeating the same constraints.
+        if (!package.OverridenOptions.WinGet_DropArchAndScope)
+        {
+            parameters.AddRange(
+                (package.OverridenOptions.Scope ?? options.InstallationScope) switch
+                {
+                    PackageScope.User => ["--scope", "user"],
+                    PackageScope.Machine => ["--scope", "machine"],
+                    _ => [],
+                }
+            );
+        }
 
         if (
             operation is OperationType.Uninstall
@@ -148,15 +153,18 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             if (options.SkipHashCheck)
                 parameters.Add("--ignore-security-hash");
 
-            parameters.AddRange(
-                options.Architecture switch
-                {
-                    Architecture.x86 => ["--architecture", "x86"],
-                    Architecture.x64 => ["--architecture", "x64"],
-                    Architecture.arm64 => ["--architecture", "arm64"],
-                    _ => [],
-                }
-            );
+            if (!package.OverridenOptions.WinGet_DropArchAndScope)
+            {
+                parameters.AddRange(
+                    options.Architecture switch
+                    {
+                        Architecture.x86 => ["--architecture", "x86"],
+                        Architecture.x64 => ["--architecture", "x64"],
+                        Architecture.arm64 => ["--architecture", "arm64"],
+                        _ => [],
+                    }
+                );
+            }
         }
 
         try
@@ -276,20 +284,47 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             return OperationVeredict.Failure;
         }
 
-        if (uintCode is 0x8A15002B)
+        // WinGet (CLI/COM) reports "not applicable" as 0x8A15002B; bundled pinget instead exits
+        // non-zero with "No applicable installer found" in its output (#4998).
+        bool pingetReportedNotApplicable =
+            ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
+            && returnCode != 0
+            && processOutput.Any(line =>
+                line.Contains("No applicable installer found", StringComparison.OrdinalIgnoreCase)
+            );
+
+        if (uintCode is 0x8A15002B || pingetReportedNotApplicable)
         {
-            //if (Settings.Get(Settings.K.IgnoreUpdatesNotApplicable))
-            //{
+            if (
+                operation is OperationType.Update
+                && !package.OverridenOptions.WinGet_DropArchAndScope
+            )
+            {
+                var options = InstallOptionsFactory.LoadApplicable(package);
+                bool hasScope =
+                    (package.OverridenOptions.Scope ?? options.InstallationScope)
+                    is PackageScope.User or PackageScope.Machine;
+                bool hasArch =
+                    options.Architecture
+                    is Architecture.x86 or Architecture.x64 or Architecture.arm64;
+
+                if (hasScope || hasArch)
+                {
+                    Logger.Warn(
+                        $"Update for {package.Id} reported as not applicable; retrying without the scope/architecture constraints"
+                    );
+                    package.OverridenOptions.WinGet_DropArchAndScope = true;
+                    return OperationVeredict.AutoRetry;
+                }
+            }
+
+            if (operation is OperationType.Update)
+                SuppressPhantomUpgrade(package);
+
             Logger.Warn(
-                $"Ignoring update {package.Id} as the update is not applicable to the platform, and the user has enabled IgnoreUpdatesNotApplicable"
+                $"Update for {package.Id} is not applicable to this system, even without scope/architecture constraints"
             );
-            IgnoredUpdatesDatabase.Add(
-                IgnoredUpdatesDatabase.GetIgnoredIdForPackage(package),
-                package.VersionString
-            );
-            return OperationVeredict.Success;
-            //}
-            //return OperationVeredict.Failure;
+            return OperationVeredict.Failure;
         }
 
         if (uintCode is 0x8A15010D or 0x8A15004F or 0x8A15010E)
@@ -389,6 +424,18 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             Settings.K.WinGetUpgradeAttempts,
             id,
             $"{count}{AttemptSeparator}{version}"
+        );
+    }
+
+    // Mark the offered version as already having reached the stuck-update threshold (#5199).
+    public static void SuppressPhantomUpgrade(IPackage package)
+    {
+        if (IsUnknownVersion(package.NewVersionString))
+            return;
+        Settings.SetDictionaryItem<string, string>(
+            Settings.K.WinGetUpgradeAttempts,
+            package.Id,
+            $"{StuckUpgradeThreshold}{AttemptSeparator}{package.NewVersionString}"
         );
     }
 

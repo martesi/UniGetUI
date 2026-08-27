@@ -978,6 +978,179 @@ public sealed class WinGetManagerTests : IDisposable
         }
     }
 
+    [Fact]
+    public void WinGetUpdateNotApplicableRetriesOnceWithoutScopeAndArchitecture()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Klocman.BulkCrapUninstaller")
+            .WithVersion("6.1")
+            .WithNewVersion("6.2")
+            .Build();
+        package.OverridenOptions.Scope = PackageScope.Machine;
+        var options = new InstallOptions
+        {
+            Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
+        };
+
+        var firstAttempt = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+        Assert.Contains("--scope", firstAttempt);
+        Assert.Contains("--architecture", firstAttempt);
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            [],
+            unchecked((int)0x8A15002B)
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
+        Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
+
+        var retryAttempt = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+        Assert.DoesNotContain("--scope", retryAttempt);
+        Assert.DoesNotContain("--architecture", retryAttempt);
+    }
+
+    [Fact]
+    public void WinGetUpdateNotApplicableDoesNotRetryASecondTime()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Klocman.BulkCrapUninstaller")
+            .WithVersion("6.1")
+            .WithNewVersion("6.2")
+            .Build();
+        package.OverridenOptions.Scope = PackageScope.Machine;
+        package.OverridenOptions.WinGet_DropArchAndScope = true;
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            [],
+            unchecked((int)0x8A15002B)
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+    }
+
+    [Fact]
+    public void WinGetUpdateNotApplicableFailsWhenThereIsNothingToRelax()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            [],
+            unchecked((int)0x8A15002B)
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+    }
+
+    [Fact]
+    public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("JRSoftware.InnoSetup")
+            .WithVersion("6.7.1")
+            .WithNewVersion("6.7.3")
+            .Build();
+        package.OverridenOptions.Scope = PackageScope.Machine;
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            [
+                "Selecting applicable installer for this system...",
+                "Error upgrading JRSoftware.InnoSetup: No applicable installer found",
+            ],
+            1
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
+        Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
+    }
+
+    [Fact]
+    public void WinGetGenericPingetFailureDoesNotRetry()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("JRSoftware.InnoSetup")
+            .WithVersion("6.7.1")
+            .WithNewVersion("6.7.3")
+            .Build();
+        package.OverridenOptions.Scope = PackageScope.Machine;
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            ["error: download failed"],
+            1
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+    }
+
+    [Fact]
+    public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Hugin.Hugin")
+            .WithVersion("20.25.0")
+            .WithNewVersion("2025.0.1")
+            .Build();
+
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            [],
+            unchecked((int)0x8A15002B)
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+
+        var newerUpdate = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Hugin.Hugin")
+            .WithVersion("20.25.0")
+            .WithNewVersion("2026.0.0")
+            .Build();
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
+    }
+
     private static void SetCliToolKind(WinGet manager, WinGetCliToolKind kind)
     {
         typeof(WinGet)
