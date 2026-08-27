@@ -1,0 +1,44 @@
+name: Apply Classic app identity
+
+on:
+  push:
+    branches:
+      - classic-app-identity
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Apply Classic identity
+        shell: pwsh
+        run: ./scripts/apply-classic-identity.ps1
+
+      - name: Restore and build Windows solution
+        working-directory: src
+        shell: pwsh
+        run: |
+          dotnet restore UniGetUI.Windows.slnx
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Commit identity split
+        shell: pwsh
+        run: |
+          if (git diff --quiet) {
+            Write-Host 'No identity changes to commit.'
+            exit 0
+          }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add UniGetUI.iss src/UniGetUI.Core.Data/CoreData.cs
+          git commit -m 'fix(classic): split installed app identity' -m 'Give Classic its own installer, runtime, and writable-data identity while intentionally retaining the unigetui:// protocol and UniGetUI.PackageBundle compatibility registrations.'
+          git push origin HEAD:classic-app-identity
