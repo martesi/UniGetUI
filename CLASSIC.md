@@ -55,7 +55,7 @@ Classic is a separate installed application and is intended to coexist with upst
 
 Classic does not automatically move or copy upstream UniGetUI's writable data. An explicit import can be added later if needed without making the two applications share live state.
 
-The existing `unigetui://` protocol and `.ubundle`/`UniGetUI.PackageBundle` identifiers are intentionally retained for compatibility rather than renamed. These are shared Windows integration surfaces, so only one installed application can be the active handler at a time; they are not part of the isolated installer/runtime identity boundary.
+The existing `unigetui://` protocol and `.ubundle`/`UniGetUI.PackageBundle` identifiers are intentionally retained rather than renamed. They are shared compatibility surfaces, not isolated product identifiers. Classic registers them only when they are currently unclaimed, so installing Classic beside upstream does not replace upstream's active handler. On uninstall, Classic removes a shared handler only when its command still points into the Classic installation directory; if another installation has claimed the handler in the meantime, Classic leaves it untouched.
 
 The Classic installer also avoids broad image-name `taskkill` operations and does not run the old `--migrate-wingetui-to-unigetui` post-install migration, because either behavior could affect an upstream installation running alongside Classic.
 
