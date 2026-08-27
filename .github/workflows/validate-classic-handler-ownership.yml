@@ -54,7 +54,7 @@ jobs:
           if (Test-Path 'unigetui_bin') { Remove-Item 'unigetui_bin' -Recurse -Force }
           New-Item 'unigetui_bin' -ItemType Directory | Out-Null
           Copy-Item "$publishDir/*" 'unigetui_bin' -Recurse -Force
-          if (Test-Path 'unigetui_bin/Avalonia' -or Test-Path 'unigetui_bin/UniGetUI.Avalonia.exe') {
+          if ((Test-Path 'unigetui_bin/Avalonia') -or (Test-Path 'unigetui_bin/UniGetUI.Avalonia.exe')) {
             throw 'Avalonia was included in Classic validation output.'
           }
           Copy-Item 'unigetui_bin/UniGetUI.exe' 'unigetui_bin/WingetUI.exe' -Force
