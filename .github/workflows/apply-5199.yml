@@ -1,5 +1,6 @@
 name: Apply PR 5199 backport
 
+# Temporary validation workflow; remove before merging the backport PR.
 on:
   push:
     branches:
