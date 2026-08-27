@@ -31,309 +31,321 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
+          from textwrap import dedent, indent
 
           options_path = Path('src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs')
           helper_path = Path('src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs')
           tests_path = Path('src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs')
 
+          def line_index(lines, text, start=0):
+              for index in range(start, len(lines)):
+                  if lines[index].strip() == text:
+                      return index
+              raise SystemExit(f'line anchor not found: {text}')
+
+          def wrap_call(lines, marker, condition):
+              marker_index = next(
+                  (i for i, line in enumerate(lines) if marker in line),
+                  None,
+              )
+              if marker_index is None:
+                  raise SystemExit(f'call marker not found: {marker}')
+              start = marker_index
+              while start >= 0 and lines[start].strip() != 'parameters.AddRange(':
+                  start -= 1
+              if start < 0:
+                  raise SystemExit(f'parameters.AddRange start not found for: {marker}')
+              end = line_index(lines, ');', start + 1)
+              base_indent = lines[start][:-len(lines[start].lstrip())]
+              block = [base_indent + '    ' + line[len(base_indent):] for line in lines[start:end + 1]]
+              replacement = [
+                  base_indent + f'if ({condition})\n',
+                  base_indent + '{\n',
+                  *block,
+                  base_indent + '}\n',
+              ]
+              lines[start:end + 1] = replacement
+
           options = options_path.read_text(encoding='utf-8')
-          old = '''    public bool? WinGet_SpecifyVersion = null;
-              public bool Pip_BreakSystemPackages = false;
-          '''
-          new = '''    public bool? WinGet_SpecifyVersion = null;
-              public bool Pip_BreakSystemPackages = false;
-              public bool WinGet_DropArchAndScope = false;
-          '''
-          if old not in options:
-              raise SystemExit('OverridenInstallationOptions field anchor not found')
-          options = options.replace(old, new, 1)
+          field = '    public bool WinGet_DropArchAndScope = false;\n'
+          if field not in options:
+              anchor = '    public bool Pip_BreakSystemPackages = false;\n'
+              if anchor not in options:
+                  raise SystemExit('OverridenInstallationOptions field anchor not found')
+              options = options.replace(anchor, anchor + field, 1)
           old = 'Pip_BreakSystemPackages={Pip_BreakSystemPackages}>";'
           new = 'Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope}>";'
-          if old not in options:
+          if old in options:
+              options = options.replace(old, new, 1)
+          elif new not in options:
               raise SystemExit('OverridenInstallationOptions ToString anchor not found')
-          options = options.replace(old, new, 1)
           options_path.write_text(options, encoding='utf-8', newline='\n')
 
-          helper = helper_path.read_text(encoding='utf-8')
-          old = '''        // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
-              parameters.AddRange(
-                  (package.OverridenOptions.Scope ?? options.InstallationScope) switch
+          lines = helper_path.read_text(encoding='utf-8').splitlines(keepends=True)
+          if not any('WinGet_DropArchAndScope is set after an' in line for line in lines):
+              scope_comment = next(
+                  (i for i, line in enumerate(lines) if 'package.OverridenInstallationOptions.Scope is meaningless' in line),
+                  None,
+              )
+              if scope_comment is None:
+                  raise SystemExit('scope comment anchor not found')
+              scope_call = line_index(lines, 'parameters.AddRange(', scope_comment + 1)
+              scope_end = line_index(lines, ');', scope_call + 1)
+              base_indent = lines[scope_call][:-len(lines[scope_call].lstrip())]
+              original = [base_indent + '    ' + line[len(base_indent):] for line in lines[scope_call:scope_end + 1]]
+              lines[scope_call:scope_end + 1] = [
+                  base_indent + '// WinGet_DropArchAndScope is set after an "update not applicable" result so the retry\n',
+                  base_indent + '// lets WinGet choose a compatible installer instead of repeating the same constraints.\n',
+                  base_indent + 'if (!package.OverridenOptions.WinGet_DropArchAndScope)\n',
+                  base_indent + '{\n',
+                  *original,
+                  base_indent + '}\n',
+              ]
+
+              wrap_call(
+                  lines,
+                  'options.Architecture switch',
+                  '!package.OverridenOptions.WinGet_DropArchAndScope',
+              )
+
+          old_start = next(
+              (i for i, line in enumerate(lines) if line.strip() == 'if (uintCode is 0x8A15002B)'),
+              None,
+          )
+          if old_start is not None:
+              base_indent = lines[old_start][:-len(lines[old_start].lstrip())]
+              old_end = next(
+                  (
+                      i
+                      for i in range(old_start + 1, len(lines))
+                      if lines[i].strip() == '}'
+                      and lines[i][:-len(lines[i].lstrip())] == base_indent
+                  ),
+                  None,
+              )
+              if old_end is None:
+                  raise SystemExit('not-applicable block end not found')
+              replacement = indent(
+                  dedent('''
+                  // WinGet (CLI/COM) reports "not applicable" as 0x8A15002B; bundled pinget instead exits
+                  // non-zero with "No applicable installer found" in its output (#4998).
+                  bool pingetReportedNotApplicable =
+                      ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
+                      && returnCode != 0
+                      && processOutput.Any(line =>
+                          line.Contains("No applicable installer found", StringComparison.OrdinalIgnoreCase)
+                      );
+
+                  if (uintCode is 0x8A15002B || pingetReportedNotApplicable)
                   {
-                      PackageScope.User => ["--scope", "user"],
-                      PackageScope.Machine => ["--scope", "machine"],
-                      _ => [],
-                  }
-              );
-          '''
-          new = '''        // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
-              // WinGet_DropArchAndScope is set after an "update not applicable" result so the retry
-              // lets WinGet choose a compatible installer instead of repeating the same constraints.
-              if (!package.OverridenOptions.WinGet_DropArchAndScope)
-              {
-                  parameters.AddRange(
-                      (package.OverridenOptions.Scope ?? options.InstallationScope) switch
+                      // A forced scope/architecture may exclude the only installer. Retry once without
+                      // those constraints, matching WinGet's normal selection behavior (#4998).
+                      if (
+                          operation is OperationType.Update
+                          && !package.OverridenOptions.WinGet_DropArchAndScope
+                      )
                       {
-                          PackageScope.User => ["--scope", "user"],
-                          PackageScope.Machine => ["--scope", "machine"],
-                          _ => [],
-                      }
-                  );
-              }
-          '''
-          if old not in helper:
-              raise SystemExit('scope parameter anchor not found')
-          helper = helper.replace(old, new, 1)
+                          var options = InstallOptionsFactory.LoadApplicable(package);
+                          bool hasScope =
+                              (package.OverridenOptions.Scope ?? options.InstallationScope)
+                              is PackageScope.User or PackageScope.Machine;
+                          bool hasArch =
+                              options.Architecture
+                              is Architecture.x86 or Architecture.x64 or Architecture.arm64;
 
-          old = '''            parameters.AddRange(
-                  options.Architecture switch
+                          if (hasScope || hasArch)
+                          {
+                              Logger.Warn(
+                                  $"Update for {package.Id} reported as not applicable; retrying without the scope/architecture constraints"
+                              );
+                              package.OverridenOptions.WinGet_DropArchAndScope = true;
+                              return OperationVeredict.AutoRetry;
+                          }
+                      }
+
+                      if (operation is OperationType.Update)
+                          SuppressPhantomUpgrade(package);
+
+                      Logger.Warn(
+                          $"Update for {package.Id} is not applicable to this system, even without scope/architecture constraints"
+                      );
+                      return OperationVeredict.Failure;
+                  }
+                  ''').lstrip(),
+                  base_indent,
+              ).splitlines(keepends=True)
+              lines[old_start:old_end + 1] = replacement
+
+          if not any('public static void SuppressPhantomUpgrade' in line for line in lines):
+              insert_at = next(
+                  (i for i, line in enumerate(lines) if 'An update WinGet keeps offering even after enough' in line),
+                  None,
+              )
+              if insert_at is None:
+                  raise SystemExit('stuck-upgrade method anchor not found')
+              base_indent = lines[insert_at][:-len(lines[insert_at].lstrip())]
+              method = indent(
+                  dedent('''
+                  public static void SuppressPhantomUpgrade(IPackage package)
                   {
-                      Architecture.x86 => ["--architecture", "x86"],
-                      Architecture.x64 => ["--architecture", "x64"],
-                      Architecture.arm64 => ["--architecture", "arm64"],
-                      _ => [],
-                  }
-              );
-          '''
-          new = '''            if (!package.OverridenOptions.WinGet_DropArchAndScope)
-              {
-                  parameters.AddRange(
-                      options.Architecture switch
-                      {
-                          Architecture.x86 => ["--architecture", "x86"],
-                          Architecture.x64 => ["--architecture", "x64"],
-                          Architecture.arm64 => ["--architecture", "arm64"],
-                          _ => [],
-                      }
-                  );
-              }
-          '''
-          if old not in helper:
-              raise SystemExit('architecture parameter anchor not found')
-          helper = helper.replace(old, new, 1)
-
-          old = '''        if (uintCode is 0x8A15002B)
-              {
-                  //if (Settings.Get(Settings.K.IgnoreUpdatesNotApplicable))
-                  //{
-                  Logger.Warn(
-                      $"Ignoring update {package.Id} as the update is not applicable to the platform, and the user has enabled IgnoreUpdatesNotApplicable"
-                  );
-                  IgnoredUpdatesDatabase.Add(
-                      IgnoredUpdatesDatabase.GetIgnoredIdForPackage(package),
-                      package.VersionString
-                  );
-                  return OperationVeredict.Success;
-                  //}
-                  //return OperationVeredict.Failure;
-              }
-          '''
-          new = '''        // WinGet (CLI/COM) reports "not applicable" as 0x8A15002B; bundled pinget instead exits
-              // non-zero with "No applicable installer found" in its output (#4998).
-              bool pingetReportedNotApplicable =
-                  ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
-                  && returnCode != 0
-                  && processOutput.Any(line =>
-                      line.Contains("No applicable installer found", StringComparison.OrdinalIgnoreCase)
-                  );
-
-              if (uintCode is 0x8A15002B || pingetReportedNotApplicable)
-              {
-                  // A forced scope/architecture may exclude the only installer. Retry once without
-                  // those constraints, matching WinGet's normal selection behavior (#4998).
-                  if (
-                      operation is OperationType.Update
-                      && !package.OverridenOptions.WinGet_DropArchAndScope
-                  )
-                  {
-                      var options = InstallOptionsFactory.LoadApplicable(package);
-                      bool hasScope =
-                          (package.OverridenOptions.Scope ?? options.InstallationScope)
-                          is PackageScope.User or PackageScope.Machine;
-                      bool hasArch =
-                          options.Architecture
-                          is Architecture.x86 or Architecture.x64 or Architecture.arm64;
-
-                      if (hasScope || hasArch)
-                      {
-                          Logger.Warn(
-                              $"Update for {package.Id} reported as not applicable; retrying without the scope/architecture constraints"
-                          );
-                          package.OverridenOptions.WinGet_DropArchAndScope = true;
-                          return OperationVeredict.AutoRetry;
-                      }
+                      if (IsUnknownVersion(package.NewVersionString))
+                          return;
+                      Settings.SetDictionaryItem<string, string>(
+                          Settings.K.WinGetUpgradeAttempts,
+                          package.Id,
+                          $"{StuckUpgradeThreshold}{AttemptSeparator}{package.NewVersionString}"
+                      );
                   }
 
-                  if (operation is OperationType.Update)
-                      SuppressPhantomUpgrade(package);
+                  ''').lstrip(),
+                  base_indent,
+              ).splitlines(keepends=True)
+              method.insert(0, base_indent + '// Mark the offered version as already having reached the stuck-update threshold (#5199).\n')
+              lines[insert_at:insert_at] = method
 
-                  Logger.Warn(
-                      $"Update for {package.Id} is not applicable to this system, even without scope/architecture constraints"
-                  );
-                  return OperationVeredict.Failure;
-              }
-          '''
-          if old not in helper:
-              raise SystemExit('not-applicable result anchor not found')
-          helper = helper.replace(old, new, 1)
-
-          marker = '''    // An update WinGet keeps offering even after enough "successful" upgrades to it (#5158).
-              public static bool IsStuckUpgradeLoop(IPackage package)
-          '''
-          addition = '''    // Mark the offered version as already having reached the stuck-update threshold (#5199).
-              public static void SuppressPhantomUpgrade(IPackage package)
-              {
-                  if (IsUnknownVersion(package.NewVersionString))
-                      return;
-                  Settings.SetDictionaryItem<string, string>(
-                      Settings.K.WinGetUpgradeAttempts,
-                      package.Id,
-                      $"{StuckUpgradeThreshold}{AttemptSeparator}{package.NewVersionString}"
-                  );
-              }
-
-          '''
-          if marker not in helper:
-              raise SystemExit('stuck-upgrade method anchor not found')
-          helper = helper.replace(marker, addition + marker, 1)
-          helper_path.write_text(helper, encoding='utf-8', newline='\n')
+          helper_path.write_text(''.join(lines), encoding='utf-8', newline='\n')
 
           tests = tests_path.read_text(encoding='utf-8')
-          marker = '''    private static void SetCliToolKind(WinGet manager, WinGetCliToolKind kind)
-          '''
-          addition = '''    [Fact]
-              public void WinGetUpdateNotApplicableRetriesOnceWithoutScopeAndArchitecture()
-              {
-                  var manager = new WinGet();
-                  SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
-                  var package = new PackageBuilder()
-                      .WithManager(manager)
-                      .WithId("Klocman.BulkCrapUninstaller")
-                      .WithVersion("5.8")
-                      .WithNewVersion("5.9")
-                      .Build();
-                  var options = new InstallOptions
+          if 'WinGetUpdateNotApplicableSuppressesPhantomUpdate' not in tests:
+              marker = '    private static void SetCliToolKind(WinGet manager, WinGetCliToolKind kind)\n'
+              if marker not in tests:
+                  raise SystemExit('test insertion anchor not found')
+              block = indent(
+                  dedent('''
+                  [Fact]
+                  public void WinGetUpdateNotApplicableRetriesOnceWithoutScopeAndArchitecture()
                   {
-                      InstallationScope = PackageScope.Machine,
-                      Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
-                  };
+                      var manager = new WinGet();
+                      SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+                      var package = new PackageBuilder()
+                          .WithManager(manager)
+                          .WithId("Klocman.BulkCrapUninstaller")
+                          .WithVersion("5.8")
+                          .WithNewVersion("5.9")
+                          .Build();
+                      var options = new InstallOptions
+                      {
+                          InstallationScope = PackageScope.Machine,
+                          Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
+                      };
 
-                  var firstAttempt = manager.OperationHelper.GetParameters(
-                      package,
-                      options,
-                      OperationType.Update
-                  );
-                  Assert.Contains("--scope", firstAttempt);
-                  Assert.Contains("--architecture", firstAttempt);
+                      var firstAttempt = manager.OperationHelper.GetParameters(
+                          package,
+                          options,
+                          OperationType.Update
+                      );
+                      Assert.Contains("--scope", firstAttempt);
+                      Assert.Contains("--architecture", firstAttempt);
 
-                  var veredict = manager.OperationHelper.GetResult(
-                      package,
-                      OperationType.Update,
-                      [],
-                      unchecked((int)0x8A15002B)
-                  );
+                      var veredict = manager.OperationHelper.GetResult(
+                          package,
+                          OperationType.Update,
+                          [],
+                          unchecked((int)0x8A15002B)
+                      );
 
-                  OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
-                  Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
+                      OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
+                      Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
 
-                  var retryAttempt = manager.OperationHelper.GetParameters(
-                      package,
-                      options,
-                      OperationType.Update
-                  );
-                  Assert.DoesNotContain("--scope", retryAttempt);
-                  Assert.DoesNotContain("--architecture", retryAttempt);
-              }
+                      var retryAttempt = manager.OperationHelper.GetParameters(
+                          package,
+                          options,
+                          OperationType.Update
+                      );
+                      Assert.DoesNotContain("--scope", retryAttempt);
+                      Assert.DoesNotContain("--architecture", retryAttempt);
+                  }
 
-              [Fact]
-              public void WinGetUpdateNotApplicableDoesNotRetryASecondTime()
-              {
-                  var manager = new WinGet();
-                  SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
-                  var package = new PackageBuilder()
-                      .WithManager(manager)
-                      .WithId("Klocman.BulkCrapUninstaller")
-                      .WithVersion("5.8")
-                      .WithNewVersion("5.9")
-                      .Build();
-                  package.OverridenOptions.WinGet_DropArchAndScope = true;
-
-                  var veredict = manager.OperationHelper.GetResult(
-                      package,
-                      OperationType.Update,
-                      [],
-                      unchecked((int)0x8A15002B)
-                  );
-
-                  OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
-              }
-
-              [Fact]
-              public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
-              {
-                  var manager = new WinGet();
-                  SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
-                  var package = new PackageBuilder()
-                      .WithManager(manager)
-                      .WithId("Contoso.Tool")
-                      .WithVersion("1.0.0")
-                      .WithNewVersion("2.0.0")
-                      .Build();
-                  var options = new InstallOptions
+                  [Fact]
+                  public void WinGetUpdateNotApplicableDoesNotRetryASecondTime()
                   {
-                      InstallationScope = PackageScope.Machine,
-                      Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
-                  };
-                  _ = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+                      var manager = new WinGet();
+                      SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+                      var package = new PackageBuilder()
+                          .WithManager(manager)
+                          .WithId("Klocman.BulkCrapUninstaller")
+                          .WithVersion("5.8")
+                          .WithNewVersion("5.9")
+                          .Build();
+                      package.OverridenOptions.WinGet_DropArchAndScope = true;
 
-                  var veredict = manager.OperationHelper.GetResult(
-                      package,
-                      OperationType.Update,
-                      ["No applicable installer found"],
-                      1
-                  );
+                      var veredict = manager.OperationHelper.GetResult(
+                          package,
+                          OperationType.Update,
+                          [],
+                          unchecked((int)0x8A15002B)
+                      );
 
-                  OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
-                  Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
-              }
+                      OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+                  }
 
-              [Fact]
-              public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
-              {
-                  var manager = new WinGet();
-                  SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
-                  var package = new PackageBuilder()
-                      .WithManager(manager)
-                      .WithId("Hugin.Hugin")
-                      .WithVersion("20.25.0")
-                      .WithNewVersion("2025.0.1")
-                      .Build();
+                  [Fact]
+                  public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
+                  {
+                      var manager = new WinGet();
+                      SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+                      var package = new PackageBuilder()
+                          .WithManager(manager)
+                          .WithId("Contoso.Tool")
+                          .WithVersion("1.0.0")
+                          .WithNewVersion("2.0.0")
+                          .Build();
+                      var options = new InstallOptions
+                      {
+                          InstallationScope = PackageScope.Machine,
+                          Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
+                      };
+                      _ = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
 
-                  Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+                      var veredict = manager.OperationHelper.GetResult(
+                          package,
+                          OperationType.Update,
+                          ["No applicable installer found"],
+                          1
+                      );
 
-                  var veredict = manager.OperationHelper.GetResult(
-                      package,
-                      OperationType.Update,
-                      [],
-                      unchecked((int)0x8A15002B)
-                  );
+                      OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
+                      Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
+                  }
 
-                  OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
-                  Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+                  [Fact]
+                  public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
+                  {
+                      var manager = new WinGet();
+                      SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+                      var package = new PackageBuilder()
+                          .WithManager(manager)
+                          .WithId("Hugin.Hugin")
+                          .WithVersion("20.25.0")
+                          .WithNewVersion("2025.0.1")
+                          .Build();
 
-                  var newerUpdate = new PackageBuilder()
-                      .WithManager(manager)
-                      .WithId("Hugin.Hugin")
-                      .WithVersion("20.25.0")
-                      .WithNewVersion("2026.0.0")
-                      .Build();
-                  Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
-              }
+                      Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
 
-          '''
-          if marker not in tests:
-              raise SystemExit('test insertion anchor not found')
-          tests = tests.replace(marker, addition + marker, 1)
-          tests_path.write_text(tests, encoding='utf-8', newline='\n')
+                      var veredict = manager.OperationHelper.GetResult(
+                          package,
+                          OperationType.Update,
+                          [],
+                          unchecked((int)0x8A15002B)
+                      );
+
+                      OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+                      Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+
+                      var newerUpdate = new PackageBuilder()
+                          .WithManager(manager)
+                          .WithId("Hugin.Hugin")
+                          .WithVersion("20.25.0")
+                          .WithNewVersion("2026.0.0")
+                          .Build();
+                      Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
+                  }
+
+                  ''').lstrip(),
+                  '    ',
+              )
+              tests = tests.replace(marker, block + marker, 1)
+              tests_path.write_text(tests, encoding='utf-8', newline='\n')
           PY
 
           git add \
