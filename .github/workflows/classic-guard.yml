@@ -28,6 +28,18 @@ jobs:
           set -euo pipefail
           grep -q '<BundleModernApp>false</BundleModernApp>' src/Directory.Build.targets
 
+      - name: Verify Classic always launches WinUI
+        shell: bash
+        run: |
+          set -euo pipefail
+          entrypoint='src/UniGetUI/EntryPoint.cs'
+          grep -Fq 'UniGetUI Classic is WinUI-only.' "$entrypoint"
+          grep -Fq 'CoreData.WasDaemon = CoreData.IsDaemon = args.Contains(CLIHandler.DAEMON);' "$entrypoint"
+          if grep -Fq 'ModernAppLauncher.Launch(args)' "$entrypoint"; then
+            echo 'Classic entry point must not hand UI startup to the unbundled Avalonia frontend.' >&2
+            exit 1
+          fi
+
       - name: Verify Classic updater identity
         shell: bash
         run: |
