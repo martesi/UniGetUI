@@ -59,3 +59,10 @@ backports:
     status: applied-semantic
     class: frontend-selection
     reason: Upstream retired the Classic frontend entirely. Classic preserves WinUI as its sole frontend, so the semantic backport removes the obsolete UseClassicMode selector while retaining legacy settings and launcher helpers for compatibility and lower maintenance delta.
+
+downstream_patches:
+  - id: sqlitepclraw-ghsa-2m69-gcr7-jv3q
+    issue: 5
+    status: applied
+    class: security-hardening
+    reason: Overrides the SQLitePCLRaw bundle to 2.1.13 because Pinget 0.9.0 transitively resolves vulnerable SQLitePCLRaw.lib.e_sqlite3 2.1.11 through Microsoft.Data.Sqlite 10.0.7. Keep only until upstream or Pinget removes the vulnerable resolution.
