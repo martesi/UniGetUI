@@ -59,6 +59,26 @@ jobs:
       working-directory: src
       run: dotnet restore UniGetUI.Windows.slnx
 
+    - name: Verify patched SQLitePCLRaw dependency
+      working-directory: src
+      shell: pwsh
+      run: |
+        $Project = 'UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj'
+        $Packages = dotnet list $Project package --include-transitive | Out-String
+        $Vulnerabilities = dotnet list $Project package --vulnerable --include-transitive | Out-String
+        Write-Host $Packages
+        Write-Host $Vulnerabilities
+
+        if ($Packages -match 'SQLitePCLRaw\.lib\.e_sqlite3\s+2\.1\.11') {
+          throw 'Vulnerable SQLitePCLRaw.lib.e_sqlite3 2.1.11 is still resolved.'
+        }
+        if ($Packages -notmatch 'SQLitePCLRaw\.lib\.e_sqlite3\s+2\.1\.13') {
+          throw 'Expected patched SQLitePCLRaw.lib.e_sqlite3 2.1.13 was not resolved.'
+        }
+        if ($Vulnerabilities -match 'GHSA-2m69-gcr7-jv3q') {
+          throw 'GHSA-2m69-gcr7-jv3q is still reported by NuGet.'
+        }
+
     - name: Check whitespace formatting
       run: dotnet format whitespace src --folder --verify-no-changes --verbosity minimal
 
