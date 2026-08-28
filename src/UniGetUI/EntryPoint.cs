@@ -58,12 +58,10 @@ namespace UniGetUI
                     Environment.ExitCode = 0;
                     return;
                 }
-                else if (!ModernAppLauncher.IsClassicModeEnabled())
-                {
-                    ModernAppLauncher.Launch(args);
-                }
                 else
                 {
+                    // UniGetUI Classic is WinUI-only. The downstream build intentionally does not
+                    // bundle the Avalonia frontend, so never hand UI startup to ModernAppLauncher.
                     CoreData.WasDaemon = CoreData.IsDaemon = args.Contains(CLIHandler.DAEMON);
                     _ = AsyncMain();
                 }
