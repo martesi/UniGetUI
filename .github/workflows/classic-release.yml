@@ -1,0 +1,195 @@
+name: Classic Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Numeric Classic version, e.g. 2026.2.1.1'
+        required: true
+        type: string
+      draft:
+        description: 'Create the GitHub Release as a draft'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Validate version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ inputs.version }}'
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Classic release versions must be numeric four-part versions such as 2026.2.1.1.' >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: validate
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Stamp Classic version
+        shell: pwsh
+        run: ./scripts/set-version.ps1 -Version '${{ needs.validate.outputs.version }}'
+
+      - name: Restore
+        working-directory: src
+        shell: pwsh
+        run: dotnet restore UniGetUI.Windows.slnx /p:Platform=${{ matrix.platform }}
+
+      - name: Test package engine
+        if: matrix.platform == 'x64'
+        working-directory: src
+        shell: pwsh
+        run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64
+
+      - name: Publish WinUI Classic
+        shell: pwsh
+        run: |
+          [xml]$props = Get-Content 'src/Directory.Build.props'
+          $portable = @($props.Project.PropertyGroup | Where-Object { $_.PortableTargetFramework } | Select-Object -First 1).PortableTargetFramework
+          $windows = @($props.Project.PropertyGroup | Where-Object { $_.WindowsTargetPlatformVersion } | Select-Object -First 1).WindowsTargetPlatformVersion
+          if ([string]::IsNullOrWhiteSpace($portable) -or [string]::IsNullOrWhiteSpace($windows)) {
+            throw 'Could not resolve the Windows target framework.'
+          }
+
+          $platform = '${{ matrix.platform }}'
+          $tfm = "$portable-windows$windows"
+          dotnet publish src/UniGetUI/UniGetUI.csproj `
+            /p:Configuration=Release `
+            /p:Platform=$platform `
+            /p:RuntimeIdentifier=win-$platform `
+            /p:BundleModernApp=false `
+            --verbosity minimal
+          if ($LASTEXITCODE -ne 0) { throw 'WinUI Classic publish failed.' }
+
+          $publishDir = "src/UniGetUI/bin/$platform/Release/$tfm/win-$platform/publish"
+          if (-not (Test-Path $publishDir)) { throw "Publish directory not found: $publishDir" }
+          if (Test-Path 'unigetui_bin') { Remove-Item 'unigetui_bin' -Recurse -Force }
+          New-Item 'unigetui_bin' -ItemType Directory | Out-Null
+          Copy-Item "$publishDir/*" 'unigetui_bin' -Recurse -Force
+
+          if (Test-Path 'unigetui_bin/Avalonia') {
+            throw 'Classic invariant violated: Avalonia directory was included in publish output.'
+          }
+          if (Test-Path 'unigetui_bin/UniGetUI.Avalonia.exe') {
+            throw 'Classic invariant violated: Avalonia executable was included in publish output.'
+          }
+
+          Copy-Item 'unigetui_bin/UniGetUI.exe' 'unigetui_bin/WingetUI.exe' -Force
+          ./scripts/refresh-integrity-tree.ps1 -Path $PWD/unigetui_bin -FailOnUnexpectedFiles
+
+      - name: Build unsigned installer
+        shell: pwsh
+        run: |
+          $platform = '${{ matrix.platform }}'
+          $issPath = 'UniGetUI.iss'
+          $original = Get-Content $issPath -Raw
+          New-Item output -ItemType Directory -Force | Out-Null
+
+          try {
+            $unsigned = $original -Replace '(?m)^SignTool=.*$', '; SignTool disabled for UniGetUI Classic unsigned releases'
+            $unsigned = $unsigned -Replace '(?m)^SignedUninstaller=yes', 'SignedUninstaller=no'
+            Set-Content $issPath $unsigned -NoNewline
+            & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' $issPath /F"UniGetUI.Installer.$platform" /O"$PWD\output"
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          }
+          finally {
+            Set-Content $issPath $original -NoNewline
+          }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: classic-installer-${{ matrix.platform }}
+          path: output/UniGetUI.Installer.${{ matrix.platform }}.exe
+          if-no-files-found: error
+
+  release:
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: classic-installer-*
+          path: release
+          merge-multiple: true
+
+      - name: Generate checksums and productinfo
+        shell: pwsh
+        run: |
+          $version = '${{ needs.validate.outputs.version }}'
+          $repo = '${{ github.repository }}'
+          $tag = "v$version"
+          $files = @()
+          $checksumLines = @()
+
+          foreach ($arch in @('x64', 'arm64')) {
+            $name = "UniGetUI.Installer.$arch.exe"
+            $path = Join-Path 'release' $name
+            if (-not (Test-Path $path)) { throw "Missing release installer: $name" }
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $checksumLines += "$hash  $name"
+            $files += [ordered]@{
+              Arch = $arch
+              Type = 'exe'
+              Url = "https://github.com/$repo/releases/download/$tag/$name"
+              Hash = $hash
+            }
+          }
+
+          $manifest = [ordered]@{
+            'martesi.UniGetUI.Classic' = [ordered]@{
+              Current = [ordered]@{
+                Version = $version
+                Files = $files
+              }
+            }
+          }
+
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content 'release/productinfo.json' -Encoding utf8NoBOM
+          $checksumLines | Set-Content 'release/checksums.txt' -Encoding utf8NoBOM
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version='${{ needs.validate.outputs.version }}'
+          draft='${{ inputs.draft }}'
+          args=(release create "v$version" --repo '${{ github.repository }}' --title "UniGetUI Classic v$version")
+          if [[ "$draft" == 'true' ]]; then
+            args+=(--draft)
+          fi
+          args+=(release/UniGetUI.Installer.x64.exe release/UniGetUI.Installer.arm64.exe release/productinfo.json release/checksums.txt)
+          gh "${args[@]}"
