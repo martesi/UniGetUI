@@ -26,5 +26,7 @@
     <ItemGroup>
         <PackageReference Include="Devolutions.Pinget.Core" Version="0.9.0" />
         <PackageReference Include="PhotoSauce.MagicScaler" Version="0.15.0" />
+        <!-- Security override for GHSA-2m69-gcr7-jv3q inherited through Microsoft.Data.Sqlite. -->
+        <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
     </ItemGroup>
 </Project>
