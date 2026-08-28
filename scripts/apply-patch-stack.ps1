@@ -55,55 +55,9 @@ if (-not (Test-Path -LiteralPath $worktreeParent -PathType Container)) {
     New-Item -ItemType Directory -Path $worktreeParent -Force | Out-Null
 }
 
-function Repair-InstallerCrlfPostimage {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $PatchPath,
-
-        [Parameter(Mandatory = $true)]
-        [string] $ReplayWorktree
-    )
-
-    $patchText = [System.IO.File]::ReadAllText($PatchPath)
-    $postimageMatch = [regex]::Match(
-        $patchText,
-        '(?m)^diff --git a/UniGetUI\.iss b/UniGetUI\.iss\r?\nindex [0-9a-f]+\.\.([0-9a-f]+) '
-    )
-    if (-not $postimageMatch.Success) {
-        return
-    }
-
-    # git-format-patch records the exact postimage blob, but this checked-in mail
-    # has LF-normalized hunk lines while the Inno Setup source is CRLF. Applying
-    # that mail textually therefore creates a mixed-EOL blob. Restore the source
-    # file's CRLF form, amend the same mail commit, then require its blob to match
-    # the postimage hash carried by the patch itself.
-    $installerRelativePath = 'UniGetUI.iss'
-    $installerPath = Join-Path $ReplayWorktree $installerRelativePath
-    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-    $installerText = [System.IO.File]::ReadAllText($installerPath, $strictUtf8)
-    $lfText = $installerText.Replace("`r`n", "`n").Replace("`r", "`n")
-    $crlfText = $lfText.Replace("`n", "`r`n")
-
-    if ($installerText -cne $crlfText) {
-        Write-Host "Restoring CRLF postimage for $installerRelativePath"
-        [System.IO.File]::WriteAllText($installerPath, $crlfText, $utf8NoBom)
-        [void] (Invoke-PatchStackGit -Repository $ReplayWorktree -Arguments @('add', '--', $installerRelativePath))
-        [void] (Invoke-PatchStackGit -Repository $ReplayWorktree -Arguments @('commit', '--amend', '--no-edit', '--no-gpg-sign'))
-    }
-
-    $expectedBlobPrefix = $postimageMatch.Groups[1].Value
-    $actualBlob = Invoke-PatchStackGitText -Repository $ReplayWorktree -Arguments @('rev-parse', "HEAD:$installerRelativePath")
-    if (-not $actualBlob.StartsWith($expectedBlobPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Installer replay blob $actualBlob does not match patch postimage $expectedBlobPrefix"
-    }
-}
-
 try {
     Write-Host "Creating clean replay worktree at $worktree"
-    # Exact replay must not depend on a host/global core.autocrlf setting. Disable
-    # conversion for the initial checkout as well as for the replay worktree.
+    # Exact replay must not depend on a host/global core.autocrlf setting.
     [void] (Invoke-PatchStackGit -Repository $repoRoot -Arguments @('-c', 'core.autocrlf=false', 'worktree', 'add', '--detach', $worktree, $baseCommit))
     [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'core.autocrlf', 'false'))
     # git am creates new commits and therefore needs a committer identity even
@@ -114,12 +68,7 @@ try {
     foreach ($entry in $series) {
         Write-Host "Applying $($entry.RelativePath)"
         try {
-            # The Classic installer is intentionally CRLF while the rest of the
-            # repository is LF. Keep git am --3way as the primary path, retain
-            # CR characters when present in a mail, and ignore only line-ending
-            # whitespace while matching a normalized mail.
             [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('am', '--3way', '--keep-cr', '--ignore-whitespace', $entry.FullPath))
-            Repair-InstallerCrlfPostimage -PatchPath $entry.FullPath -ReplayWorktree $worktree
         }
         catch {
             try {
