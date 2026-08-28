@@ -40,6 +40,15 @@ jobs:
             exit 1
           fi
 
+      - name: Verify Classic exposes no frontend switch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R -Fq 'SettingName="UseClassicMode"' src/UniGetUI --include='*.xaml'; then
+            echo 'Classic is WinUI-only and must not expose a frontend-selection switch.' >&2
+            exit 1
+          fi
+
       - name: Verify Classic updater identity
         shell: bash
         run: |
