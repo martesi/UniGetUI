@@ -53,3 +53,9 @@ backports:
     status: skipped
     class: avalonia-orchestration
     reason: Avalonia-only regression. Classic's UninstallThenReinstall and UninstallThenUpdate already chain one InstallPackageOperation behind the uninstall prerequisite and do not launch the uninstall separately, so neither #5077 defect is present.
+
+  - commit: 4bcd5d0c2a84884dd07eb2eb90732864c3be00fe
+    upstream_pr: 4959
+    status: applied-semantic
+    class: frontend-selection
+    reason: Upstream retired the Classic frontend entirely. Classic preserves WinUI as its sole frontend, so the semantic backport removes the obsolete UseClassicMode selector while retaining legacy settings and launcher helpers for compatibility and lower maintenance delta.
