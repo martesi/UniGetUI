@@ -1,0 +1,56 @@
+From 9105539693a89636c4874723fea4be1cefa75127 Mon Sep 17 00:00:00 2001
+From: Martes <96113508+martesi@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 19:27:29 +0800
+Subject: [PATCH] security: harden the inherited SQLitePCLRaw bundle
+
+Classic-Source-Commit: 56c75284dbe28d917f6ccab2d602fde6039c8703
+Classic-Source-Commit: a7ed4ce98246c829adc34edb5f765b1e0161c0af
+Classic-Source-Commit: 5fbf3dea356a3b61319c44d8740b20e523f00b1e
+---
+ .github/workflows/dotnet-test.yml             | 20 +++++++++++++++++++
+ ...GetUI.PackageEngine.Managers.WinGet.csproj |  2 ++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/.github/workflows/dotnet-test.yml b/.github/workflows/dotnet-test.yml
+index f5fb5b5b7..d83d40a0c 100644
+--- a/.github/workflows/dotnet-test.yml
++++ b/.github/workflows/dotnet-test.yml
+@@ -59,6 +59,26 @@ jobs:
+       working-directory: src
+       run: dotnet restore UniGetUI.Windows.slnx
+ 
++    - name: Verify patched SQLitePCLRaw dependency
++      working-directory: src
++      shell: pwsh
++      run: |
++        $Project = 'UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj'
++        $Packages = dotnet list $Project package --include-transitive | Out-String
++        $Vulnerabilities = dotnet list $Project package --vulnerable --include-transitive | Out-String
++        Write-Host $Packages
++        Write-Host $Vulnerabilities
++
++        if ($Packages -match 'SQLitePCLRaw\.lib\.e_sqlite3\s+2\.1\.11') {
++          throw 'Vulnerable SQLitePCLRaw.lib.e_sqlite3 2.1.11 is still resolved.'
++        }
++        if ($Packages -notmatch 'SQLitePCLRaw\.lib\.e_sqlite3\s+2\.1\.13') {
++          throw 'Expected patched SQLitePCLRaw.lib.e_sqlite3 2.1.13 was not resolved.'
++        }
++        if ($Vulnerabilities -match 'GHSA-2m69-gcr7-jv3q') {
++          throw 'GHSA-2m69-gcr7-jv3q is still reported by NuGet.'
++        }
++
+     - name: Check whitespace formatting
+       run: dotnet format whitespace src --folder --verify-no-changes --verbosity minimal
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj b/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
+index f90f9bebb..67e1791f1 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
+@@ -26,5 +26,7 @@
+     <ItemGroup>
+         <PackageReference Include="Devolutions.Pinget.Core" Version="0.9.0" />
+         <PackageReference Include="PhotoSauce.MagicScaler" Version="0.15.0" />
++        <!-- Security override for GHSA-2m69-gcr7-jv3q inherited through Microsoft.Data.Sqlite. -->
++        <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+     </ItemGroup>
+ </Project>

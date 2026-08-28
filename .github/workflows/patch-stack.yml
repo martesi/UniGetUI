@@ -1,0 +1,41 @@
+name: Classic patch stack
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'maintenance/upstream-base.json'
+      - 'maintenance/patch-stack.json'
+      - 'maintenance/patches/**'
+      - 'scripts/patch-stack-common.ps1'
+      - 'scripts/apply-patch-stack.ps1'
+      - 'scripts/verify-patch-stack.ps1'
+      - '.github/workflows/patch-stack.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'maintenance/upstream-base.json'
+      - 'maintenance/patch-stack.json'
+      - 'maintenance/patches/**'
+      - 'scripts/patch-stack-common.ps1'
+      - 'scripts/apply-patch-stack.ps1'
+      - 'scripts/verify-patch-stack.ps1'
+      - '.github/workflows/patch-stack.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay-equivalence:
+    name: Replay upstream base and Classic patch series
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact source-tree equivalence
+        shell: pwsh
+        run: ./scripts/verify-patch-stack.ps1

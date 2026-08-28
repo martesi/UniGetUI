@@ -1,0 +1,30 @@
+From c6140bc9019955489caa1183d3bdbcdd65256afd Mon Sep 17 00:00:00 2001
+From: Martes <96113508+martesi@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 19:27:26 +0800
+Subject: [PATCH] classic: adapt operation scope selection for WinUI
+
+Classic-Source-Commit: b91f8d8581a6348c01bf439cc517fdface1a0a24
+---
+ .../Pages/DialogPages/InstallOptions_Package.xaml.cs     | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+index 648cd3244..0a291a56e 100644
+--- a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
++++ b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+@@ -280,7 +280,14 @@ namespace UniGetUI.Interface.Dialogs
+                         Package.Manager.Capabilities.SupportsCustomVersions
+                         || Package.Manager.Capabilities.SupportsPreRelease
+                     );
+-                ScopeCombo.IsEnabled = Package.Manager.Capabilities.SupportsCustomScopes;
++                ScopeCombo.IsEnabled =
++                    Package.Manager.Capabilities.SupportsCustomScopes
++                    && operation switch
++                    {
++                        OperationType.Update => Package.Manager.Capabilities.SupportsCustomScopesOnUpdate,
++                        OperationType.Uninstall => Package.Manager.Capabilities.SupportsCustomScopesOnUninstall,
++                        _ => true,
++                    };
+                 ResetDir.IsEnabled = Package.Manager.Capabilities.SupportsCustomLocations;
+                 SelectDir.IsEnabled = Package.Manager.Capabilities.SupportsCustomLocations;
+             }

@@ -1,0 +1,306 @@
+From 9f40a91a759207707d10ecadb930e2218945685f Mon Sep 17 00:00:00 2001
+From: Gabriel Dufresne <78387669+GabrielDuf@users.noreply.github.com>
+Date: Thu, 25 Jun 2026 11:52:27 -0400
+Subject: [PATCH] backport: retry non-applicable WinGet updates
+
+Upstream-Commit: 249cc4d0d4c947dbe03b998ff392933f8aab15b6
+
+Upstream-PR: Devolutions/UniGetUI#4998
+---
+ .../OverridenInstallationOptions.cs           |   3 +-
+ .../Helpers/WinGetPkgOperationHelper.cs       |  89 +++++++----
+ .../WinGetManagerTests.cs                     | 138 ++++++++++++++++++
+ 3 files changed, 199 insertions(+), 31 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+index 85e07d2a6..3346cd642 100644
+--- a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
++++ b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+@@ -7,6 +7,7 @@ public struct OverridenInstallationOptions
+     public bool PowerShell_DoNotSetScopeParameter = false;
+     public bool? WinGet_SpecifyVersion = null;
+     public bool Pip_BreakSystemPackages = false;
++    public bool WinGet_DropArchAndScope = false;
+ 
+     public OverridenInstallationOptions(string? scope = null, bool? runAsAdministrator = null)
+     {
+@@ -16,6 +17,6 @@ public struct OverridenInstallationOptions
+ 
+     public override string ToString()
+     {
+-        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};Pip_BreakSystemPackages={Pip_BreakSystemPackages}>";
++        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope}>";
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 3e23d7bbd..8560b15ff 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -4,7 +4,6 @@ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
+-using UniGetUI.PackageEngine.Classes.Packages.Classes;
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.PackageClasses;
+@@ -63,14 +62,18 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         }
+ 
+         // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
+-        parameters.AddRange(
+-            (package.OverridenOptions.Scope ?? options.InstallationScope) switch
+-            {
+-                PackageScope.User => ["--scope", "user"],
+-                PackageScope.Machine => ["--scope", "machine"],
+-                _ => [],
+-            }
+-        );
++        // WinGet_DropArchAndScope is set after an "update not applicable" failure to retry without the scope/architecture constraints.
++        if (!package.OverridenOptions.WinGet_DropArchAndScope)
++        {
++            parameters.AddRange(
++                (package.OverridenOptions.Scope ?? options.InstallationScope) switch
++                {
++                    PackageScope.User => ["--scope", "user"],
++                    PackageScope.Machine => ["--scope", "machine"],
++                    _ => [],
++                }
++            );
++        }
+ 
+         if (
+             operation is OperationType.Uninstall
+@@ -148,15 +151,18 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             if (options.SkipHashCheck)
+                 parameters.Add("--ignore-security-hash");
+ 
+-            parameters.AddRange(
+-                options.Architecture switch
+-                {
+-                    Architecture.x86 => ["--architecture", "x86"],
+-                    Architecture.x64 => ["--architecture", "x64"],
+-                    Architecture.arm64 => ["--architecture", "arm64"],
+-                    _ => [],
+-                }
+-            );
++            if (!package.OverridenOptions.WinGet_DropArchAndScope)
++            {
++                parameters.AddRange(
++                    options.Architecture switch
++                    {
++                        Architecture.x86 => ["--architecture", "x86"],
++                        Architecture.x64 => ["--architecture", "x64"],
++                        Architecture.arm64 => ["--architecture", "arm64"],
++                        _ => [],
++                    }
++                );
++            }
+         }
+ 
+         try
+@@ -276,20 +282,43 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             return OperationVeredict.Failure;
+         }
+ 
+-        if (uintCode is 0x8A15002B)
+-        {
+-            //if (Settings.Get(Settings.K.IgnoreUpdatesNotApplicable))
+-            //{
+-            Logger.Warn(
+-                $"Ignoring update {package.Id} as the update is not applicable to the platform, and the user has enabled IgnoreUpdatesNotApplicable"
++        // WinGet (CLI/COM) reports "not applicable" as 0x8A15002B; bundled pinget instead exits
++        // non-zero with "No applicable installer found" in its output.
++        bool pingetReportedNotApplicable =
++            ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
++            && returnCode != 0
++            && processOutput.Any(line =>
++                line.Contains("No applicable installer found", StringComparison.OrdinalIgnoreCase)
+             );
+-            IgnoredUpdatesDatabase.Add(
+-                IgnoredUpdatesDatabase.GetIgnoredIdForPackage(package),
+-                package.VersionString
++
++        if (uintCode is 0x8A15002B || pingetReportedNotApplicable)
++        { // The update is not applicable to the platform
++            // The scope/architecture we forced may exclude the only installer the package ships
++            // (e.g. forcing --architecture x64 on a package that only has an x86 installer). Retry
++            // once letting the package manager pick freely, matching what the CLI does by default.
++            if (operation is OperationType.Update && !package.OverridenOptions.WinGet_DropArchAndScope)
++            {
++                var options = InstallOptionsFactory.LoadApplicable(package);
++                bool hasScope =
++                    (package.OverridenOptions.Scope ?? options.InstallationScope)
++                    is PackageScope.User or PackageScope.Machine;
++                bool hasArch =
++                    options.Architecture is Architecture.x86 or Architecture.x64 or Architecture.arm64;
++
++                if (hasScope || hasArch)
++                {
++                    Logger.Warn(
++                        $"Update for {package.Id} reported as not applicable; retrying without the scope/architecture constraints"
++                    );
++                    package.OverridenOptions.WinGet_DropArchAndScope = true;
++                    return OperationVeredict.AutoRetry;
++                }
++            }
++
++            Logger.Warn(
++                $"Update for {package.Id} is not applicable to this system, even without scope/architecture constraints"
+             );
+-            return OperationVeredict.Success;
+-            //}
+-            //return OperationVeredict.Failure;
++            return OperationVeredict.Failure;
+         }
+ 
+         if (uintCode is 0x8A15010D or 0x8A15004F or 0x8A15010E)
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index 5f0749343..97d89f462 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -978,6 +978,144 @@ public sealed class WinGetManagerTests : IDisposable
+         }
+     }
+ 
++    [Fact]
++    public void WinGetUpdateNotApplicableRetriesOnceWithoutScopeAndArchitecture()
++    {
++        // Regression test for #4954: a package whose only installer is x86 (e.g. Bulk Crap
++        // Uninstaller) reports "update not applicable" when we force --architecture/--scope.
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Klocman.BulkCrapUninstaller")
++            .WithVersion("6.1")
++            .WithNewVersion("6.2")
++            .Build();
++        package.OverridenOptions.Scope = PackageScope.Machine;
++        var options = new InstallOptions { Architecture = "x64" };
++
++        // The forced constraints are present on the first attempt.
++        var firstAttempt = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        Assert.Contains("--scope", firstAttempt);
++        Assert.Contains("--architecture", firstAttempt);
++
++        // An "update not applicable" result triggers a single relaxed retry.
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A15002B)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
++        Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
++
++        // The relaxed retry drops both constraints, matching the WinGet CLI default.
++        var retryAttempt = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        Assert.DoesNotContain("--scope", retryAttempt);
++        Assert.DoesNotContain("--architecture", retryAttempt);
++    }
++
++    [Fact]
++    public void WinGetUpdateNotApplicableDoesNotRetryASecondTime()
++    {
++        var manager = new WinGet();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Klocman.BulkCrapUninstaller")
++            .WithVersion("6.1")
++            .WithNewVersion("6.2")
++            .Build();
++        package.OverridenOptions.Scope = PackageScope.Machine;
++        package.OverridenOptions.WinGet_DropArchAndScope = true; // the relaxed retry already happened
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A15002B)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++    }
++
++    [Fact]
++    public void WinGetUpdateNotApplicableFailsWhenThereIsNothingToRelax()
++    {
++        var manager = new WinGet();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A15002B)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
++    }
++
++    [Fact]
++    public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
++    {
++        // Bundled pinget signals "not applicable" with a non-zero exit code and a
++        // "No applicable installer found" message instead of WinGet's 0x8A15002B.
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("JRSoftware.InnoSetup")
++            .WithVersion("6.7.1")
++            .WithNewVersion("6.7.3")
++            .Build();
++        package.OverridenOptions.Scope = PackageScope.Machine;
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [
++                "Selecting applicable installer for this system...",
++                "  Error upgrading JRSoftware.InnoSetup: No applicable installer found",
++            ],
++            1
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
++        Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
++    }
++
++    [Fact]
++    public void WinGetGenericPingetFailureDoesNotRetry()
++    {
++        // A non-zero pinget exit without the "No applicable installer found" message
++        // is a real failure and must not be mistaken for the not-applicable case.
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("JRSoftware.InnoSetup")
++            .WithVersion("6.7.1")
++            .WithNewVersion("6.7.3")
++            .Build();
++        package.OverridenOptions.Scope = PackageScope.Machine;
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            ["error: download failed"],
++            1
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
++    }
++
+     private static void SetCliToolKind(WinGet manager, WinGetCliToolKind kind)
+     {
+         typeof(WinGet)

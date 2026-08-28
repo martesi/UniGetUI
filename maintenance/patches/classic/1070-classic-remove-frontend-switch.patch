@@ -1,0 +1,30 @@
+From b6df7737e99995486cd1b2ceef03d3fd81a10310 Mon Sep 17 00:00:00 2001
+From: Martes <96113508+martesi@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 19:27:28 +0800
+Subject: [PATCH] classic: remove the obsolete frontend switch
+
+Classic-Source-Commit: 183ea5fe069366c836a410aa6738734cd892b1e8
+---
+ .../Pages/SettingsPages/GeneralPages/Interface_P.xaml    | 9 ---------
+ 1 file changed, 9 deletions(-)
+
+diff --git a/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml b/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml
+index ba58da05c..6687e0052 100644
+--- a/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml
++++ b/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml
+@@ -37,15 +37,6 @@
+         Text="UniGetUI startup page:"
+       />
+ 
+-      <UserControl Height="16" />
+-      <widgets:CheckboxCard
+-        CornerRadius="8"
+-        SettingName="UseClassicMode"
+-        StateChanged="ShowRestartBanner"
+-        Text="Use classic mode"
+-        WarningText="Restart UniGetUI to apply this change"
+-      />
+-
+       <widgets:TranslatedTextBlock
+         Margin="4,32,4,8"
+         FontWeight="SemiBold"

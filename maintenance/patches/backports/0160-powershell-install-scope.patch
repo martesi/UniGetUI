@@ -1,0 +1,244 @@
+From 123e5fdee8e200caf33d9d1d987482a4ae80a8db Mon Sep 17 00:00:00 2001
+From: Gabriel Dufresne <78387669+GabrielDuf@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 11:27:43 -0400
+Subject: [PATCH] backport: apply PowerShell installation scope
+
+Upstream-Commit: fce15a3b10e630b269ce6e59be3c6522e3b0ea94
+
+Upstream-PR: Devolutions/UniGetUI#5114
+
+Classic-Adaptation: omit Avalonia-only scope UI; retain shared and WinUI behavior.
+---
+ .../ManagerCapabilities.cs                    |  4 ++
+ .../Helpers/PowerShellPkgOperationHelper.cs   | 15 ++----
+ .../PowerShell.cs                             |  3 ++
+ .../Helpers/PowerShell7PkgOperationHelper.cs  | 15 ++----
+ .../PowerShell7.cs                            |  2 +
+ .../PowerShell7ManagerTests.cs                | 48 +++++++++++++++++++
+ .../PowerShellManagerTests.cs                 | 48 +++++++++++++++++++
+ 7 files changed, 115 insertions(+), 20 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+index 27db407b5..62da046fc 100644
+--- a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
++++ b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+@@ -37,6 +37,10 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+         public bool SupportsCustomArchitectures = false;
+         public string[] SupportedCustomArchitectures = [];
+         public bool SupportsCustomScopes = false;
++        // Whether a custom scope can be applied to update/uninstall too, not just install
++        // (e.g. Windows PowerShell 5.x's Update-Module has no -Scope parameter)
++        public bool SupportsCustomScopesOnUpdate = true;
++        public bool SupportsCustomScopesOnUninstall = true;
+         public bool SupportsPreRelease = false;
+         public bool SupportsCustomLocations = false;
+         public bool SupportsCustomSources = false;
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
+index 62b0efb45..29d0aa85a 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
+@@ -36,16 +36,11 @@ internal sealed class PowerShellPkgOperationHelper : BasePkgOperationHelper
+             // Update-Module (PowerShellGet) has no -Scope parameter; only Install-Module accepts it
+             if (operation is OperationType.Install && !package.OverridenOptions.PowerShell_DoNotSetScopeParameter)
+             {
+-                if (
+-                    package.OverridenOptions.Scope == PackageScope.Global
+-                    || (
+-                        package.OverridenOptions.Scope is null
+-                        && options.InstallationScope == PackageScope.Global
+-                    )
+-                )
+-                    parameters.AddRange(["-Scope", "AllUsers"]);
+-                else
+-                    parameters.AddRange(["-Scope", "CurrentUser"]);
++                // The scope chosen in the options dialog wins; fall back to the auto-detected install scope
++                string scope = options.InstallationScope.Length > 0
++                    ? options.InstallationScope
++                    : package.OverridenOptions.Scope ?? "";
++                parameters.AddRange(["-Scope", scope == PackageScope.Global ? "AllUsers" : "CurrentUser"]);
+             }
+         }
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+index 14632242c..a1220e4d2 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+@@ -25,6 +25,9 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+                 SupportsCustomVersions = true,
+                 CanDownloadInstaller = true,
+                 SupportsCustomScopes = true,
++                // Update-Module/Uninstall-Module (PowerShellGet) take no -Scope; only Install-Module does
++                SupportsCustomScopesOnUpdate = false,
++                SupportsCustomScopesOnUninstall = false,
+                 CanListDependencies = true,
+                 SupportsCustomSources = true,
+                 SupportsPreRelease = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7PkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7PkgOperationHelper.cs
+index 3609fe7d9..b7ad21ebd 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7PkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7PkgOperationHelper.cs
+@@ -49,16 +49,11 @@ internal sealed class PowerShell7PkgOperationHelper : BasePkgOperationHelper
+             if (options.PreRelease)
+                 parameters.Add("-Prerelease");
+ 
+-            if (
+-                package.OverridenOptions.Scope is PackageScope.Global
+-                || (
+-                    package.OverridenOptions.Scope is null
+-                    && options.InstallationScope is PackageScope.Global
+-                )
+-            )
+-                parameters.AddRange(["-Scope", "AllUsers"]);
+-            else
+-                parameters.AddRange(["-Scope", "CurrentUser"]);
++            // The scope chosen in the options dialog wins; fall back to the auto-detected install scope
++            string scope = options.InstallationScope.Length > 0
++                ? options.InstallationScope
++                : package.OverridenOptions.Scope ?? "";
++            parameters.AddRange(["-Scope", scope == PackageScope.Global ? "AllUsers" : "CurrentUser"]);
+         }
+ 
+         parameters.AddRange(
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
+index 084561e82..be2c91410 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
+@@ -23,6 +23,8 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
+                 CanRunAsAdmin = true,
+                 SupportsCustomVersions = true,
+                 SupportsCustomScopes = true,
++                // Uninstall-PSResource is invoked without a scope, so the selector is a no-op there
++                SupportsCustomScopesOnUninstall = false,
+                 SupportsCustomSources = true,
+                 SupportsPreRelease = true,
+                 CanDownloadInstaller = true,
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+index 63872d72b..6118a0c5a 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+@@ -1,6 +1,7 @@
+ #if WINDOWS
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Managers.PowerShell7Manager;
++using UniGetUI.PackageEngine.Serializable;
+ 
+ namespace UniGetUI.PackageEngine.Tests;
+ 
+@@ -62,6 +63,53 @@ public sealed class PowerShell7ManagerTests
+         Assert.Equal("Pester", package.Id);
+     }
+ 
++    // Regression for https://github.com/Devolutions/UniGetUI/issues/5110:
++    // a scope explicitly chosen in the options dialog must override the auto-detected
++    // install scope, otherwise the command never changes for an installed module.
++    [Fact]
++    public void GetParameters_ExplicitScopeOverridesDetectedScope()
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
++        Assert.Equal(PackageScope.Machine, package.OverridenOptions.Scope);
++
++        var options = new InstallOptions { InstallationScope = PackageScope.User };
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.Contains("CurrentUser", parameters);
++        Assert.DoesNotContain("AllUsers", parameters);
++    }
++
++    [Fact]
++    public void GetParameters_ExplicitGlobalOverridesDetectedUserScope()
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:CurrentUser##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
++        Assert.Equal(PackageScope.User, package.OverridenOptions.Scope);
++
++        var options = new InstallOptions { InstallationScope = PackageScope.Machine };
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.Contains("AllUsers", parameters);
++        Assert.DoesNotContain("CurrentUser", parameters);
++    }
++
++    [Fact]
++    public void GetParameters_DefaultScopeFallsBackToDetectedScope()
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
++
++        var options = new InstallOptions();
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.Contains("AllUsers", parameters);
++        Assert.DoesNotContain("CurrentUser", parameters);
++    }
++
+     // Regression for https://github.com/Devolutions/UniGetUI/issues/4781:
+     // the previous Format-Table-based pipeline truncated long names (e.g.
+     // "Microsoft.Graph.Beta.DeviceManagement.Administration" → "Microsoft.Graph.Beta..")
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+index 351e01430..f3dd0799d 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+@@ -1,5 +1,7 @@
+ #if WINDOWS
++using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Managers.PowerShellManager;
++using UniGetUI.PackageEngine.Serializable;
+ 
+ namespace UniGetUI.PackageEngine.Tests;
+ 
+@@ -55,5 +57,51 @@ public sealed class PowerShellManagerTests
+ 
+         Assert.Equal("Pester", package.Id);
+     }
++
++    private static UniGetUI.PackageEngine.Interfaces.IPackage BuildInstalledPackage(PowerShell manager)
++        => Assert.Single(PowerShell.ParseInstalledPackages(
++            [
++                "Version Name Repository Description",
++                "------- ---- ---------- -----------",
++                "1.0.0 Devolutions.PowerShell PSGallery x",
++            ],
++            manager));
++
++    [Fact]
++    public void GetParameters_InstallRespectsExplicitScope()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { InstallationScope = PackageScope.Machine };
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Install);
++
++        Assert.Contains("-Scope", parameters);
++        Assert.Contains("AllUsers", parameters);
++    }
++
++    // Regression for https://github.com/Devolutions/UniGetUI/issues/5110:
++    // Update-Module (Windows PowerShell 5.x / PowerShellGet 1.0.0.1) has no -Scope parameter,
++    // so no scope must be emitted for an update regardless of the selected scope.
++    [Fact]
++    public void GetParameters_UpdateOmitsScope()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { InstallationScope = PackageScope.Machine };
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.DoesNotContain("-Scope", parameters);
++    }
++
++    [Fact]
++    public void Capabilities_ScopeAppliesToInstallOnly()
++    {
++        var manager = new PowerShell();
++        Assert.True(manager.Capabilities.SupportsCustomScopes);
++        Assert.False(manager.Capabilities.SupportsCustomScopesOnUpdate);
++        Assert.False(manager.Capabilities.SupportsCustomScopesOnUninstall);
++    }
+ }
+ #endif

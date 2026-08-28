@@ -1,0 +1,88 @@
+From 9a5d9ebd0405b26222f7a70054e1445e74e2c199 Mon Sep 17 00:00:00 2001
+From: Gabriel Dufresne <78387669+GabrielDuf@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 14:31:34 -0400
+Subject: [PATCH] backport: suppress WinGet phantom updates
+
+Upstream-Commit: 26c93b859babdc831b2d8462048d3e5f85d3da67
+
+Upstream-PR: Devolutions/UniGetUI#5199
+---
+ .../Helpers/WinGetPkgOperationHelper.cs       | 14 ++++++++
+ .../WinGetManagerTests.cs                     | 32 +++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 8560b15ff..984bb323a 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -315,6 +315,9 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+                 }
+             }
+ 
++            if (operation is OperationType.Update)
++                SuppressPhantomUpgrade(package);
++
+             Logger.Warn(
+                 $"Update for {package.Id} is not applicable to this system, even without scope/architecture constraints"
+             );
+@@ -421,6 +424,17 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         );
+     }
+ 
++    public static void SuppressPhantomUpgrade(IPackage package)
++    {
++        if (IsUnknownVersion(package.NewVersionString))
++            return;
++        Settings.SetDictionaryItem<string, string>(
++            Settings.K.WinGetUpgradeAttempts,
++            package.Id,
++            $"{StuckUpgradeThreshold}{AttemptSeparator}{package.NewVersionString}"
++        );
++    }
++
+     // An update WinGet keeps offering even after enough "successful" upgrades to it (#5158).
+     public static bool IsStuckUpgradeLoop(IPackage package)
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index 97d89f462..ae62fce11 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -1061,6 +1061,38 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+     }
+ 
++    [Fact]
++    public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
++    {
++        var manager = new WinGet();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Hugin.Hugin")
++            .WithVersion("20.25.0")
++            .WithNewVersion("2025.0.1")
++            .Build();
++
++        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A15002B)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
++
++        var newerUpdate = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Hugin.Hugin")
++            .WithVersion("20.25.0")
++            .WithNewVersion("2026.0.0")
++            .Build();
++        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
++    }
++
+     [Fact]
+     public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
+     {

@@ -1,0 +1,45 @@
+From f6e3291aeb5495afd605f163a02456c5e9e09b32 Mon Sep 17 00:00:00 2001
+From: Martes <96113508+martesi@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 19:22:57 +0800
+Subject: [PATCH] classic: use the Classic hash-only update channel
+
+Classic-Source-Commit: 54277559775a9e09ede9736a48f5c241d06df682
+Classic-Source-Commit: cacabb2dff785faa02bba6922d6f2acb147cb296
+---
+ src/UniGetUI/AutoUpdater.Helpers.cs | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/src/UniGetUI/AutoUpdater.Helpers.cs b/src/UniGetUI/AutoUpdater.Helpers.cs
+index f56106dfe..809b1ec9e 100644
+--- a/src/UniGetUI/AutoUpdater.Helpers.cs
++++ b/src/UniGetUI/AutoUpdater.Helpers.cs
+@@ -9,9 +9,10 @@ namespace UniGetUI;
+ 
+ public partial class AutoUpdater
+ {
+-    private const string REGISTRY_PATH = @"Software\Devolutions\UniGetUI";
+-    private const string DEFAULT_PRODUCTINFO_URL = "https://devolutions.net/productinfo.json";
+-    private const string DEFAULT_PRODUCTINFO_KEY = "Devolutions.UniGetUI";
++    private const string REGISTRY_PATH = @"Software\martesi\UniGetUIClassic";
++    private const string DEFAULT_PRODUCTINFO_URL =
++        "https://github.com/martesi/UniGetUI/releases/latest/download/productinfo.json";
++    private const string DEFAULT_PRODUCTINFO_KEY = "martesi.UniGetUI.Classic";
+ 
+     private const string REG_PRODUCTINFO_URL = "UpdaterProductInfoUrl";
+     private const string REG_PRODUCTINFO_KEY = "UpdaterProductKey";
+@@ -174,12 +175,14 @@ public partial class AutoUpdater
+         string productInfoUrl =
+             GetRegistryString(key, REG_PRODUCTINFO_URL) ?? DEFAULT_PRODUCTINFO_URL;
+ 
++        // Classic releases are currently unsigned. Keep TLS and SHA-256 validation mandatory,
++        // but deliberately skip the inherited Devolutions Authenticode thumbprint check.
+         return new UpdaterOverrides(
+             productInfoUrl,
+             DEFAULT_PRODUCTINFO_KEY,
+             false,
+             false,
+-            false,
++            true,
+             false
+         );
+ #endif
