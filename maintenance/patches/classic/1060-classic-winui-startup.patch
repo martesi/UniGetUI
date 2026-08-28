@@ -1,0 +1,29 @@
+From 53cbfdf3c70766e94945c70b6b03d6e4daeed8e5 Mon Sep 17 00:00:00 2001
+From: Martes <96113508+martesi@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 19:27:27 +0800
+Subject: [PATCH] classic: always launch the WinUI frontend
+
+Classic-Source-Commit: 88a18559ae3046d0040a773cf517e5f7099fa235
+---
+ src/UniGetUI/EntryPoint.cs | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/src/UniGetUI/EntryPoint.cs b/src/UniGetUI/EntryPoint.cs
+index dcd6af16a..baf0f4f54 100644
+--- a/src/UniGetUI/EntryPoint.cs
++++ b/src/UniGetUI/EntryPoint.cs
+@@ -58,12 +58,10 @@ namespace UniGetUI
+                     Environment.ExitCode = 0;
+                     return;
+                 }
+-                else if (!ModernAppLauncher.IsClassicModeEnabled())
+-                {
+-                    ModernAppLauncher.Launch(args);
+-                }
+                 else
+                 {
++                    // UniGetUI Classic is WinUI-only. The downstream build intentionally does not
++                    // bundle the Avalonia frontend, so never hand UI startup to ModernAppLauncher.
+                     CoreData.WasDaemon = CoreData.IsDaemon = args.Contains(CLIHandler.DAEMON);
+                     _ = AsyncMain();
+                 }

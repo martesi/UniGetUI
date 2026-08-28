@@ -1,0 +1,234 @@
+From a1cd16a5a0168843bf6b2d753a1e87598c15876e Mon Sep 17 00:00:00 2001
+From: Gabriel Dufresne <78387669+GabrielDuf@users.noreply.github.com>
+Date: Wed, 22 Jul 2026 14:03:42 -0400
+Subject: [PATCH] backport: honor explicit WinGet update location
+
+Upstream-Commit: 905bcd14ab6ac7ffa4e712889c7c34c12f30309f
+
+Classic-Source-Commit: 5c03c3f088c62fe4facde7d031b8e50f2ea398a8
+
+Upstream-PR: Devolutions/UniGetUI#5173
+---
+ .../Helpers/WinGetPkgOperationHelper.cs       |   7 +-
+ .../Packages/Classes/InstallOptionsFactory.cs |   8 ++
+ .../InstallOptions.cs                         |   7 +-
+ .../InstallOptionsFactoryTests.cs             |  20 ++++
+ .../WinGetManagerTests.cs                     | 100 ++++++++++++++++++
+ 5 files changed, 139 insertions(+), 3 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index e1017b0a3..5280ae2dc 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -1,4 +1,4 @@
+-using Microsoft.Management.Deployment;
++﻿using Microsoft.Management.Deployment;
+ using Microsoft.Win32;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+@@ -121,7 +121,10 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+                 }
+                 else if (
+                     options.CustomInstallLocation != ""
+-                    && Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
++                    && (
++                        options.CustomInstallLocationIsExplicit
++                        || Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
++                    )
+                 )
+                 {
+                     parameters.AddRange(["--location", $"\"{options.CustomInstallLocation}\""]);
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
+index 2bc13c95b..edcd6f225 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
+@@ -72,6 +72,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         )
+         {
+             var instance = overridePackageOptions ?? LoadForPackage(package);
++
++            // A location typed into this package's own options is an explicit, per-package choice;
++            // one inherited from the manager default below is not. Consumers (e.g. WinGet updates)
++            // use this to honor explicit locations while keeping manager-wide defaults opt-in.
++            bool locationIsExplicit = instance.OverridesNextLevelOpts;
++
+             if (!instance.OverridesNextLevelOpts)
+             {
+                 Logger.Debug(
+@@ -86,6 +92,8 @@ namespace UniGetUI.PackageEngine.PackageClasses
+                 );
+             }
+ 
++            instance.CustomInstallLocationIsExplicit = locationIsExplicit;
++
+             if (elevated is not null)
+                 instance.RunAsAdministrator = (bool)elevated;
+             if (interactive is not null)
+diff --git a/src/UniGetUI.PackageEngine.Serializable/InstallOptions.cs b/src/UniGetUI.PackageEngine.Serializable/InstallOptions.cs
+index a39b27525..92cfaf0e9 100644
+--- a/src/UniGetUI.PackageEngine.Serializable/InstallOptions.cs
++++ b/src/UniGetUI.PackageEngine.Serializable/InstallOptions.cs
+@@ -209,6 +209,10 @@ namespace UniGetUI.PackageEngine.Serializable
+ 
+         public bool OverridesNextLevelOpts { get; set; }
+ 
++        // True when CustomInstallLocation was set explicitly for this package rather than inherited
++        // from the manager-wide default. Transient (not serialized): set by InstallOptionsFactory.
++        public bool CustomInstallLocationIsExplicit { get; set; }
++
+         public override InstallOptions Copy()
+         {
+             var copy = new InstallOptions();
+@@ -222,8 +226,9 @@ namespace UniGetUI.PackageEngine.Serializable
+             foreach (var listKey in _listKeys)
+                 copy._listVal[listKey] = this._listVal[listKey].ToList();
+ 
+-            // Handle non-automated OverridesNextLevelOpts
++            // Handle non-automated properties
+             copy.OverridesNextLevelOpts = OverridesNextLevelOpts;
++            copy.CustomInstallLocationIsExplicit = CustomInstallLocationIsExplicit;
+             return copy;
+         }
+ 
+diff --git a/src/UniGetUI.PackageEngine.Tests/InstallOptionsFactoryTests.cs b/src/UniGetUI.PackageEngine.Tests/InstallOptionsFactoryTests.cs
+index ef63fad7b..a76876964 100644
+--- a/src/UniGetUI.PackageEngine.Tests/InstallOptionsFactoryTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/InstallOptionsFactoryTests.cs
+@@ -70,6 +70,26 @@ public sealed class InstallOptionsFactoryTests : IDisposable
+             resolved.CustomInstallLocation
+         );
+         Assert.True(resolved.InteractiveInstallation);
++        Assert.False(resolved.CustomInstallLocationIsExplicit);
++    }
++
++    [Fact]
++    public void LoadApplicable_MarksLocationExplicitOnlyForPerPackageOverrides()
++    {
++        var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
++
++        var explicitPackage = new PackageBuilder().WithManager(manager).WithId($"Pkg{Guid.NewGuid():N}").Build();
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { OverridesNextLevelOpts = true, CustomInstallLocation = @"D:\dev\app" },
++            explicitPackage
++        );
++
++        var inheritedPackage = new PackageBuilder().WithManager(manager).WithId($"Pkg{Guid.NewGuid():N}").Build();
++        InstallOptionsFactory.SaveForManager(new InstallOptions { CustomInstallLocation = @"D:\Apps\%PACKAGE%" }, manager);
++        InstallOptionsFactory.SaveForPackage(new InstallOptions(), inheritedPackage);
++
++        Assert.True(InstallOptionsFactory.LoadApplicable(explicitPackage).CustomInstallLocationIsExplicit);
++        Assert.False(InstallOptionsFactory.LoadApplicable(inheritedPackage).CustomInstallLocationIsExplicit);
+     }
+ 
+     [Fact]
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index de73fd0b5..5f0749343 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -827,6 +827,106 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.Contains("--silent", parameters);
+     }
+ 
++    [Fact]
++    public void WinGetUpdateEmitsExplicitLocationEvenWhenForceSettingIsOff()
++    {
++        // #5164: a location set explicitly for this package is honored on update on its own.
++        Settings.Set(Settings.K.WinGetForceLocationOnUpdate, false);
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.ExplicitLocation")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++        var options = new InstallOptions
++        {
++            CustomInstallLocation = @"D:\dev\contoso",
++            CustomInstallLocationIsExplicit = true,
++        };
++
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.Contains("--location", parameters);
++        Assert.Contains("\"D:\\dev\\contoso\"", parameters);
++    }
++
++    [Fact]
++    public void WinGetUpdateOmitsInheritedLocationWhenForceSettingIsOff()
++    {
++        // #4210: a location inherited from the manager-wide default must not relocate installs
++        // on update unless the user opts in.
++        Settings.Set(Settings.K.WinGetForceLocationOnUpdate, false);
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.InheritedLocation")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++        var options = new InstallOptions
++        {
++            CustomInstallLocation = @"D:\Apps\Contoso.InheritedLocation",
++            CustomInstallLocationIsExplicit = false,
++        };
++
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.DoesNotContain("--location", parameters);
++    }
++
++    [Fact]
++    public void WinGetUpdateEmitsInheritedLocationWhenForceSettingIsOn()
++    {
++        // #4210: the manager-wide default is still applied on update when the user opts in.
++        Settings.Set(Settings.K.WinGetForceLocationOnUpdate, true);
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.InheritedForced")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++        var options = new InstallOptions
++        {
++            CustomInstallLocation = @"D:\Apps\Contoso.InheritedForced",
++            CustomInstallLocationIsExplicit = false,
++        };
++
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.Contains("--location", parameters);
++        Assert.Contains("\"D:\\Apps\\Contoso.InheritedForced\"", parameters);
++    }
++
++    [Fact]
++    public void WinGetUpdateOmitsExplicitLocationForPingetUpgrade()
++    {
++        // Pinget upgrade rejects --location, so #5164's explicit-location behavior is scoped to
++        // system WinGet: even an explicit location (with the setting on) must not be emitted.
++        Settings.Set(Settings.K.WinGetForceLocationOnUpdate, true);
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.PingetExplicit")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++        var options = new InstallOptions
++        {
++            CustomInstallLocation = @"D:\dev\contoso",
++            CustomInstallLocationIsExplicit = true,
++        };
++
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.DoesNotContain("--location", parameters);
++    }
++
+     [Fact]
+     public void WinGetOperationHelperSkipsUnsupportedFlagsForPingetUninstall()
+     {

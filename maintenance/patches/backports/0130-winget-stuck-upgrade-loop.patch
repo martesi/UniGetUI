@@ -1,0 +1,332 @@
+From 68d931c71b4edb95a5586ef0ab5e965a4b4a1b32 Mon Sep 17 00:00:00 2001
+From: Gabriel Dufresne <78387669+GabrielDuf@users.noreply.github.com>
+Date: Wed, 22 Jul 2026 08:43:41 -0400
+Subject: [PATCH] backport: track stuck WinGet upgrades
+
+Upstream-Commit: 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
+
+Classic-Source-Commit: 8f4c527960a7beb74e4ccada124940452dacaa91
+
+Upstream-PR: Devolutions/UniGetUI#5167
+---
+ src/Languages/lang_en.json                    |  2 +
+ .../SettingsEngine_ImportExport.cs            |  2 +
+ .../SettingsEngine_Names.cs                   |  4 +
+ .../ClientHelpers/NativeWinGetHelper.cs       | 20 +++--
+ .../ClientHelpers/PingetCliHelper.cs          | 16 +++-
+ .../ClientHelpers/WinGetCliHelper.cs          |  9 +-
+ .../Helpers/WinGetPkgOperationHelper.cs       | 85 +++++++++++++++++--
+ 7 files changed, 121 insertions(+), 17 deletions(-)
+
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+index d128bb58e..1a5904a4d 100644
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -542,6 +542,8 @@
+   "Reset WinGet": "Reset WinGet",
+   "This may help if no packages are listed": "This may help if no packages are listed",
+   "Force install location parameter when updating packages with custom locations": "Force install location parameter when updating packages with custom locations",
++  "Stop offering an update that never applies after this many attempts": "Stop offering an update that never applies after this many attempts",
++  "When WinGet keeps offering an update that reports success without ever changing the installed version, stop offering it after this many attempts, until a newer version is available (default: 3)": "When WinGet keeps offering an update that reports success without ever changing the installed version, stop offering it after this many attempts, until a newer version is available (default: 3)",
+   "Install Scoop": "Install Scoop",
+   "Uninstall Scoop (and its packages)": "Uninstall Scoop (and its packages)",
+   "Run cleanup and clear cache": "Run cleanup and clear cache",
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_ImportExport.cs b/src/UniGetUI.Core.Settings/SettingsEngine_ImportExport.cs
+index afc50a051..f24e95b6b 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_ImportExport.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_ImportExport.cs
+@@ -35,6 +35,7 @@ public partial class Settings
+                 {
+                     "OperationHistory",
+                     "WinGetAlreadyUpgradedPackages.json",
++                    "WinGetUpgradeAttempts.json",
+                     "TelemetryClientToken",
+                     "CurrentSessionToken",
+                 }.Contains(Path.GetFileName(entry))
+@@ -58,6 +59,7 @@ public partial class Settings
+                 {
+                     "OperationHistory",
+                     "WinGetAlreadyUpgradedPackages.json",
++                    "WinGetUpgradeAttempts.json",
+                     "TelemetryClientToken",
+                     "CurrentSessionToken",
+                 }.Contains(entry.Key)
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+index a6047f3f9..88e9a4bf3 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+@@ -61,6 +61,8 @@ public static partial class Settings
+         DisabledManagers,
+         DeletableDesktopShortcuts,
+         WinGetAlreadyUpgradedPackages,
++        WinGetUpgradeAttempts,
++        WinGetStuckUpgradeThreshold,
+         DependencyManagement,
+         DisabledPackageManagerNotifications,
+         PackageListViewMode,
+@@ -169,6 +171,8 @@ public static partial class Settings
+             K.DisabledManagers => "DisabledManagers",
+             K.DeletableDesktopShortcuts => "DeletableDesktopShortcuts",
+             K.WinGetAlreadyUpgradedPackages => "WinGetAlreadyUpgradedPackages",
++            K.WinGetUpgradeAttempts => "WinGetUpgradeAttempts",
++            K.WinGetStuckUpgradeThreshold => "WinGetStuckUpgradeThreshold",
+             K.DependencyManagement => "DependencyManagement",
+             K.DisabledPackageManagerNotifications => "DisabledPackageManagerNotifications",
+             K.PackageListViewMode => "PackageListViewMode",
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+index c223e4ebb..08e65747f 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -347,9 +347,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     nativePackage.DefaultInstallVersion.PackageCatalog.Info.Name
+                 );
+ 
+-                string version = nativePackage.InstalledVersion.Version;
+-                if (version == "Unknown")
+-                    version = WinGetPkgOperationHelper.GetLastInstalledVersion(nativePackage.Id);
++                string version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(
++                    nativePackage.Id,
++                    nativePackage.InstalledVersion.Version
++                );
+ 
+                 var UniGetUIPackage = new Package(
+                     nativePackage.Name,
+@@ -360,7 +361,11 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     Manager
+                 );
+ 
+-                // Trust COM IsUpdateAvailable, not the "already upgraded" cache (issue #5042).
++                // Suppress an update that repeatedly fails to stick (#5158); the COM path still avoids
++                // the one-shot "already upgraded" cache (#5042).
++                if (WinGetPkgOperationHelper.IsStuckUpgradeLoop(UniGetUIPackage))
++                    continue;
++
+                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
+                 packages.Add(UniGetUIPackage);
+                 logger.Log(
+@@ -409,9 +414,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     source = Manager.GetLocalSource(nativePackage.Id);
+                 }
+ 
+-                string version = nativePackage.InstalledVersion.Version;
+-                if (version == "Unknown")
+-                    version = WinGetPkgOperationHelper.GetLastInstalledVersion(nativePackage.Id);
++                string version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(
++                    nativePackage.Id,
++                    nativePackage.InstalledVersion.Version
++                );
+ 
+                 logger.Log(
+                     $"Found package {nativePackage.Name} {nativePackage.Id} on source {source.Name}"
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+index b43532a05..3dd9aee8c 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+@@ -46,19 +46,29 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+             "upgrade --include-unknown --output json"
+         );
+ 
++        return BuildUpdatePackages(result);
++    }
++
++    internal IReadOnlyList<Package> BuildUpdatePackages(ListResponse result)
++    {
+         List<Package> packages = [];
+         foreach (ListMatch match in result.Matches.Where(match => match.AvailableVersion is not null))
+         {
++            // Restore the version we last upgraded to when WinGet reports it as unknown (#5158).
++            bool versionUnknown = WinGetPkgOperationHelper.IsUnknownVersion(match.InstalledVersion);
+             var package = new Package(
+                 match.Name,
+                 match.Id,
+-                match.InstalledVersion,
++                versionUnknown
++                    ? WinGetPkgOperationHelper.GetLastInstalledVersion(match.Id)
++                    : match.InstalledVersion,
+                 match.AvailableVersion!,
+                 GetSource(match),
+                 Manager
+             );
+ 
+-            if (!WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
++            // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
++            if (versionUnknown || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
+             {
+                 packages.Add(package);
+             }
+@@ -85,7 +95,7 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+                 new Package(
+                     match.Name,
+                     match.Id,
+-                    match.InstalledVersion,
++                    WinGetPkgOperationHelper.ResolveReportedInstalledVersion(match.Id, match.InstalledVersion),
+                     GetSource(match),
+                     Manager
+                 )
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+index 019a7873a..46512b4ef 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+@@ -152,8 +152,14 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+                     source = Manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+                 }
+ 
++                // Restore the version we last upgraded to when WinGet reports it as unknown (#5158).
++                bool versionUnknown = WinGetPkgOperationHelper.IsUnknownVersion(version);
++                if (versionUnknown)
++                    version = WinGetPkgOperationHelper.GetLastInstalledVersion(id);
++
+                 var package = new Package(name, id, version, newVersion, source, Manager);
+-                if (!WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
++                // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
++                if (versionUnknown || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
+                 {
+                     Packages.Add(package);
+                 }
+@@ -290,6 +296,7 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+                             .Trim();
+                         source = Manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+                     }
++                    version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(id, version);
+                     Packages.Add(new Package(name, id, version, source, Manager));
+                 }
+                 OldLine = line;
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 5280ae2dc..3e23d7bbd 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -251,7 +251,8 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         if (uintCode is 0x8A150109)
+         { // TODO: Restart required to finish installation
+             if (operation is OperationType.Update or OperationType.Install)
+-                MarkUpgradeAsDone(package);
++                // Pending-restart sticks after reboot; don't count it as a phantom no-op (#5042).
++                MarkUpgradeAsDone(package, countTowardStuckLoop: false);
+             return OperationVeredict.Success;
+         }
+ 
+@@ -294,14 +295,16 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         if (uintCode is 0x8A15010D or 0x8A15004F or 0x8A15010E)
+         { // Application is already installed
+             if (operation is OperationType.Update or OperationType.Install)
+-                MarkUpgradeAsDone(package);
++                // Only updates feed the stuck-update counter; installs must not (#5158).
++                MarkUpgradeAsDone(package, countTowardStuckLoop: operation is OperationType.Update);
+             return OperationVeredict.Success;
+         }
+ 
+         if (returnCode is 0)
+         { // Operation succeeded
+             if (operation is OperationType.Update or OperationType.Install)
+-                MarkUpgradeAsDone(package);
++                // Only updates feed the stuck-update counter; installs must not (#5158).
++                MarkUpgradeAsDone(package, countTowardStuckLoop: operation is OperationType.Update);
+             return OperationVeredict.Success;
+         }
+ 
+@@ -338,7 +341,17 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         return OperationVeredict.Failure;
+     }
+ 
+-    private static void MarkUpgradeAsDone(IPackage package)
++    // Default number of "successful" upgrades to the same version (without the installed version
++    // advancing) after which the update is suppressed; overridable via WinGetStuckUpgradeThreshold (#5158).
++    private const int DefaultStuckUpgradeThreshold = 3;
++    private const char AttemptSeparator = '\n';
++
++    private static int StuckUpgradeThreshold =>
++        int.TryParse(Settings.GetValue(Settings.K.WinGetStuckUpgradeThreshold), out int v) && v > 0
++            ? v
++            : DefaultStuckUpgradeThreshold;
++
++    private static void MarkUpgradeAsDone(IPackage package, bool countTowardStuckLoop = true)
+     {
+         var options = InstallOptionsFactory.LoadApplicable(package);
+         string version;
+@@ -353,6 +366,47 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             package.Id,
+             version
+         );
++        if (countTowardStuckLoop)
++            RecordUpgradeAttempt(package.Id, version);
++    }
++
++    // Stored as "count\nversion"; count resets when the target version changes.
++    private static void RecordUpgradeAttempt(string id, string version)
++    {
++        int count = 1;
++        var existing = Settings.GetDictionaryItem<string, string>(Settings.K.WinGetUpgradeAttempts, id);
++        if (existing is not null)
++        {
++            int sep = existing.IndexOf(AttemptSeparator);
++            if (sep > 0
++                && existing[(sep + 1)..] == version
++                && int.TryParse(existing[..sep], out int previous))
++            {
++                count = previous + 1;
++            }
++        }
++        Settings.SetDictionaryItem<string, string>(
++            Settings.K.WinGetUpgradeAttempts,
++            id,
++            $"{count}{AttemptSeparator}{version}"
++        );
++    }
++
++    // An update WinGet keeps offering even after enough "successful" upgrades to it (#5158).
++    public static bool IsStuckUpgradeLoop(IPackage package)
++    {
++        var existing = Settings.GetDictionaryItem<string, string>(
++            Settings.K.WinGetUpgradeAttempts,
++            package.Id
++        );
++        if (existing is null)
++            return false;
++
++        int sep = existing.IndexOf(AttemptSeparator);
++        return sep > 0
++            && existing[(sep + 1)..] == package.NewVersionString
++            && int.TryParse(existing[..sep], out int count)
++            && count >= StuckUpgradeThreshold;
+     }
+ 
+     public static bool UpdateAlreadyInstalled(IPackage package)
+@@ -371,10 +425,20 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         );
+     }
+ 
+-    // One-shot suppression: hide a just-upgraded package once (bridges CLI index lag), then clear
+-    // the mark so a still-outdated package reappears next scan instead of forever (issue #5042).
++    // Persistently hide an update that never sticks (#5158); otherwise hide a just-upgraded package
++    // once to bridge CLI index lag, then let it reappear next scan (#5042).
+     public static bool ConsumeAlreadyUpgradedSuppression(IPackage package)
+     {
++        if (IsStuckUpgradeLoop(package))
++        {
++            Logger.Warn(
++                $"WinGet package {package.Id} keeps being offered as an update to {package.NewVersionString} "
++                + $"but the upgrade never sticks after {StuckUpgradeThreshold} attempts; suppressing it until a "
++                + "newer version is available (issue #5158)"
++            );
++            return true;
++        }
++
+         if (!UpdateAlreadyInstalled(package))
+             return false;
+ 
+@@ -393,6 +457,15 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         return val;
+     }
+ 
++    // Fall back to the version we last upgraded to when WinGet can't read the installed one (#5158).
++    public static string ResolveReportedInstalledVersion(string id, string? reportedVersion)
++        => reportedVersion is null or "" or "Unknown"
++            ? GetLastInstalledVersion(id)
++            : reportedVersion;
++
++    public static bool IsUnknownVersion(string? version)
++        => version is null or "" or "Unknown";
++
+     /// <summary>
+     /// For portable WinGet packages, reads the current install location from the Windows registry
+     /// ARP entry (written by WinGet at install time). Returns null if the package is not portable

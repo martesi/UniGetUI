@@ -1,0 +1,391 @@
+From 10d795a693aaf3cf84b89b4d884b66f8319b77ed Mon Sep 17 00:00:00 2001
+From: Martes <96113508+martesi@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 19:22:54 +0800
+Subject: [PATCH] backport: preserve Classic WinGet and regression-test
+ adaptations
+
+Upstream-Commit: 26c93b859babdc831b2d8462048d3e5f85d3da67
+Upstream-PR: Devolutions/UniGetUI#5199
+Upstream-Commit: 249cc4d0d4c947dbe03b998ff392933f8aab15b6
+Upstream-PR: Devolutions/UniGetUI#4998
+Upstream-Commit: 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
+Upstream-PR: Devolutions/UniGetUI#5167
+Upstream-Commit: c0ddaa670523bd69fa5a036b3c18b2e96fb9c665
+Upstream-PR: Devolutions/UniGetUI#5169
+Upstream-Commit: 905bcd14ab6ac7ffa4e712889c7c34c12f30309f
+Upstream-PR: Devolutions/UniGetUI#5173
+Upstream-Commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
+Upstream-PR: Devolutions/UniGetUI#5072
+Classic-Source-Commit: fb2f623fa8fa530218808d401bdd4ea3c8357dc1
+Classic-Adaptation: preserve the Classic branch's WinUI-era anchors, diagnostics, and test fixtures.
+---
+ .../Helpers/WinGetPkgOperationHelper.cs       | 22 +++--
+ .../PowerShell7ManagerTests.cs                | 42 ++++++--
+ .../PowerShellManagerTests.cs                 | 33 +++++--
+ .../WinGetManagerTests.cs                     | 95 ++++++++++---------
+ 4 files changed, 118 insertions(+), 74 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 984bb323a..801466fb5 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -1,9 +1,10 @@
+-﻿using Microsoft.Management.Deployment;
++using Microsoft.Management.Deployment;
+ using Microsoft.Win32;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
++using UniGetUI.PackageEngine.Classes.Packages.Classes;
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.PackageClasses;
+@@ -62,7 +63,8 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         }
+ 
+         // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
+-        // WinGet_DropArchAndScope is set after an "update not applicable" failure to retry without the scope/architecture constraints.
++        // WinGet_DropArchAndScope is set after an "update not applicable" result so the retry
++        // lets WinGet choose a compatible installer instead of repeating the same constraints.
+         if (!package.OverridenOptions.WinGet_DropArchAndScope)
+         {
+             parameters.AddRange(
+@@ -283,7 +285,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         }
+ 
+         // WinGet (CLI/COM) reports "not applicable" as 0x8A15002B; bundled pinget instead exits
+-        // non-zero with "No applicable installer found" in its output.
++        // non-zero with "No applicable installer found" in its output (#4998).
+         bool pingetReportedNotApplicable =
+             ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
+             && returnCode != 0
+@@ -292,18 +294,19 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             );
+ 
+         if (uintCode is 0x8A15002B || pingetReportedNotApplicable)
+-        { // The update is not applicable to the platform
+-            // The scope/architecture we forced may exclude the only installer the package ships
+-            // (e.g. forcing --architecture x64 on a package that only has an x86 installer). Retry
+-            // once letting the package manager pick freely, matching what the CLI does by default.
+-            if (operation is OperationType.Update && !package.OverridenOptions.WinGet_DropArchAndScope)
++        {
++            if (
++                operation is OperationType.Update
++                && !package.OverridenOptions.WinGet_DropArchAndScope
++            )
+             {
+                 var options = InstallOptionsFactory.LoadApplicable(package);
+                 bool hasScope =
+                     (package.OverridenOptions.Scope ?? options.InstallationScope)
+                     is PackageScope.User or PackageScope.Machine;
+                 bool hasArch =
+-                    options.Architecture is Architecture.x86 or Architecture.x64 or Architecture.arm64;
++                    options.Architecture
++                    is Architecture.x86 or Architecture.x64 or Architecture.arm64;
+ 
+                 if (hasScope || hasArch)
+                 {
+@@ -424,6 +427,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         );
+     }
+ 
++    // Mark the offered version as already having reached the stuck-update threshold (#5199).
+     public static void SuppressPhantomUpgrade(IPackage package)
+     {
+         if (IsUnknownVersion(package.NewVersionString))
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+index 6118a0c5a..cf408565c 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+@@ -70,12 +70,20 @@ public sealed class PowerShell7ManagerTests
+     public void GetParameters_ExplicitScopeOverridesDetectedScope()
+     {
+         var manager = new PowerShell7();
+-        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
+-            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
++        var package = Assert.Single(
++            PowerShell7.ParseInstalledPackages(
++                ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"],
++                manager
++            )
++        );
+         Assert.Equal(PackageScope.Machine, package.OverridenOptions.Scope);
+ 
+         var options = new InstallOptions { InstallationScope = PackageScope.User };
+-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
+ 
+         Assert.Contains("CurrentUser", parameters);
+         Assert.DoesNotContain("AllUsers", parameters);
+@@ -85,12 +93,20 @@ public sealed class PowerShell7ManagerTests
+     public void GetParameters_ExplicitGlobalOverridesDetectedUserScope()
+     {
+         var manager = new PowerShell7();
+-        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
+-            ["##SCOPE:CurrentUser##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
++        var package = Assert.Single(
++            PowerShell7.ParseInstalledPackages(
++                ["##SCOPE:CurrentUser##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"],
++                manager
++            )
++        );
+         Assert.Equal(PackageScope.User, package.OverridenOptions.Scope);
+ 
+         var options = new InstallOptions { InstallationScope = PackageScope.Machine };
+-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
+ 
+         Assert.Contains("AllUsers", parameters);
+         Assert.DoesNotContain("CurrentUser", parameters);
+@@ -100,11 +116,19 @@ public sealed class PowerShell7ManagerTests
+     public void GetParameters_DefaultScopeFallsBackToDetectedScope()
+     {
+         var manager = new PowerShell7();
+-        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
+-            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
++        var package = Assert.Single(
++            PowerShell7.ParseInstalledPackages(
++                ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"],
++                manager
++            )
++        );
+ 
+         var options = new InstallOptions();
+-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
+ 
+         Assert.Contains("AllUsers", parameters);
+         Assert.DoesNotContain("CurrentUser", parameters);
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+index f3dd0799d..433c3afd0 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+@@ -58,14 +58,19 @@ public sealed class PowerShellManagerTests
+         Assert.Equal("Pester", package.Id);
+     }
+ 
+-    private static UniGetUI.PackageEngine.Interfaces.IPackage BuildInstalledPackage(PowerShell manager)
+-        => Assert.Single(PowerShell.ParseInstalledPackages(
+-            [
+-                "Version Name Repository Description",
+-                "------- ---- ---------- -----------",
+-                "1.0.0 Devolutions.PowerShell PSGallery x",
+-            ],
+-            manager));
++    private static UniGetUI.PackageEngine.Interfaces.IPackage BuildInstalledPackage(
++        PowerShell manager
++    ) =>
++        Assert.Single(
++            PowerShell.ParseInstalledPackages(
++                [
++                    "Version Name Repository Description",
++                    "------- ---- ---------- -----------",
++                    "1.0.0 Devolutions.PowerShell PSGallery x",
++                ],
++                manager
++            )
++        );
+ 
+     [Fact]
+     public void GetParameters_InstallRespectsExplicitScope()
+@@ -74,7 +79,11 @@ public sealed class PowerShellManagerTests
+         var package = BuildInstalledPackage(manager);
+ 
+         var options = new InstallOptions { InstallationScope = PackageScope.Machine };
+-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Install);
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Install
++        );
+ 
+         Assert.Contains("-Scope", parameters);
+         Assert.Contains("AllUsers", parameters);
+@@ -90,7 +99,11 @@ public sealed class PowerShellManagerTests
+         var package = BuildInstalledPackage(manager);
+ 
+         var options = new InstallOptions { InstallationScope = PackageScope.Machine };
+-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
+ 
+         Assert.DoesNotContain("-Scope", parameters);
+     }
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index ae62fce11..840083ce7 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -981,8 +981,6 @@ public sealed class WinGetManagerTests : IDisposable
+     [Fact]
+     public void WinGetUpdateNotApplicableRetriesOnceWithoutScopeAndArchitecture()
+     {
+-        // Regression test for #4954: a package whose only installer is x86 (e.g. Bulk Crap
+-        // Uninstaller) reports "update not applicable" when we force --architecture/--scope.
+         var manager = new WinGet();
+         SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+         var package = new PackageBuilder()
+@@ -992,14 +990,19 @@ public sealed class WinGetManagerTests : IDisposable
+             .WithNewVersion("6.2")
+             .Build();
+         package.OverridenOptions.Scope = PackageScope.Machine;
+-        var options = new InstallOptions { Architecture = "x64" };
++        var options = new InstallOptions
++        {
++            Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
++        };
+ 
+-        // The forced constraints are present on the first attempt.
+-        var firstAttempt = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        var firstAttempt = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
+         Assert.Contains("--scope", firstAttempt);
+         Assert.Contains("--architecture", firstAttempt);
+ 
+-        // An "update not applicable" result triggers a single relaxed retry.
+         var veredict = manager.OperationHelper.GetResult(
+             package,
+             OperationType.Update,
+@@ -1010,8 +1013,11 @@ public sealed class WinGetManagerTests : IDisposable
+         OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
+         Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
+ 
+-        // The relaxed retry drops both constraints, matching the WinGet CLI default.
+-        var retryAttempt = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        var retryAttempt = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
+         Assert.DoesNotContain("--scope", retryAttempt);
+         Assert.DoesNotContain("--architecture", retryAttempt);
+     }
+@@ -1027,7 +1033,7 @@ public sealed class WinGetManagerTests : IDisposable
+             .WithNewVersion("6.2")
+             .Build();
+         package.OverridenOptions.Scope = PackageScope.Machine;
+-        package.OverridenOptions.WinGet_DropArchAndScope = true; // the relaxed retry already happened
++        package.OverridenOptions.WinGet_DropArchAndScope = true;
+ 
+         var veredict = manager.OperationHelper.GetResult(
+             package,
+@@ -1061,43 +1067,9 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+     }
+ 
+-    [Fact]
+-    public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
+-    {
+-        var manager = new WinGet();
+-        var package = new PackageBuilder()
+-            .WithManager(manager)
+-            .WithId("Hugin.Hugin")
+-            .WithVersion("20.25.0")
+-            .WithNewVersion("2025.0.1")
+-            .Build();
+-
+-        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+-
+-        var veredict = manager.OperationHelper.GetResult(
+-            package,
+-            OperationType.Update,
+-            [],
+-            unchecked((int)0x8A15002B)
+-        );
+-
+-        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+-        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+-
+-        var newerUpdate = new PackageBuilder()
+-            .WithManager(manager)
+-            .WithId("Hugin.Hugin")
+-            .WithVersion("20.25.0")
+-            .WithNewVersion("2026.0.0")
+-            .Build();
+-        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
+-    }
+-
+     [Fact]
+     public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
+     {
+-        // Bundled pinget signals "not applicable" with a non-zero exit code and a
+-        // "No applicable installer found" message instead of WinGet's 0x8A15002B.
+         var manager = new WinGet();
+         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+         var package = new PackageBuilder()
+@@ -1113,7 +1085,7 @@ public sealed class WinGetManagerTests : IDisposable
+             OperationType.Update,
+             [
+                 "Selecting applicable installer for this system...",
+-                "  Error upgrading JRSoftware.InnoSetup: No applicable installer found",
++                "Error upgrading JRSoftware.InnoSetup: No applicable installer found",
+             ],
+             1
+         );
+@@ -1125,8 +1097,6 @@ public sealed class WinGetManagerTests : IDisposable
+     [Fact]
+     public void WinGetGenericPingetFailureDoesNotRetry()
+     {
+-        // A non-zero pinget exit without the "No applicable installer found" message
+-        // is a real failure and must not be mistaken for the not-applicable case.
+         var manager = new WinGet();
+         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+         var package = new PackageBuilder()
+@@ -1148,6 +1118,39 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+     }
+ 
++    [Fact]
++    public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
++    {
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Hugin.Hugin")
++            .WithVersion("20.25.0")
++            .WithNewVersion("2025.0.1")
++            .Build();
++
++        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A15002B)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
++
++        var newerUpdate = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Hugin.Hugin")
++            .WithVersion("20.25.0")
++            .WithNewVersion("2026.0.0")
++            .Build();
++        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
++    }
++
+     private static void SetCliToolKind(WinGet manager, WinGetCliToolKind kind)
+     {
+         typeof(WinGet)

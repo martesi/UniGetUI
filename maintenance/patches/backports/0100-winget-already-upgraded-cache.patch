@@ -1,0 +1,104 @@
+From 0176175375712cdd23869e4342176d0f7b8deb2b Mon Sep 17 00:00:00 2001
+From: Gabriel Dufresne <78387669+GabrielDuf@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 16:42:49 -0400
+Subject: [PATCH] backport: hide already-upgraded WinGet packages
+
+Upstream-Commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
+
+Classic-Source-Commit: cb2a1499044f26a58b687a83ff3c64626e2a5ad9
+
+Upstream-PR: Devolutions/UniGetUI#5072
+---
+ .../ClientHelpers/NativeWinGetHelper.cs       | 20 ++++++-------------
+ .../ClientHelpers/PingetCliHelper.cs          |  2 +-
+ .../ClientHelpers/WinGetCliHelper.cs          |  2 +-
+ .../Helpers/WinGetPkgOperationHelper.cs       | 19 ++++++++++++++++++
+ 4 files changed, 27 insertions(+), 16 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+index e1c398c65..c223e4ebb 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -360,20 +360,12 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     Manager
+                 );
+ 
+-                if (!WinGetPkgOperationHelper.UpdateAlreadyInstalled(UniGetUIPackage))
+-                {
+-                    NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
+-                    packages.Add(UniGetUIPackage);
+-                    logger.Log(
+-                        $"Found package {nativePackage.Name} {nativePackage.Id} on source {source.Name}, from version {version} to version {nativePackage.DefaultInstallVersion.Version}"
+-                    );
+-                }
+-                else
+-                {
+-                    Logger.Warn(
+-                        $"WinGet package {nativePackage.Id} not being shown as an updated as this version has already been marked as installed"
+-                    );
+-                }
++                // Trust COM IsUpdateAvailable, not the "already upgraded" cache (issue #5042).
++                NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
++                packages.Add(UniGetUIPackage);
++                logger.Log(
++                    $"Found package {nativePackage.Name} {nativePackage.Id} on source {source.Name}, from version {version} to version {nativePackage.DefaultInstallVersion.Version}"
++                );
+             }
+             catch (Exception ex)
+             {
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+index fb7612638..b43532a05 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+@@ -58,7 +58,7 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+                 Manager
+             );
+ 
+-            if (!WinGetPkgOperationHelper.UpdateAlreadyInstalled(package))
++            if (!WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
+             {
+                 packages.Add(package);
+             }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+index 855c91870..019a7873a 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+@@ -153,7 +153,7 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+                 }
+ 
+                 var package = new Package(name, id, version, newVersion, source, Manager);
+-                if (!WinGetPkgOperationHelper.UpdateAlreadyInstalled(package))
++                if (!WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
+                 {
+                     Packages.Add(package);
+                 }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 3853b1073..e1017b0a3 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -360,6 +360,25 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             ) == package.NewVersionString;
+     }
+ 
++    public static void ClearUpgradeMark(IPackage package)
++    {
++        Settings.RemoveDictionaryKey<string, string>(
++            Settings.K.WinGetAlreadyUpgradedPackages,
++            package.Id
++        );
++    }
++
++    // One-shot suppression: hide a just-upgraded package once (bridges CLI index lag), then clear
++    // the mark so a still-outdated package reappears next scan instead of forever (issue #5042).
++    public static bool ConsumeAlreadyUpgradedSuppression(IPackage package)
++    {
++        if (!UpdateAlreadyInstalled(package))
++            return false;
++
++        ClearUpgradeMark(package);
++        return true;
++    }
++
+     public static string GetLastInstalledVersion(string id)
+     {
+         var val = Settings.GetDictionaryItem<string, string>(

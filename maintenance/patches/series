@@ -1,0 +1,21 @@
+# Stage 1 Classic patch stack.
+# Apply to maintenance/upstream-base.json:base_commit with git am --3way --keep-cr --ignore-whitespace.
+
+backports/0100-winget-already-upgraded-cache.patch
+backports/0110-winget-explicit-install-location.patch
+backports/0120-powershell-current-user-scope.patch
+backports/0130-winget-stuck-upgrade-loop.patch
+backports/0140-winget-not-applicable-retry.patch
+backports/0150-winget-phantom-update-suppression.patch
+backports/0160-powershell-install-scope.patch
+backports/0170-classic-backport-adaptations.patch
+classic/1000-maintenance-baseline.patch
+classic/1010-classic-updater-channel.patch
+classic/1020-classic-release-workflow.patch
+classic/1030-bootstrap-backport-workflow.patch
+classic/1040-classic-installed-identity.patch
+classic/1050-classic-operation-scope-adapter.patch
+classic/1060-classic-winui-startup.patch
+classic/1070-classic-remove-frontend-switch.patch
+security/9000-sqlitepclraw-hardening.patch
+classic/9990-classic-guard.patch
