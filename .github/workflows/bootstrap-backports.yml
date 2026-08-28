@@ -1,0 +1,144 @@
+name: Bootstrap backports
+
+on:
+  push:
+    branches: [bootstrap-backports]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check whether backports are already applied
+        id: state
+        shell: pwsh
+        run: |
+          if (Test-Path 'maintenance/.bootstrap-backports-applied') {
+            "applied=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "applied=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Configure Git
+        if: steps.state.outputs.applied != 'true'
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin upstream
+
+      - name: Apply independent upstream backports
+        if: steps.state.outputs.applied != 'true'
+        shell: pwsh
+        run: |
+          $locationCommit = '905bcd14ab6ac7ffa4e712889c7c34c12f30309f'
+          $locationHelper = 'src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs'
+          $commits = @(
+            '21116375c8299d1db38a3c3b4c2eb7e18bc97c4e',
+            $locationCommit,
+            'c0ddaa670523bd69fa5a036b3c18b2e96fb9c665'
+          )
+
+          foreach ($commit in $commits) {
+            git cherry-pick -x $commit
+            if ($LASTEXITCODE -eq 0) { continue }
+
+            $conflicts = @(git diff --name-only --diff-filter=U)
+            $productionConflicts = @(
+              $conflicts | Where-Object { $_ -notlike 'src/UniGetUI.PackageEngine.Tests/*' }
+            )
+
+            $isKnownLocationConflict = (
+              $commit -eq $locationCommit -and
+              $productionConflicts.Count -eq 1 -and
+              $productionConflicts[0] -eq $locationHelper
+            )
+
+            if ($isKnownLocationConflict) {
+              Write-Host 'Adapting PR 5173 to the inline v2026.2.1 WinGet update-location logic.'
+              git checkout --ours -- $locationHelper
+
+              $content = Get-Content $locationHelper -Raw
+              $pattern = '(?m)^(?<indent>\s*)options\.CustomInstallLocation != ""\r?\n\k<indent>&& Settings\.Get\(Settings\.K\.WinGetForceLocationOnUpdate\)'
+              $match = [regex]::Match($content, $pattern)
+              if (-not $match.Success) {
+                git cherry-pick --abort
+                throw 'Expected v2026.2.1 WinGet update-location condition was not found.'
+              }
+
+              $indent = $match.Groups['indent'].Value
+              $nl = [Environment]::NewLine
+              $replacement = $indent + 'options.CustomInstallLocation != ""' + $nl +
+                $indent + '&& (' + $nl +
+                $indent + '    options.CustomInstallLocationIsExplicit' + $nl +
+                $indent + '    || Settings.Get(Settings.K.WinGetForceLocationOnUpdate)' + $nl +
+                $indent + ')'
+              $content = $content.Remove($match.Index, $match.Length).Insert($match.Index, $replacement)
+              Set-Content $locationHelper $content -Encoding utf8BOM -NoNewline
+              git add -- $locationHelper
+              $productionConflicts = @()
+            }
+
+            if ($productionConflicts.Count -gt 0) {
+              Write-Host 'Production-code conflicts:'
+              $productionConflicts | ForEach-Object { Write-Host "  $_" }
+              git cherry-pick --abort
+              throw "Production backport conflict: $commit"
+            }
+
+            $remainingConflicts = @(git diff --name-only --diff-filter=U)
+            foreach ($path in $remainingConflicts) {
+              if ($path -notlike 'src/UniGetUI.PackageEngine.Tests/*') {
+                git cherry-pick --abort
+                throw "Unexpected unresolved production conflict: $path"
+              }
+              Write-Host "Keeping Classic-side regression test file: $path"
+              git checkout --ours -- $path
+              git add -- $path
+            }
+
+            git -c core.editor=true cherry-pick --continue
+            if ($LASTEXITCODE -ne 0) {
+              git cherry-pick --abort
+              throw "Could not continue adapted backport: $commit"
+            }
+          }
+
+      - name: Install .NET
+        if: steps.state.outputs.applied != 'true'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Restore tests
+        if: steps.state.outputs.applied != 'true'
+        working-directory: src
+        shell: pwsh
+        run: dotnet restore UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj /p:Platform=x64
+
+      - name: Run package-engine tests
+        if: steps.state.outputs.applied != 'true'
+        working-directory: src
+        shell: pwsh
+        run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64
+
+      - name: Mark and push validated backports
+        if: steps.state.outputs.applied != 'true'
+        shell: pwsh
+        run: |
+          $commits = @(
+            '21116375c8299d1db38a3c3b4c2eb7e18bc97c4e',
+            '905bcd14ab6ac7ffa4e712889c7c34c12f30309f',
+            'c0ddaa670523bd69fa5a036b3c18b2e96fb9c665'
+          )
+          $commits | Set-Content 'maintenance/.bootstrap-backports-applied' -Encoding utf8NoBOM
+          git add maintenance/.bootstrap-backports-applied
+          git commit -m 'Classic: mark bootstrap backports applied'
+          git push origin HEAD:bootstrap-backports
