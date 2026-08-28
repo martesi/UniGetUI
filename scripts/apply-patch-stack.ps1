@@ -57,10 +57,10 @@ if (-not (Test-Path -LiteralPath $worktreeParent -PathType Container)) {
 
 try {
     Write-Host "Creating clean replay worktree at $worktree"
-    [void] (Invoke-PatchStackGit -Repository $repoRoot -Arguments @('worktree', 'add', '--detach', $worktree, $baseCommit))
-    # Preserve the CRLF blob used by the checked-in Inno Setup source while
-    # replaying from Linux or a checkout configured for LF.
-    [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'core.autocrlf', 'true'))
+    # Exact replay must not depend on a host/global core.autocrlf setting. Disable
+    # conversion for the initial checkout as well as for the replay worktree.
+    [void] (Invoke-PatchStackGit -Repository $repoRoot -Arguments @('-c', 'core.autocrlf=false', 'worktree', 'add', '--detach', $worktree, $baseCommit))
+    [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'core.autocrlf', 'false'))
     # git am creates new commits and therefore needs a committer identity even
     # though each format-patch mail already contains the preserved author.
     [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'user.name', 'UniGetUI Patch Stack'))
