@@ -6,12 +6,12 @@ namespace UniGetUI.Core.Data
 {
     public static class CoreData
     {
-        private const string GitHubReleasePageBaseUrl = "https://github.com/Devolutions/UniGetUI/releases/tag/";
-        private const string GitHubReleaseApiBaseUrl = "https://api.github.com/repos/Devolutions/UniGetUI/releases/tags/";
+        private const string GitHubReleasePageBaseUrl = "https://github.com/martesi/UniGetUI/releases/tag/";
+        private const string GitHubReleaseApiBaseUrl = "https://api.github.com/repos/martesi/UniGetUI/releases/tags/";
         private const string BundledModernAppDirectoryName = "Avalonia";
         private const string ClassicExecutableName = "UniGetUI.exe";
         private const string BundledPingetExecutableName = "pinget.exe";
-        public const string ReleaseNotesUrl = "https://devolutions.net/unigetui/release-notes/";
+        public const string ReleaseNotesUrl = "https://github.com/martesi/UniGetUI/releases";
 
         private static int? __code_page;
         public static int CODE_PAGE
@@ -22,10 +22,10 @@ namespace UniGetUI.Core.Data
         public const int BuildNumber = 106; // Do not modify this line, use file scripts/set-version.ps1
 
         public const string UserAgentString =
-            $"UniGetUI/{VersionName} (https://devolutions.net/unigetui; unigetui@devolutions.net)";
+            $"UniGetUIClassic/{VersionName} (https://github.com/martesi/UniGetUI)";
 
-        public const string AppIdentifier = "MartiCliment.UniGetUI";
-        public const string MainWindowIdentifier = "MartiCliment.UniGetUI.MainInterface";
+        public const string AppIdentifier = "Martes.UniGetUIClassic";
+        public const string MainWindowIdentifier = "Martes.UniGetUIClassic.MainInterface";
 
         public static string GetGitHubReleaseTag()
         {
@@ -143,13 +143,10 @@ namespace UniGetUI.Core.Data
                     return PORTABLE_PATH
                         ?? throw new InvalidOperationException("This shouldn't be possible");
                 }
-
-                string old_path = Path.Join(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    ".wingetui"
-                );
-                string new_path = Path.Join(GetLocalDataRoot(), "UniGetUI");
-                return GetNewDataDirectoryOrMoveOld(old_path, new_path);
+                string classicPath = Path.Join(GetLocalDataRoot(), "UniGetUIClassic");
+                if (!Directory.Exists(classicPath))
+                    Directory.CreateDirectory(classicPath);
+                return classicPath;
             }
         }
 

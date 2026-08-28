@@ -37,6 +37,48 @@ jobs:
           grep -q 'github.com/martesi/UniGetUI/releases/latest/download/productinfo.json' "$updater"
           grep -q 'martesi.UniGetUI.Classic' "$updater"
 
+      - name: Verify separate installed app identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer='UniGetUI.iss'
+          core='src/UniGetUI.Core.Data/CoreData.cs'
+
+          grep -Fq '#define MyAppName "UniGetUI Classic"' "$installer"
+          grep -Fq '#define MyAppPublisher "Martes"' "$installer"
+          grep -Fq '#define MyAppURL "https://github.com/martesi/UniGetUI"' "$installer"
+          grep -Fq 'AppId={{E385AFF5-90A4-4296-8702-EC129F9DC40B}' "$installer"
+          if grep -Fq '889610CC-4337-4BDB-AC3B-4F21806C0BDE' "$installer"; then
+            echo 'Classic must not reuse the upstream Inno AppId.' >&2
+            exit 1
+          fi
+          grep -Fq 'DefaultDirName="{autopf64}\UniGetUI Classic"' "$installer"
+          grep -Fq 'ValueName: "UniGetUIClassic"' "$installer"
+          if grep -Fq '/f /im UniGetUI.exe' "$installer" || grep -Fq "TaskKillWait('UniGetUI.exe')" "$installer"; then
+            echo 'Classic installer must not kill upstream UniGetUI by image name.' >&2
+            exit 1
+          fi
+          if grep -Fq -- '--migrate-wingetui-to-unigetui' "$installer"; then
+            echo 'Classic installer must not run the upstream WingetUI migration.' >&2
+            exit 1
+          fi
+
+          grep -Fq 'Software\Classes\unigetui' "$installer"
+          grep -Fq 'UniGetUI.PackageBundle' "$installer"
+          grep -Fq 'Check: ShouldRegisterUniGetUIProtocol;' "$installer"
+          grep -Fq 'Check: ShouldRegisterPackageBundle;' "$installer"
+          grep -Fq 'function ClassicOwnsRegistryCommand' "$installer"
+          grep -Fq 'procedure CurUninstallStepChanged' "$installer"
+          if grep -E 'Software\\Classes\\(unigetui|UniGetUI\.PackageBundle).*uninsdeletekey' "$installer"; then
+            echo 'Shared Classic/upstream handler keys must not be deleted unconditionally.' >&2
+            exit 1
+          fi
+
+          grep -Fq 'Martes.UniGetUIClassic' "$core"
+          grep -Fq 'Martes.UniGetUIClassic.MainInterface' "$core"
+          grep -Fq 'Path.Join(GetLocalDataRoot(), "UniGetUIClassic")' "$core"
+          grep -Fq 'github.com/martesi/UniGetUI/releases/tag/' "$core"
+
       - name: Verify hash-only release policy
         shell: bash
         run: |
