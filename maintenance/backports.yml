@@ -1,0 +1,68 @@
+upstream_base:
+  tag: v2026.2.1
+  commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
+
+backports:
+  - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
+    upstream_pr: 5072
+    status: applied
+    class: backend
+    reason: WinGet already-upgraded cache fix; package-engine only plus tests.
+
+  - commit: 905bcd14ab6ac7ffa4e712889c7c34c12f30309f
+    upstream_pr: 5173
+    status: applied-semantic
+    class: backend-shared-model
+    reason: Honors explicit per-package install location on WinGet update; adapted to Classic's inline location logic.
+
+  - commit: c0ddaa670523bd69fa5a036b3c18b2e96fb9c665
+    upstream_pr: 5169
+    status: applied
+    class: backend
+    reason: Preserves PowerShell module scope during update discovery.
+
+  - commit: 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
+    upstream_pr: 5167
+    status: applied-backend
+    class: backend-plus-ui
+    reason: Stuck-upgrade detection, settings storage, language, and backend behavior are applied; the Avalonia settings control is intentionally excluded from Classic. Classic currently uses the backend default threshold of 3.
+
+  - commit: 249cc4d0d4c947dbe03b998ff392933f8aab15b6
+    upstream_pr: 4998
+    status: applied-semantic
+    class: backend
+    reason: Retries WinGet/Pinget updates reported as not applicable once without forced scope/architecture, then reports a real failure instead of faking success.
+
+  - commit: 26c93b859babdc831b2d8462048d3e5f85d3da67
+    upstream_pr: 5199
+    status: applied-semantic
+    class: backend
+    depends_on:
+      - 4ca6074f301ffb5ea9b2ceb39bd87b814c1a973d
+      - 249cc4d0d4c947dbe03b998ff392933f8aab15b6
+    reason: Suppresses non-applicable WinGet COM phantom updates using stuck-upgrade tracking after the relaxed not-applicable retry path has been exhausted.
+
+  - commit: fce15a3b10e630b269ce6e59be3c6522e3b0ea94
+    upstream_pr: 5114
+    status: applied-semantic
+    class: backend-plus-ui
+    reason: PowerShell scope handling and operation-specific capabilities are backported with upstream regression tests; Avalonia ScopeEnabled behavior is translated to the Classic WinUI scope selector.
+
+  - commit: 9ae64515163e2d1021301ff48e4c47435b7da1f0
+    upstream_pr: 5077
+    status: skipped
+    class: avalonia-orchestration
+    reason: Avalonia-only regression. Classic's UninstallThenReinstall and UninstallThenUpdate already chain one InstallPackageOperation behind the uninstall prerequisite and do not launch the uninstall separately, so neither #5077 defect is present.
+
+  - commit: 4bcd5d0c2a84884dd07eb2eb90732864c3be00fe
+    upstream_pr: 4959
+    status: applied-semantic
+    class: frontend-selection
+    reason: Upstream retired the Classic frontend entirely. Classic preserves WinUI as its sole frontend, so the semantic backport removes the obsolete UseClassicMode selector while retaining legacy settings and launcher helpers for compatibility and lower maintenance delta.
+
+downstream_patches:
+  - id: sqlitepclraw-ghsa-2m69-gcr7-jv3q
+    issue: 5
+    status: applied
+    class: security-hardening
+    reason: Overrides the SQLitePCLRaw bundle to 2.1.13 because Pinget 0.9.0 transitively resolves vulnerable SQLitePCLRaw.lib.e_sqlite3 2.1.11 through Microsoft.Data.Sqlite 10.0.7. Keep only until upstream or Pinget removes the vulnerable resolution.
