@@ -2,9 +2,9 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppVersion "3.3.7"
-#define MyAppName "UniGetUI"
-#define MyAppPublisher "Devolutions Inc."
-#define MyAppURL "https://github.com/Devolutions/UniGetUI"
+#define MyAppName "UniGetUI Classic"
+#define MyAppPublisher "Martes"
+#define MyAppURL "https://github.com/martesi/UniGetUI"
 #define MyAppExeName "UniGetUI.exe"
 
 #define public Dependency_Path_NetCoreCheck "InstallerExtras\"
@@ -14,18 +14,18 @@
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
-UninstallDisplayName="UniGetUI"
-AppId={{889610CC-4337-4BDB-AC3B-4F21806C0BDE}
+UninstallDisplayName="{#MyAppName}"
+AppId={{E385AFF5-90A4-4296-8702-EC129F9DC40B}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-AppPublisherURL="https://devolutions.net/unigetui/"
+AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 VersionInfoVersion=3.3.7.0
 VersionInfoProductVersion=3.3.7.0
-DefaultDirName="{autopf64}\UniGetUI"
+DefaultDirName="{autopf64}\UniGetUI Classic"
 DisableProgramGroupPage=yes
 DisableDirPage=no
 DirExistsWarning=no
@@ -94,39 +94,24 @@ Name: "Ukrainian"; MessagesFile: "compiler:Languages\Ukrainian.isl"
 #include "InstallerExtras\CustomMessages.iss"
 
 [Code]
+var
+  RegisterUniGetUIProtocol: Boolean;
+  RegisterPackageBundle: Boolean;
+
+function ShouldRegisterUniGetUIProtocol(): Boolean;
+begin
+  Result := RegisterUniGetUIProtocol;
+end;
+
+function ShouldRegisterPackageBundle(): Boolean;
+begin
+  Result := RegisterPackageBundle;
+end;
+
 procedure InitializeWizard;
 begin
   WizardForm.Bevel.Visible := False;
   WizardForm.Bevel1.Visible := True;
-end;
-
-// Kills all instances of an image and loops until none remain (taskkill returns 0 while killing, 128 when none left).
-procedure TaskKillWait(FileName: String);
-var
-  ResultCode, Attempts: Integer;
-begin
-    Attempts := 0;
-    repeat
-        if not Exec('taskkill.exe', '/f /im "' + FileName + '"', '', SW_HIDE,
-            ewWaitUntilTerminated, ResultCode) then
-            Break;
-        if ResultCode <> 0 then
-            Break;
-        Sleep(500);
-        Attempts := Attempts + 1;
-    until Attempts >= 10;
-end;
-
-procedure KillRunningApps;
-begin
-    TaskKillWait('WingetUI.exe');
-    TaskKillWait('UniGetUI.exe');
-    TaskKillWait('UniGetUI.Avalonia.exe');
-    // Elevator (gsudo cache) and pinget live in {app} and lock their own files.
-    TaskKillWait('UniGetUI Elevator.exe');
-    TaskKillWait('pinget.exe');
-    Sleep(1000); // let the OS release file handles before copying
-
 end;
 
 function GetCurrentProcessId: Cardinal; external 'GetCurrentProcessId@kernel32.dll stdcall';
@@ -151,10 +136,9 @@ begin
     DeleteFile(UpdateMarkerPath());
 end;
 
-// Runs before any file is copied: shut everything down, then mark the copy window.
+// Runs before any file is copied: mark the copy window. Restart Manager handles app shutdown.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-    KillRunningApps;
     WriteUpdateMarker;
     Result := '';
 end;
@@ -221,12 +205,18 @@ begin
     Result := False;
     MsgBox('There is an invalid character in the selected install location. ' +
       'Install location cannot contain special characters. ' +
-      'Please input a valid path to continue, such as '+ExpandConstant('{commonpf64}')+'\UniGetUI', mbError, MB_OK);
+      'Please input a valid path to continue, such as '+ExpandConstant('{commonpf64}')+'\UniGetUI Classic', mbError, MB_OK);
   end;
 end;
 
 function InitializeSetup: Boolean;
 begin
+  // Do not steal shared compatibility handlers from an existing upstream installation.
+  RegisterUniGetUIProtocol := not RegKeyExists(HKA, 'Software\Classes\unigetui');
+  RegisterPackageBundle :=
+    not RegKeyExists(HKA, 'Software\Classes\UniGetUI.PackageBundle') and
+    not RegValueExists(HKA, 'Software\Classes\.ubundle', '');
+
   try
     if not CmdLineParamExists('/NoVCRedist') then
     begin
@@ -243,6 +233,41 @@ begin
 end;
 
 
+function ClassicOwnsRegistryCommand(const SubKey: String): Boolean;
+var
+  Command, ClassicExecutable: String;
+begin
+  Result := False;
+  if RegQueryStringValue(HKA, SubKey, '', Command) then
+  begin
+    ClassicExecutable := ExpandConstant('{app}\UniGetUI.exe');
+    Result := Pos(Lowercase(ClassicExecutable), Lowercase(Command)) > 0;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  BundleProgId: String;
+begin
+  if CurUninstallStep <> usUninstall then
+    Exit;
+
+  // Delete shared handlers only when their command still points to this Classic installation.
+  if ClassicOwnsRegistryCommand('Software\Classes\unigetui\shell\open\command') then
+    RegDeleteKeyIncludingSubkeys(HKA, 'Software\Classes\unigetui');
+
+  if ClassicOwnsRegistryCommand('Software\Classes\UniGetUI.PackageBundle\shell\open\command') then
+  begin
+    RegDeleteKeyIncludingSubkeys(HKA, 'Software\Classes\UniGetUI.PackageBundle');
+    if RegQueryStringValue(HKA, 'Software\Classes\.ubundle', '', BundleProgId) and
+       (CompareText(BundleProgId, 'UniGetUI.PackageBundle') = 0) then
+    begin
+      RegDeleteValue(HKA, 'Software\Classes\.ubundle', '');
+      RegDeleteKeyIfEmpty(HKA, 'Software\Classes\.ubundle');
+    end;
+  end;
+end;
+
 [Tasks]
 Name: "portableinstall"; Description: "{cm:PortInst}"; GroupDescription: "{cm:InstallType}"; Flags: unchecked exclusive
 Name: "regularinstall"; Description: "{cm:RegInst}"; GroupDescription: "{cm:InstallType}"; Flags: exclusive   
@@ -250,20 +275,20 @@ Name: "regularinstall\startmenuicon"; Description: "{cm:RegStartMmenuIcon}"; Gro
 Name: "regularinstall\desktopicon"; Description: "{cm:RegDesktopIcon}"; GroupDescription: "{cm:ShCuts}";
 
 [Registry]
-Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "WingetUI"; ValueData: """{app}\UniGetUI.exe"" --daemon"; Flags: uninsdeletevalue noerror; Tasks: regularinstall;
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: binary; ValueName: "WingetUI"; ValueData: "03"; Flags: uninsdeletevalue; Tasks: regularinstall; Check: CmdLineParamExists('/NoRunOnStartup');
+Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "UniGetUIClassic"; ValueData: """{app}\UniGetUI.exe"" --daemon"; Flags: uninsdeletevalue noerror; Tasks: regularinstall;
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: binary; ValueName: "UniGetUIClassic"; ValueData: "03"; Flags: uninsdeletevalue; Tasks: regularinstall; Check: CmdLineParamExists('/NoRunOnStartup');
 
 // Register the unigetui:// deep link
-Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueData: "URL:UniGetUI Protocol"; Flags: uninsdeletekey; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\unigetui\DefaultIcon"; ValueType: "string"; ValueData: "{app}\{#MyAppExeName},0"; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\unigetui\shell\open\command"; ValueType: "string"; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: regularinstall;
+Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueData: "URL:UniGetUI Protocol"; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
+Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
+Root: HKA; Subkey: "Software\Classes\unigetui\DefaultIcon"; ValueType: "string"; ValueData: "{app}\{#MyAppExeName},0"; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
+Root: HKA; Subkey: "Software\Classes\unigetui\shell\open\command"; ValueType: "string"; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
 
 // Register the .ubundle file type
-Root: HKA; Subkey: "Software\Classes\.ubundle"; ValueType: string; ValueData: "UniGetUI.PackageBundle"; Flags: uninsdeletekey; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle"; ValueType: string; ValueData: {cm:PackageBundleName}; Flags: uninsdeletekey; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"; Flags: uninsdeletekey; Tasks: regularinstall;
-Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: regularinstall;
+Root: HKA; Subkey: "Software\Classes\.ubundle"; ValueType: string; ValueData: "UniGetUI.PackageBundle"; Tasks: regularinstall; Check: ShouldRegisterPackageBundle;
+Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle"; ValueType: string; ValueData: {cm:PackageBundleName}; Tasks: regularinstall; Check: ShouldRegisterPackageBundle;
+Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"; Tasks: regularinstall; Check: ShouldRegisterPackageBundle;
+Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: regularinstall; Check: ShouldRegisterPackageBundle;
 
 
 [Files]
@@ -271,7 +296,7 @@ Root: HKA; Subkey: "Software\Classes\UniGetUI.PackageBundle\shell\open\command";
 Source: "{srcexe}"; DestDir: "{app}"; DestName: "UniGetUI.Installer.exe"; Flags: external ignoreversion; Tasks: regularinstall; Check: not CmdLineParamExists('/NoDeployInstaller');
 ; Deploy integrity tree
 Source: "unigetui_bin\IntegrityTree.json"; DestDir: "{app}"; Flags: createallsubdirs ignoreversion recursesubdirs;
-; Deploy executable files (running instances already killed in PrepareToInstall).
+; Deploy executable files. Inno Setup Restart Manager handles files in this Classic install directory.
 Source: "unigetui_bin\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion;
 Source: "unigetui_bin\*"; DestDir: "{app}"; Flags: createallsubdirs ignoreversion recursesubdirs;
 ; Make installation portable (if required)
@@ -285,12 +310,4 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: re
 [Run]
 ; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File -NonInteractive ""{tmp}\EnsureWinGet.ps1"""; StatusMsg: "Ensuring WinGet is properly installed... (this may take a while)"; WorkingDir: {app}; Check: not CmdLineParamExists('/NoWinGet'); Flags: runhidden
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: runasoriginaluser nowait postinstall; Check: not CmdLineParamExists('/NoAutoStart');
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--migrate-wingetui-to-unigetui"; StatusMsg: "Removing old icons...";
 
-
-[UninstallRun]    
-; Remove WingetUI Notification registries
-; Filename: "{app}\{#MyAppExeName}"; Parameters: "--uninstall-unigetui"; Flags: skipifdoesntexist runhidden;
-Filename: {sys}\taskkill.exe; Parameters: "/f /im WingetUI.exe"; Flags: skipifdoesntexist runhidden; RunOnceId: "KillWingetUI"
-Filename: {sys}\taskkill.exe; Parameters: "/f /im UniGetUI.exe"; Flags: skipifdoesntexist runhidden; RunOnceId: "KillUniGetUI"
-Filename: {sys}\taskkill.exe; Parameters: "/f /im UniGetUI.Avalonia.exe"; Flags: skipifdoesntexist runhidden; RunOnceId: "KillUniGetUIAvalonia"
