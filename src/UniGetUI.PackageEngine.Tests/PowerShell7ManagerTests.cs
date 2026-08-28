@@ -70,12 +70,20 @@ public sealed class PowerShell7ManagerTests
     public void GetParameters_ExplicitScopeOverridesDetectedScope()
     {
         var manager = new PowerShell7();
-        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
-            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
+        var package = Assert.Single(
+            PowerShell7.ParseInstalledPackages(
+                ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"],
+                manager
+            )
+        );
         Assert.Equal(PackageScope.Machine, package.OverridenOptions.Scope);
 
         var options = new InstallOptions { InstallationScope = PackageScope.User };
-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
 
         Assert.Contains("CurrentUser", parameters);
         Assert.DoesNotContain("AllUsers", parameters);
@@ -85,12 +93,20 @@ public sealed class PowerShell7ManagerTests
     public void GetParameters_ExplicitGlobalOverridesDetectedUserScope()
     {
         var manager = new PowerShell7();
-        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
-            ["##SCOPE:CurrentUser##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
+        var package = Assert.Single(
+            PowerShell7.ParseInstalledPackages(
+                ["##SCOPE:CurrentUser##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"],
+                manager
+            )
+        );
         Assert.Equal(PackageScope.User, package.OverridenOptions.Scope);
 
         var options = new InstallOptions { InstallationScope = PackageScope.Machine };
-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
 
         Assert.Contains("AllUsers", parameters);
         Assert.DoesNotContain("CurrentUser", parameters);
@@ -100,11 +116,19 @@ public sealed class PowerShell7ManagerTests
     public void GetParameters_DefaultScopeFallsBackToDetectedScope()
     {
         var manager = new PowerShell7();
-        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
-            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager));
+        var package = Assert.Single(
+            PowerShell7.ParseInstalledPackages(
+                ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"],
+                manager
+            )
+        );
 
         var options = new InstallOptions();
-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
 
         Assert.Contains("AllUsers", parameters);
         Assert.DoesNotContain("CurrentUser", parameters);

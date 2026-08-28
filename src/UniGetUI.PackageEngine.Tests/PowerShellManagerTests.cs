@@ -58,14 +58,19 @@ public sealed class PowerShellManagerTests
         Assert.Equal("Pester", package.Id);
     }
 
-    private static UniGetUI.PackageEngine.Interfaces.IPackage BuildInstalledPackage(PowerShell manager)
-        => Assert.Single(PowerShell.ParseInstalledPackages(
-            [
-                "Version Name Repository Description",
-                "------- ---- ---------- -----------",
-                "1.0.0 Devolutions.PowerShell PSGallery x",
-            ],
-            manager));
+    private static UniGetUI.PackageEngine.Interfaces.IPackage BuildInstalledPackage(
+        PowerShell manager
+    ) =>
+        Assert.Single(
+            PowerShell.ParseInstalledPackages(
+                [
+                    "Version Name Repository Description",
+                    "------- ---- ---------- -----------",
+                    "1.0.0 Devolutions.PowerShell PSGallery x",
+                ],
+                manager
+            )
+        );
 
     [Fact]
     public void GetParameters_InstallRespectsExplicitScope()
@@ -74,7 +79,11 @@ public sealed class PowerShellManagerTests
         var package = BuildInstalledPackage(manager);
 
         var options = new InstallOptions { InstallationScope = PackageScope.Machine };
-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Install);
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Install
+        );
 
         Assert.Contains("-Scope", parameters);
         Assert.Contains("AllUsers", parameters);
@@ -90,7 +99,11 @@ public sealed class PowerShellManagerTests
         var package = BuildInstalledPackage(manager);
 
         var options = new InstallOptions { InstallationScope = PackageScope.Machine };
-        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
 
         Assert.DoesNotContain("-Scope", parameters);
     }
