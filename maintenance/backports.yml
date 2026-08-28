@@ -50,6 +50,6 @@ backports:
 
   - commit: 9ae64515163e2d1021301ff48e4c47435b7da1f0
     upstream_pr: 5077
-    status: inspect-classic
+    status: skipped
     class: avalonia-orchestration
-    reason: Upstream fix lives only in Avalonia pages; verify whether the equivalent Classic workflow has the same bug before porting.
+    reason: Avalonia-only regression. Classic's UninstallThenReinstall and UninstallThenUpdate already chain one InstallPackageOperation behind the uninstall prerequisite and do not launch the uninstall separately, so neither #5077 defect is present.
