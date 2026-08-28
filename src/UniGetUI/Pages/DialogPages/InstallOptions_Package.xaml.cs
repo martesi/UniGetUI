@@ -280,7 +280,14 @@ namespace UniGetUI.Interface.Dialogs
                         Package.Manager.Capabilities.SupportsCustomVersions
                         || Package.Manager.Capabilities.SupportsPreRelease
                     );
-                ScopeCombo.IsEnabled = Package.Manager.Capabilities.SupportsCustomScopes;
+                ScopeCombo.IsEnabled =
+                    Package.Manager.Capabilities.SupportsCustomScopes
+                    && operation switch
+                    {
+                        OperationType.Update => Package.Manager.Capabilities.SupportsCustomScopesOnUpdate,
+                        OperationType.Uninstall => Package.Manager.Capabilities.SupportsCustomScopesOnUninstall,
+                        _ => true,
+                    };
                 ResetDir.IsEnabled = Package.Manager.Capabilities.SupportsCustomLocations;
                 SelectDir.IsEnabled = Package.Manager.Capabilities.SupportsCustomLocations;
             }
