@@ -61,6 +61,10 @@ try {
     # Preserve the CRLF blob used by the checked-in Inno Setup source while
     # replaying from Linux or a checkout configured for LF.
     [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'core.autocrlf', 'true'))
+    # git am creates new commits and therefore needs a committer identity even
+    # though each format-patch mail already contains the preserved author.
+    [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'user.name', 'UniGetUI Patch Stack'))
+    [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'user.email', 'patch-stack@localhost'))
 
     foreach ($entry in $series) {
         Write-Host "Applying $($entry.RelativePath)"
