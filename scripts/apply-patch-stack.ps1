@@ -57,18 +57,17 @@ if (-not (Test-Path -LiteralPath $worktreeParent -PathType Container)) {
 
 try {
     Write-Host "Creating clean replay worktree at $worktree"
-    [void] (Invoke-PatchStackGit -Repository $repoRoot -Arguments @('worktree', 'add', '--detach', $worktree, $baseCommit))
-    # Preserve the CRLF blob used by the checked-in Inno Setup source while
-    # replaying from Linux or a checkout configured for LF.
-    [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'core.autocrlf', 'true'))
+    # Exact replay must not depend on a host/global core.autocrlf setting.
+    [void] (Invoke-PatchStackGit -Repository $repoRoot -Arguments @('-c', 'core.autocrlf=false', 'worktree', 'add', '--detach', $worktree, $baseCommit))
+    [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'core.autocrlf', 'false'))
+    # git am creates new commits and therefore needs a committer identity even
+    # though each format-patch mail already contains the preserved author.
+    [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'user.name', 'UniGetUI Patch Stack'))
+    [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('config', 'user.email', 'patch-stack@localhost'))
 
     foreach ($entry in $series) {
         Write-Host "Applying $($entry.RelativePath)"
         try {
-            # The Classic installer is intentionally CRLF while the rest of the
-            # repository is LF. Keep git am --3way as the primary path, retain
-            # CR characters from the mail, and ignore only line-ending whitespace
-            # while matching that patch.
             [void] (Invoke-PatchStackGit -Repository $worktree -Arguments @('am', '--3way', '--keep-cr', '--ignore-whitespace', $entry.FullPath))
         }
         catch {
