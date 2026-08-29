@@ -31,7 +31,18 @@ result. The keep-cr option preserves the mixed CRLF/LF blob used by the preserve
 Inno Setup source. The ignore-whitespace option lets that patch match on either
 platform; it does not discard added or removed source lines.
 
-The patch stack is a source reconstruction mechanism. Existing .NET tests,
-Classic guard checks, and CLI E2E remain the behavioral validation gates; this
-stack check proves that those gates are running against the same source tree that
-was recorded for the Classic snapshot.
+## Release source
+
+Stage 2 makes the patch stack the source used for Classic releases. The Classic
+release workflow checks out full repository history, replays the ordered patch
+series into a clean worktree, and compares that worktree's Git tree with the
+recorded `classic_source_commit` tree before any release mutation occurs.
+
+Version stamping, restore, tests, WinUI publish, integrity-tree refresh, and Inno
+Setup packaging then run inside that verified replay worktree. The maintenance
+checkout is used only to locate patch metadata and drive reconstruction; release
+binaries are not built from the checked-out `main` source tree.
+
+Existing .NET tests, Classic guard checks, and CLI E2E remain behavioral
+validation gates. Patch-stack equivalence proves that those gates and the release
+pipeline can operate on the same recorded Classic source tree.
