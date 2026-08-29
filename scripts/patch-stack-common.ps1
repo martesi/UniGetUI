@@ -104,7 +104,7 @@ function Get-PatchStackSeries {
             throw "Patch is not a git-format-patch mail: $relativePath"
         }
 
-        if ($content -notmatch '(?m)^(Upstream-Commit|Classic-Source-Commit): [0-9a-f]{40}$') {
+        if ($content -notmatch '(?m)^(Upstream-Commit|Classic-Source-Commit): [0-9a-f]{40}\r?$') {
             throw "Patch has no provenance trailer: $relativePath"
         }
 
