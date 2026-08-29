@@ -28,8 +28,12 @@ permissions:
 
 jobs:
   replay-equivalence:
-    name: Replay upstream base and Classic patch series
-    runs-on: ubuntu-latest
+    name: Replay upstream base and Classic patch series (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout full history
         uses: actions/checkout@v6
