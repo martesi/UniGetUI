@@ -328,13 +328,15 @@ namespace UniGetUI.PackageEngine.PackageClasses
         {
             if (!IsUpgradable)
                 return false;
+            if (
+                NormalizedVersion == CoreTools.Version.Null
+                || NormalizedNewVersion == CoreTools.Version.Null
+            )
+                return false;
 
             return NormalizedVersion.Major == NormalizedNewVersion.Major
                 && NormalizedVersion.Minor == NormalizedNewVersion.Minor
-                && (
-                    NormalizedVersion.Patch != NormalizedNewVersion.Patch
-                    || NormalizedVersion.Remainder != NormalizedNewVersion.Remainder
-                );
+                && NormalizedVersion != NormalizedNewVersion;
         }
 
         public virtual Task<InstallOptions> GetInstallOptions() =>

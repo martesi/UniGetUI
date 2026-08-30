@@ -386,7 +386,7 @@ namespace UniGetUI.Core.Tools
 
         public static Task<string> GetFileNameAsync(Uri url) => Task.Run(() => GetFileName(url));
 
-        public struct Version : IComparable
+        public struct Version : IComparable, IComparable<Version>, IEquatable<Version>
         {
             public static readonly Version Null = new(-1, -1, -1, -1);
 
@@ -395,19 +395,64 @@ namespace UniGetUI.Core.Tools
             public readonly int Patch;
             public readonly int Remainder;
 
+            /// <summary>
+            /// Segments past the fourth, with trailing zeroes trimmed so that equal versions
+            /// always carry an identical array. Null when the version has four segments or fewer.
+            /// These are compared too, so that versions differing only past the fourth segment
+            /// (e.g. a build revision on a four-part version: 1.2.3.4_1 vs 1.2.3.4_2) order
+            /// correctly instead of collapsing into Remainder.
+            /// </summary>
+            private readonly int[]? _extraSegments;
+
             public Version(int major, int minor = 0, int patch = 0, int remainder = 0)
+                : this(major, minor, patch, remainder, null) { }
+
+            private Version(int major, int minor, int patch, int remainder, int[]? extraSegments)
             {
                 Major = major;
                 Minor = minor;
                 Patch = patch;
                 Remainder = remainder;
+                _extraSegments = extraSegments;
             }
 
-            public int CompareTo(object? other_)
+            /// <summary>
+            /// Builds a Version from an arbitrary number of segments. Segments past the fourth are
+            /// retained for comparison rather than being folded into Remainder.
+            /// </summary>
+            internal static Version FromSegments(IReadOnlyList<int> segments)
             {
-                if (other_ is not Version other)
-                    return 0;
+                int count = segments.Count;
+                while (count > 4 && segments[count - 1] == 0)
+                    count--;
 
+                int[]? extra = null;
+                if (count > 4)
+                {
+                    extra = new int[count - 4];
+                    for (int i = 4; i < count; i++)
+                        extra[i - 4] = segments[i];
+                }
+
+                return new Version(
+                    Segment(segments, 0),
+                    Segment(segments, 1),
+                    Segment(segments, 2),
+                    Segment(segments, 3),
+                    extra
+                );
+
+                static int Segment(IReadOnlyList<int> values, int index) =>
+                    index < values.Count ? values[index] : 0;
+            }
+
+            private int ExtraSegment(int index) =>
+                _extraSegments is not null && index < _extraSegments.Length ? _extraSegments[index] : 0;
+
+            public int CompareTo(object? other_) => other_ is Version other ? CompareTo(other) : 0;
+
+            public int CompareTo(Version other)
+            {
                 int major = Major.CompareTo(other.Major);
                 if (major != 0)
                     return major;
@@ -420,7 +465,36 @@ namespace UniGetUI.Core.Tools
                 if (patch != 0)
                     return patch;
 
-                return Remainder.CompareTo(other.Remainder);
+                int remainder = Remainder.CompareTo(other.Remainder);
+                if (remainder != 0)
+                    return remainder;
+
+                int extraCount = Math.Max(
+                    _extraSegments?.Length ?? 0,
+                    other._extraSegments?.Length ?? 0
+                );
+                for (int i = 0; i < extraCount; i++)
+                {
+                    int extra = ExtraSegment(i).CompareTo(other.ExtraSegment(i));
+                    if (extra != 0)
+                        return extra;
+                }
+
+                return 0;
+            }
+
+            /// <summary>
+            /// The 1-based position of the most significant segment that differs from
+            /// <paramref name="other"/>, or 0 when both versions are equal. Differences past the
+            /// fourth segment all report 4, as they are the least significant change there is.
+            /// </summary>
+            public int FirstDifferingComponent(Version other)
+            {
+                if (Major != other.Major) return 1;
+                if (Minor != other.Minor) return 2;
+                if (Patch != other.Patch) return 3;
+                if (Remainder != other.Remainder) return 4;
+                return CompareTo(other) == 0 ? 0 : 4;
             }
 
             public static bool operator ==(Version left, Version right) =>
@@ -439,15 +513,22 @@ namespace UniGetUI.Core.Tools
 
             public static bool operator <(Version left, Version right) => left.CompareTo(right) < 0;
 
-            public bool Equals(Version other) =>
-                Major == other.Major
-                && Minor == other.Minor
-                && Patch == other.Patch
-                && Remainder == other.Remainder;
+            public bool Equals(Version other) => CompareTo(other) == 0;
 
             public override bool Equals(object? obj) => obj is Version other && Equals(other);
 
-            public override int GetHashCode() => HashCode.Combine(Major, Minor, Patch, Remainder);
+            public override int GetHashCode()
+            {
+                // Trailing zeroes are trimmed from _extraSegments, so equal versions hash equally.
+                HashCode hash = new();
+                hash.Add(Major);
+                hash.Add(Minor);
+                hash.Add(Patch);
+                hash.Add(Remainder);
+                foreach (int segment in _extraSegments ?? [])
+                    hash.Add(segment);
+                return hash.ToHashCode();
+            }
         }
 
         /// <summary>
@@ -459,10 +540,24 @@ namespace UniGetUI.Core.Tools
         {
             try
             {
-                char[] separators = ['.', '-', '/', '#'];
-                string[] versionItems = ["", "", "", ""];
+                // '_' is a segment separator too: package managers use it to append a build
+                // revision to an upstream version (e.g. Homebrew's `18.4_1`). Without it, the
+                // revision digits get concatenated into the previous segment (18.41), which
+                // compares as greater than later upstream releases (18.6) and hides updates.
+                char[] separators = ['.', '-', '/', '#', '_'];
 
-                string[] segments = version.Split(separators, StringSplitOptions.RemoveEmptyEntries);
+                // The ambiguity check below deliberately does NOT split on '_', so that a version
+                // whose underscore introduces a pre-release tag rather than a numeric revision
+                // ("2.0.0_rc1") keeps reporting as unknown, exactly as it did before '_' became a
+                // separator. Parsing it instead would rank the pre-release above the final release
+                // and hide the 2.0.0_rc1 -> 2.0.0 update. A numeric revision ("18.4_1") still
+                // passes, because '_' is neither a digit nor a letter and so trips no flag.
+                char[] ambiguityCheckSeparators = ['.', '-', '/', '#'];
+
+                string[] segments = version.Split(
+                    ambiguityCheckSeparators,
+                    StringSplitOptions.RemoveEmptyEntries
+                );
                 foreach (var segment in segments)
                 {
                     bool seenDigit = false;
@@ -490,28 +585,29 @@ namespace UniGetUI.Core.Tools
                     }
                 }
 
-                int dotCount = 0;
+                // Collect every segment rather than capping at four. Capping used to append the
+                // surplus digits to the fourth segment, which inflated it: 1.2.3.4_1 became
+                // 1.2.3.41 and so compared as greater than the newer 1.2.3.5, hiding the update.
+                List<string> segmentDigits = [""];
                 bool first = true;
 
                 foreach (char c in version)
                 {
                     if (char.IsDigit(c))
-                        versionItems[dotCount] += c;
+                        segmentDigits[^1] += c;
                     else if (!first && separators.Contains(c))
-                        if (dotCount < 3)
-                            dotCount++;
+                        segmentDigits.Add("");
                     first = false;
                 }
 
-                int[] numbers = { 0, 0, 0, 0 };
-                for (int i = 0; i < 4; i++)
+                int[] numbers = new int[segmentDigits.Count];
+                for (int i = 0; i < numbers.Length; i++)
                 {
-                    if (int.TryParse(versionItems[i], out int val))
+                    if (int.TryParse(segmentDigits[i], out int val))
                         numbers[i] = val;
                 }
 
-                var ver = new Version(numbers[0], numbers[1], numbers[2], numbers[3]);
-                return ver;
+                return Version.FromSegments(numbers);
             }
             catch
             {
