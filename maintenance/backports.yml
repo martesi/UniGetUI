@@ -27,6 +27,12 @@ backports:
     class: backend-plus-winui
     reason: Detects Cargo binaries under CARGO_HOME, adds dynamic dependency commands, and verifies Classic WinUI dependency installs; the upstream Avalonia dialog rewrite is intentionally excluded.
 
+  - commit: 357e1b122cc22277feeb3da146fa8430a3b2b716
+    upstream_pr: 5309
+    status: applied
+    class: backend
+    reason: Propagates non-terminating PowerShell 5.x module errors through the operation exit code while respecting caller-owned error variables.
+
   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
     upstream_pr: 5072
     status: applied
