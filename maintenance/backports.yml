@@ -33,6 +33,12 @@ backports:
     class: backend
     reason: Propagates non-terminating PowerShell 5.x module errors through the operation exit code while respecting caller-owned error variables.
 
+  - commit: c683fa77961b1cdf72a41599f5a91ab5699db8e6
+    upstream_pr: 5244
+    status: applied-semantic
+    class: backend
+    reason: Treats Pinget's no-applicable-upgrade message as not applicable even when the process exits with code zero, preserving Classic's existing retry and phantom-suppression guards.
+
   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
     upstream_pr: 5072
     status: applied
