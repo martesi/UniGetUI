@@ -3,6 +3,12 @@ upstream_base:
   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
 
 backports:
+  - commit: 6f9b1d8227dfed5378d294f23b639c4e317d4b9c
+    upstream_pr: 5296
+    status: applied-semantic
+    class: backend-shared-versioning
+    reason: Treats numeric underscore build revisions as version segments and compares segments past the fourth. Classic keeps its legacy IsUpdateMinor signature, so extra-segment detection is translated there rather than importing upstream's newer skip-level API.
+
   - commit: b0d8bcb11569f5b3eb007fe2315c782e6ce97f5d
     upstream_pr: 5312
     status: applied
