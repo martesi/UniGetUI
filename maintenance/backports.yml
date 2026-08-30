@@ -3,6 +3,12 @@ upstream_base:
   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
 
 backports:
+  - commit: 460178a3e99361946e570025a3a8e0c8b0257336
+    upstream_pr: 5311
+    status: applied-semantic
+    class: backend-shared-icon-cache
+    reason: Retries transient package icon lookup failures after five minutes, caches successful resolutions by full versioned hash, and fixes the x-icon MIME mapping. Avalonia bitmap-cache changes are omitted because Classic WinUI only stores icon URLs after successful lookup.
+
   - commit: 67322ffdf3c14761b64fc9b78dcf1e82adcbd247
     upstream_pr: 5306
     status: applied
