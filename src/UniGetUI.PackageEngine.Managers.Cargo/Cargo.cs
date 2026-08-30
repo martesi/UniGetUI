@@ -21,6 +21,58 @@ public partial class Cargo : PackageManager
     [GeneratedRegex(@"([\w-]+)\s=\s""(\d+\.\d+\.\d+)""\s*#\s(.*)")]
     private static partial Regex SearchLineRegex();
 
+    internal static IReadOnlyList<string> GetCargoBinDirectories(
+        Func<string, string?> readEnvironmentVariable,
+        string userProfileDirectory
+    )
+    {
+        List<string> directories = [];
+
+        if (readEnvironmentVariable("CARGO_HOME")?.Trim() is { Length: > 0 } cargoHome)
+            directories.Add(Path.Join(cargoHome, "bin"));
+        else if (userProfileDirectory.Trim() is { Length: > 0 } userProfile)
+            directories.Add(Path.Join(userProfile, ".cargo", "bin"));
+
+        return directories;
+    }
+
+    internal static bool IsCargoBinaryPresent(string binaryName) =>
+        CoreTools.Which(binaryName).Item1
+        || GetCargoBinDirectories(
+                Environment.GetEnvironmentVariable,
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            )
+            .Any(directory => IsExecutableFile(Path.Join(directory, binaryName)));
+
+    private static bool IsExecutableFile(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+
+        if (OperatingSystem.IsWindows())
+            return true;
+
+        const UnixFileMode ExecutableBits =
+            UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+
+        try
+        {
+            return (File.GetUnixFileMode(path) & ExecutableBits) is not 0;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+    }
+
     public Cargo()
     {
         string cargoCommand = OperatingSystem.IsWindows() ? "cargo.exe" : "cargo";
@@ -31,23 +83,30 @@ public partial class Cargo : PackageManager
             ? "cargo-binstall.exe"
             : "cargo-binstall";
 
+        string CargoPath() =>
+            Status.ExecutablePath is { Length: > 0 } path ? path : cargoCommand;
+
         Dependencies =
         [
-            // cargo-update is required to check for installed and upgradable packages
-            new ManagerDependency(
-                "cargo-update",
-                cargoCommand,
-                "install cargo-update",
-                "cargo install cargo-update",
-                async () => (await CoreTools.WhichAsync(cargoUpdateBinary)).Item1
-            ),
             // Cargo-binstall is required to install and update cargo binaries
             new ManagerDependency(
                 "cargo-binstall",
                 cargoCommand,
-                "install cargo-binstall",
-                "cargo install cargo-binstall",
-                async () => (await CoreTools.WhichAsync(cargoBinstallBinary)).Item1
+                "install cargo-binstall --locked",
+                "cargo install cargo-binstall --locked",
+                async () => await Task.Run(() => IsCargoBinaryPresent(cargoBinstallBinary)),
+                () => (CargoPath(), "install cargo-binstall --locked")
+            ),
+            // cargo-update is required to check for installed and upgradable packages
+            new ManagerDependency(
+                "cargo-update",
+                cargoCommand,
+                "install cargo-update --locked",
+                "cargo install cargo-update --locked",
+                async () => await Task.Run(() => IsCargoBinaryPresent(cargoUpdateBinary)),
+                () => IsCargoBinaryPresent(cargoBinstallBinary)
+                    ? (CargoPath(), "binstall --no-confirm cargo-update")
+                    : (CargoPath(), "install cargo-update --locked")
             ),
         ];
 
@@ -158,7 +217,7 @@ public partial class Cargo : PackageManager
     }
 
     public readonly bool HasBinstall =
-        CoreTools.Which(OperatingSystem.IsWindows() ? "cargo-binstall.exe" : "cargo-binstall").Item1;
+        IsCargoBinaryPresent(OperatingSystem.IsWindows() ? "cargo-binstall.exe" : "cargo-binstall");
 
     public override IReadOnlyList<string> FindCandidateExecutableFiles() =>
         CoreTools.WhichMultiple(OperatingSystem.IsWindows() ? "cargo.exe" : "cargo");

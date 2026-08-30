@@ -21,6 +21,12 @@ backports:
     class: backend
     reason: Drains Scoop stdout and stderr concurrently, closes command input, handles listing timeouts, and reports unknown versions safely.
 
+  - commit: 20f3296c9e5fde85201aa1cba4c897c848b3f724
+    upstream_pr: 5322
+    status: partial
+    class: backend-plus-winui
+    reason: Detects Cargo binaries under CARGO_HOME, adds dynamic dependency commands, and verifies Classic WinUI dependency installs; the upstream Avalonia dialog rewrite is intentionally excluded.
+
   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
     upstream_pr: 5072
     status: applied

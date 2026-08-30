@@ -799,10 +799,7 @@ namespace UniGetUI.Interface
             foreach (ManagerDependency dependency in dependencies)
             {
                 await DialogHelper.ShowMissingDependency(
-                    dependency.Name,
-                    dependency.InstallFileName,
-                    dependency.InstallArguments,
-                    dependency.FancyInstallCommand,
+                    dependency,
                     current++,
                     total
                 );
