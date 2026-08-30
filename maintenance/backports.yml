@@ -9,6 +9,12 @@ backports:
     class: backend
     reason: Replaces fragile Cargo output regexes with column-aware parsing, safe install-list fallback, and tolerant crate metadata lookup.
 
+  - commit: ac366036a875f37e2d7b1977623a5cdd8f2d3f4d
+    upstream_pr: 4974
+    status: applied
+    class: backend
+    reason: Kills registered manager listing processes on timeout and avoids retrying Chocolatey listings that cannot be repaired safely.
+
   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
     upstream_pr: 5072
     status: applied

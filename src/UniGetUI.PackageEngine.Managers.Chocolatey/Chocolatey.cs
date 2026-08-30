@@ -71,6 +71,9 @@ namespace UniGetUI.PackageEngine.Managers.ChocolateyManager
             Path.Join(CoreData.UniGetUIDataDirectory, "Chocolatey"),
         ];
 
+        // AttemptFastRepair is a no-op here, so retrying a timed-out choco listing just spawns another (#4974).
+        protected override bool RetryListingTasksOnTimeout => false;
+
         public Chocolatey()
         {
             Capabilities = new ManagerCapabilities
@@ -271,6 +274,7 @@ namespace UniGetUI.PackageEngine.Managers.ChocolateyManager
 
             IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.ListUpdates, p);
             p.Start();
+            RegisterListingProcess(p);
 
             string? line;
             List<string> lines = [];
@@ -309,6 +313,7 @@ namespace UniGetUI.PackageEngine.Managers.ChocolateyManager
                 p
             );
             p.Start();
+            RegisterListingProcess(p);
 
             string? line;
             List<string> lines = [];
