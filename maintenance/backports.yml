@@ -3,6 +3,12 @@ upstream_base:
   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
 
 backports:
+  - commit: b0d8bcb11569f5b3eb007fe2315c782e6ce97f5d
+    upstream_pr: 5312
+    status: applied
+    class: backend
+    reason: Replaces fragile Cargo output regexes with column-aware parsing, safe install-list fallback, and tolerant crate metadata lookup.
+
   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
     upstream_pr: 5072
     status: applied
