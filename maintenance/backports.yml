@@ -3,6 +3,12 @@ upstream_base:
   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
 
 backports:
+  - commit: 67322ffdf3c14761b64fc9b78dcf1e82adcbd247
+    upstream_pr: 5306
+    status: applied
+    class: backend
+    reason: Removes stale ChocolateyInstall user and inherited process values that point at retired bundled Chocolatey locations before manager initialization.
+
   - commit: 6f9b1d8227dfed5378d294f23b639c4e317d4b9c
     upstream_pr: 5296
     status: applied-semantic
