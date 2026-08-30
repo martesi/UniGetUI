@@ -15,6 +15,12 @@ backports:
     class: backend
     reason: Kills registered manager listing processes on timeout and avoids retrying Chocolatey listings that cannot be repaired safely.
 
+  - commit: 4108308bf6c0f67754da25c47135ba55fd8beee1
+    upstream_pr: 5321
+    status: applied
+    class: backend
+    reason: Drains Scoop stdout and stderr concurrently, closes command input, handles listing timeouts, and reports unknown versions safely.
+
   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
     upstream_pr: 5072
     status: applied
