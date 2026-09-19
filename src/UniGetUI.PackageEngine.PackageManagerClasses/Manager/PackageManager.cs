@@ -426,7 +426,10 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
             }
             try
             {
-                RefreshPackageIndexesSafely();
+                if (!SecondAttempt)
+                {
+                    RefreshPackageIndexesSafely();
+                }
 
                 var packages = RunListingTaskWithTimeout(
                     GetAvailableUpdates_UnSafe,
