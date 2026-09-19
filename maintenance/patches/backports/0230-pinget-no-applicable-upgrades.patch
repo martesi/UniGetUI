@@ -1,0 +1,73 @@
+From fedb38c3f0f35f79e9dbfce4e9fd5aed0d85ea48 Mon Sep 17 00:00:00 2001
+From: Martes <96113508+martesi@users.noreply.github.com>
+Date: Sun, 30 Aug 2026 02:10:39 +0000
+Subject: [PATCH] backport: recognize Pinget no-applicable upgrades
+
+Upstream-Commit: c683fa77961b1cdf72a41599f5a91ab5699db8e6
+Upstream-PR: Devolutions/UniGetUI#5244
+
+Classic-Source-Commit: fedb38c3f0f35f79e9dbfce4e9fd5aed0d85ea48
+---
+diff --git a/maintenance/backports.yml b/maintenance/backports.yml
+--- a/maintenance/backports.yml
++++ b/maintenance/backports.yml
+@@ -33,6 +33,12 @@ backports:
+     class: backend
+     reason: Propagates non-terminating PowerShell 5.x module errors through the operation exit code while respecting caller-owned error variables.
+ 
++  - commit: c683fa77961b1cdf72a41599f5a91ab5699db8e6
++    upstream_pr: 5244
++    status: applied-semantic
++    class: backend
++    reason: Treats Pinget's no-applicable-upgrade message as not applicable even when the process exits with code zero, preserving Classic's existing retry and phantom-suppression guards.
++
+   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
+     upstream_pr: 5072
+     status: applied
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -288,9 +288,9 @@ operation is OperationType.Uninstall
+         // non-zero with "No applicable installer found" in its output (#4998).
+         bool pingetReportedNotApplicable =
+             ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
+-            && returnCode != 0
+             && processOutput.Any(line =>
+                 line.Contains("No applicable installer found", StringComparison.OrdinalIgnoreCase)
++                || line.Contains("No applicable upgrade found", StringComparison.OrdinalIgnoreCase)
+             );
+ 
+         if (uintCode is 0x8A15002B || pingetReportedNotApplicable)
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -1118,6 +1118,29 @@ public void WinGetGenericPingetFailureDoesNotRetry()
+         Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+     }
+ 
++    [Fact]
++    public void WinGetUpdateNotApplicableViaPingetWithZeroExitCodeFails()
++    {
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            ["No applicable upgrade found."],
++            0
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
++    }
++
+     [Fact]
+     public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
+     {

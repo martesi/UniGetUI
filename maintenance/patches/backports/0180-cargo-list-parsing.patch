@@ -1,0 +1,582 @@
+From 16bc56e42a003e3cdde2fcef2b686676144323ef Mon Sep 17 00:00:00 2001
+From: Martes <96113508+martesi@users.noreply.github.com>
+Date: Sun, 30 Aug 2026 01:52:15 +0000
+Subject: [PATCH] backport: parse Cargo package lists by column
+
+Upstream-Commit: b0d8bcb11569f5b3eb007fe2315c782e6ce97f5d
+Upstream-PR: Devolutions/UniGetUI#5312
+
+Classic-Source-Commit: 16bc56e42a003e3cdde2fcef2b686676144323ef
+---
+diff --git a/maintenance/backports.yml b/maintenance/backports.yml
+--- a/maintenance/backports.yml
++++ b/maintenance/backports.yml
+@@ -3,6 +3,12 @@ upstream_base:
+   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
+ 
+ backports:
++  - commit: b0d8bcb11569f5b3eb007fe2315c782e6ce97f5d
++    upstream_pr: 5312
++    status: applied
++    class: backend
++    reason: Replaces fragile Cargo output regexes with column-aware parsing, safe install-list fallback, and tolerant crate metadata lookup.
++
+   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
+     upstream_pr: 5072
+     status: applied
+diff --git a/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs b/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
+@@ -21,13 +21,6 @@ public partial class Cargo : PackageManager
+     [GeneratedRegex(@"([\w-]+)\s=\s""(\d+\.\d+\.\d+)""\s*#\s(.*)")]
+     private static partial Regex SearchLineRegex();
+ 
+-    [GeneratedRegex(@"(.+)v(\d+\.\d+\.\d+)\s*v(\d+\.\d+\.\d+)\s*(Yes|No)")]
+-    private static partial Regex UpdateLineRegex();
+-
+-    // Matches "ripgrep v15.1.0:" lines from `cargo install --list`
+-    [GeneratedRegex(@"^([\w-]+)\s+v(\d+\.\d+\.\d+):")]
+-    private static partial Regex InstallListLineRegex();
+-
+     public Cargo()
+     {
+         string cargoCommand = OperatingSystem.IsWindows() ? "cargo.exe" : "cargo";
+@@ -193,28 +186,44 @@ protected override void _loadManagerVersion(out string version)
+     }
+ 
+     public void InvalidateInstalledCache() =>
+-        TaskRecycler<List<Match>>.RemoveFromCache(GetInstalledCommandOutput);
++        TaskRecycler<List<CargoListEntry>>.RemoveFromCache(GetInstalledCommandOutput);
+ 
+     private IReadOnlyList<Package> GetPackages(LoggableTaskType taskType)
+     {
+         List<Package> Packages = [];
+-        foreach (var match in TaskRecycler<List<Match>>.RunOrAttach(GetInstalledCommandOutput, 15))
++        var entries = TaskRecycler<List<CargoListEntry>>.RunOrAttach(GetInstalledCommandOutput, 15);
++        foreach (var entry in entries)
+         {
+-            var id = match.Groups[1]?.Value?.Trim() ?? "";
+-            var name = CoreTools.FormatAsName(id);
+-            var oldVersion = match.Groups[2]?.Value?.Trim() ?? "";
+-            var newVersion = match.Groups[3]?.Value?.Trim() ?? "";
+-            if (taskType is LoggableTaskType.ListUpdates && oldVersion != newVersion)
+-                Packages.Add(new Package(name, id, oldVersion, newVersion, DefaultSource, this));
++            var name = CoreTools.FormatAsName(entry.Id);
++            if (taskType is LoggableTaskType.ListUpdates)
++            {
++                if (
++                    entry.NeedsUpdate
++                    && entry.LatestVersion is { Length: > 0 } latestVersion
++                    && latestVersion != entry.InstalledVersion
++                )
++                    Packages.Add(
++                        new Package(
++                            name,
++                            entry.Id,
++                            entry.InstalledVersion,
++                            latestVersion,
++                            DefaultSource,
++                            this
++                        )
++                    );
++            }
+             else if (taskType is LoggableTaskType.ListInstalledPackages)
+-                Packages.Add(new Package(name, id, oldVersion, DefaultSource, this));
++                Packages.Add(
++                    new Package(name, entry.Id, entry.InstalledVersion, DefaultSource, this)
++                );
+         }
+         return Packages;
+     }
+ 
+-    private List<Match> GetInstalledCommandOutput()
++    private List<CargoListEntry> GetInstalledCommandOutput()
+     {
+-        List<Match> output = [];
++        List<string> stdout = [];
+         using Process p = GetProcess(Status.ExecutablePath, "install-update --list");
+         IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.OtherTask, p);
+         logger.AddToStdOut("Other task: Call the install-update command");
+@@ -224,38 +233,39 @@ private List<Match> GetInstalledCommandOutput()
+         while ((line = p.StandardOutput.ReadLine()) is not null)
+         {
+             logger.AddToStdOut(line);
+-            var match = UpdateLineRegex().Match(line);
+-            if (match.Success)
+-                output.Add(match);
++            stdout.Add(line);
+         }
+         logger.AddToStdErr(p.StandardError.ReadToEnd());
+         p.WaitForExit();
++
++        List<string> skippedRows = [];
++        var output = ParseInstallUpdateList(stdout, skippedRows);
++        foreach (var skippedRow in skippedRows)
++            logger.AddToStdErr($"Ignored unrecognized `install-update --list` row: {skippedRow}");
+         logger.Close(p.ExitCode);
+ 
+         if (output.Count > 0)
+             return output;
+ 
+-        // Fallback: cargo-update is not installed, use the built-in `cargo install --list`.
+-        // No latest-version info is available, so updates won't be detected, but the installed
+-        // packages list will be populated correctly.
++        List<string> fallbackStdout = [];
+         using Process fallback = GetProcess(Status.ExecutablePath, "install --list");
+-        IProcessTaskLogger fallbackLogger = TaskLogger.CreateNew(LoggableTaskType.OtherTask, fallback);
+-        fallbackLogger.AddToStdOut("Falling back to `cargo install --list` (cargo-update not available)");
++        IProcessTaskLogger fallbackLogger = TaskLogger.CreateNew(
++            LoggableTaskType.OtherTask,
++            fallback
++        );
++        fallbackLogger.AddToStdOut(
++            "Falling back to `cargo install --list` (cargo-update reported no packages)"
++        );
+         fallback.Start();
+         while ((line = fallback.StandardOutput.ReadLine()) is not null)
+         {
+             fallbackLogger.AddToStdOut(line);
+-            var m = InstallListLineRegex().Match(line);
+-            if (!m.Success) continue;
+-            // Synthesise a match compatible with UpdateLineRegex (same installed and latest version → no update)
+-            var fake = UpdateLineRegex().Match($"{m.Groups[1].Value} v{m.Groups[2].Value} v{m.Groups[2].Value} No");
+-            if (fake.Success)
+-                output.Add(fake);
++            fallbackStdout.Add(line);
+         }
+         fallbackLogger.AddToStdErr(fallback.StandardError.ReadToEnd());
+         fallback.WaitForExit();
+         fallbackLogger.Close(fallback.ExitCode);
+-        return output;
++        return ParseInstallList(fallbackStdout);
+     }
+ 
+     private Process GetProcess(string fileName, string extraArguments)
+diff --git a/src/UniGetUI.PackageEngine.Managers.Cargo/CargoListParsing.cs b/src/UniGetUI.PackageEngine.Managers.Cargo/CargoListParsing.cs
+new file mode 100644
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Managers.Cargo/CargoListParsing.cs
+@@ -0,0 +1,117 @@
++using System.Text.RegularExpressions;
++
++namespace UniGetUI.PackageEngine.Managers.CargoManager;
++
++internal sealed record CargoListEntry(
++    string Id,
++    string InstalledVersion,
++    string? LatestVersion,
++    bool NeedsUpdate
++);
++
++public partial class Cargo
++{
++    [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9_-]*$")]
++    private static partial Regex CrateNameRegex();
++
++    [GeneratedRegex(@"[ \t]{2,}|\t")]
++    private static partial Regex ColumnSeparatorRegex();
++
++    [GeneratedRegex(@"^v(?<version>[0-9][A-Za-z0-9.+-]*)(?:\s+\(v[^)]*\))?$")]
++    private static partial Regex VersionCellRegex();
++
++    [GeneratedRegex(@"^(?<id>[A-Za-z0-9_][A-Za-z0-9_-]*)\s+v(?<version>[0-9][A-Za-z0-9.+-]*)(?:\s+\(.*\))?:$")]
++    private static partial Regex InstallListLineRegex();
++
++    internal static List<CargoListEntry> ParseInstallUpdateList(
++        IEnumerable<string> lines,
++        List<string>? skippedRows = null
++    )
++    {
++        List<CargoListEntry> entries = [];
++        bool insideTable = false;
++
++        foreach (var rawLine in lines)
++        {
++            var line = rawLine.Trim();
++
++            if (line.Length is 0)
++            {
++                insideTable = false;
++                continue;
++            }
++
++            if (IsTableHeader(line))
++            {
++                insideTable = true;
++                continue;
++            }
++
++            if (!insideTable)
++                continue;
++
++            var entry = ParseInstallUpdateRow(line);
++            if (entry is null)
++                skippedRows?.Add(line);
++            else
++                entries.Add(entry);
++        }
++
++        return entries;
++    }
++
++    internal static List<CargoListEntry> ParseInstallList(IEnumerable<string> lines)
++    {
++        List<CargoListEntry> entries = [];
++
++        foreach (var rawLine in lines)
++        {
++            var match = InstallListLineRegex().Match(rawLine.TrimEnd());
++            if (match.Success)
++                entries.Add(
++                    new CargoListEntry(
++                        match.Groups["id"].Value,
++                        match.Groups["version"].Value,
++                        null,
++                        false
++                    )
++                );
++        }
++
++        return entries;
++    }
++
++    private static bool IsTableHeader(string line) =>
++        line.StartsWith("Package", StringComparison.Ordinal)
++        && line.Contains("Installed", StringComparison.Ordinal)
++        && line.Contains("Latest", StringComparison.Ordinal)
++        && line.Contains("Needs update", StringComparison.Ordinal);
++
++    private static CargoListEntry? ParseInstallUpdateRow(string line)
++    {
++        var cells = ColumnSeparatorRegex().Split(line);
++        if (cells.Length < 4)
++            return null;
++
++        var id = cells[0].Trim();
++        if (!CrateNameRegex().IsMatch(id))
++            return null;
++
++        var installedVersion = ParseVersionCell(cells[1]);
++        if (installedVersion is null)
++            return null;
++
++        return new CargoListEntry(
++            id,
++            installedVersion,
++            ParseVersionCell(cells[2]),
++            cells[3].Trim().Equals("Yes", StringComparison.OrdinalIgnoreCase)
++        );
++    }
++
++    private static string? ParseVersionCell(string cell)
++    {
++        var match = VersionCellRegex().Match(cell.Trim());
++        return match.Success ? match.Groups["version"].Value : null;
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Managers.Cargo/Helpers/CargoPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Cargo/Helpers/CargoPkgDetailsHelper.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Cargo/Helpers/CargoPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Cargo/Helpers/CargoPkgDetailsHelper.cs
+@@ -44,19 +44,22 @@ protected override void GetDetails_UnSafe(IPackageDetails details)
+         var categories = manifest.categories?.Select(c => c.category) ?? [];
+         details.Tags = [.. keywords, .. categories];
+ 
+-        var versionData = manifest
+-            .versions.Where((v) => v.num == details.Package.VersionString)
+-            .First();
+-
+-        details.Author = versionData.published_by?.name;
+-        details.License = versionData.license;
+-        details.InstallerUrl = new Uri(
+-            (CratesIOClient.ApiUrl + versionData.dl_path).Replace("/api/v1/api/v1", "/api/v1")
++        var versionData = manifest.versions.FirstOrDefault(v =>
++            v.num == details.Package.VersionString
+         );
+-        details.InstallerSize = versionData.crate_size ?? 0;
+-        details.InstallerHash = versionData.checksum;
+-        details.Publisher = versionData.published_by?.name;
+-        details.UpdateDate = versionData.updated_at;
++
++        if (versionData is not null)
++        {
++            details.Author = versionData.published_by?.name;
++            details.License = versionData.license;
++            details.InstallerUrl = new Uri(
++                (CratesIOClient.ApiUrl + versionData.dl_path).Replace("/api/v1/api/v1", "/api/v1")
++            );
++            details.InstallerSize = versionData.crate_size ?? 0;
++            details.InstallerHash = versionData.checksum;
++            details.Publisher = versionData.published_by?.name;
++            details.UpdateDate = versionData.updated_at;
++        }
+ 
+         // TODO: most packages are hosted on Github; see if there's a way to use the repository
+         // info to extract release notes
+diff --git a/src/UniGetUI.PackageEngine.Tests/CargoListParsingTests.cs b/src/UniGetUI.PackageEngine.Tests/CargoListParsingTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/CargoListParsingTests.cs
+@@ -0,0 +1,263 @@
++using UniGetUI.PackageEngine.Managers.CargoManager;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++public sealed class CargoListParsingTests
++{
++    private static string[] Lines(string output) =>
++        output.Replace("\r\n", "\n").Split('\n', StringSplitOptions.None);
++
++    [Fact]
++    public void ParseInstallUpdateList_ParsesRealCargoUpdateOutput()
++    {
++        var entries = Cargo.ParseInstallUpdateList(
++            Lines(
++                """
++                    Polling registry 'https://index.crates.io/'..
++
++                Package         Installed  Latest   Needs update
++                cargo-update    v16.4.1    v22.1.1  Yes
++                cargo-binstall  v1.21.1    v1.21.1  No
++
++                cargo-binstall contains removed executables (cargo-binstall.exe), which will be re-installed on update — you can remove it with cargo uninstall cargo-binstall
++
++                """
++            )
++        );
++
++        Assert.Equal(2, entries.Count);
++
++        Assert.Equal("cargo-update", entries[0].Id);
++        Assert.Equal("16.4.1", entries[0].InstalledVersion);
++        Assert.Equal("22.1.1", entries[0].LatestVersion);
++        Assert.True(entries[0].NeedsUpdate);
++
++        Assert.Equal("cargo-binstall", entries[1].Id);
++        Assert.Equal("1.21.1", entries[1].InstalledVersion);
++        Assert.Equal("1.21.1", entries[1].LatestVersion);
++        Assert.False(entries[1].NeedsUpdate);
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_SkipsRowWithoutPackageName()
++    {
++        List<string> skipped = [];
++
++        var entries = Cargo.ParseInstallUpdateList(
++            Lines(
++                """
++                Package         Installed  Latest   Needs update
++                  v1.21.1  v1.21.2  Yes
++                cargo-update    v16.4.1    v22.1.1  Yes
++                """
++            ),
++            skipped
++        );
++
++        Assert.Equal("cargo-update", Assert.Single(entries).Id);
++        Assert.Equal("v1.21.1  v1.21.2  Yes", Assert.Single(skipped));
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_AcceptsPrereleaseAndBuildMetadataVersions()
++    {
++        var entries = Cargo.ParseInstallUpdateList(
++            Lines(
++                """
++                Package  Installed       Latest        Needs update
++                bat      v0.24.0-beta.1  v0.26.1       Yes
++                eza      v1.0.0+build.5  v1.1.0-rc.2   Yes
++                """
++            )
++        );
++
++        Assert.Equal(2, entries.Count);
++        Assert.Equal("0.24.0-beta.1", entries[0].InstalledVersion);
++        Assert.Equal("0.26.1", entries[0].LatestVersion);
++        Assert.Equal("1.0.0+build.5", entries[1].InstalledVersion);
++        Assert.Equal("1.1.0-rc.2", entries[1].LatestVersion);
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_StripsAlternativeVersionNote()
++    {
++        var entry = Assert.Single(
++            Cargo.ParseInstallUpdateList(
++                Lines(
++                    """
++                    Package         Installed  Latest                            Needs update
++                    cargo-binstall  v1.21.1    v1.21.2 (v1.23.0-rc.1 available)  Yes
++                    """
++                )
++            )
++        );
++
++        Assert.Equal("cargo-binstall", entry.Id);
++        Assert.Equal("1.21.1", entry.InstalledVersion);
++        Assert.Equal("1.21.2", entry.LatestVersion);
++        Assert.True(entry.NeedsUpdate);
++    }
++
++    [Theory]
++    [InlineData("N/A")]
++    [InlineData("^1.21")]
++    [InlineData("=1.21.1")]
++    public void ParseInstallUpdateList_ReportsUnknownLatestVersionAsNull(string latestCell)
++    {
++        var entry = Assert.Single(
++            Cargo.ParseInstallUpdateList(
++                Lines(
++                    $"""
++                    Package         Installed  Latest    Needs update
++                    cargo-binstall  v1.21.1    {latestCell}    No
++                    """
++                )
++            )
++        );
++
++        Assert.Equal("1.21.1", entry.InstalledVersion);
++        Assert.Null(entry.LatestVersion);
++        Assert.False(entry.NeedsUpdate);
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_SkipsRowsWithoutParsableInstalledVersion()
++    {
++        var entries = Cargo.ParseInstallUpdateList(
++            Lines(
++                """
++                Package         Installed  Latest    Needs update
++                cargo-binstall  No         v1.21.1   Yes
++                """
++            )
++        );
++
++        Assert.Empty(entries);
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_IgnoresGitPackageTable()
++    {
++        var entries = Cargo.ParseInstallUpdateList(
++            Lines(
++                """
++                    Checking 1 git package.
++
++                Package  Installed                                 Latest                                    Needs update
++                mygitpkg  1a2b3c4d5e6f7890abcdef1234567890abcdef12  9876543210fedcba9876543210fedcba98765432  Yes
++                """
++            )
++        );
++
++        Assert.Empty(entries);
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_IgnoresLinesOutsideTheTable()
++    {
++        var entries = Cargo.ParseInstallUpdateList(
++            Lines(
++                """
++                    Polling registry 'https://index.crates.io/'.
++                cargo-update is no longer part of its registry — you can remove it with cargo uninstall cargo-update
++                """
++            )
++        );
++
++        Assert.Empty(entries);
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_SkipsRowsWithMissingColumns()
++    {
++        var entries = Cargo.ParseInstallUpdateList(
++            Lines(
++                """
++                Package  Installed  Latest   Needs update
++                bat                 v0.26.1  Yes
++                """
++            )
++        );
++
++        Assert.Empty(entries);
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_ReadsNeedsUpdateFromItsOwnColumn()
++    {
++        var entries = Cargo.ParseInstallUpdateList(
++            Lines(
++                """
++                Package  Installed  Latest   Needs update
++                bat      v0.26.1    v0.26.2  No
++                eza      v1.0.0     v1.1.0   Yes
++                """
++            )
++        );
++
++        Assert.False(entries[0].NeedsUpdate);
++        Assert.True(entries[1].NeedsUpdate);
++    }
++
++    [Fact]
++    public void ParseInstallUpdateList_IgnoresNotesWhenNotSeparatedByABlankLine()
++    {
++        var entry = Assert.Single(
++            Cargo.ParseInstallUpdateList(
++                Lines(
++                    """
++                    Package  Installed  Latest   Needs update
++                    bat      v0.26.1    v0.26.2  Yes
++                    bat contains removed executables (bat.exe), which will be re-installed on update — you can remove it with cargo uninstall bat
++                    """
++                )
++            )
++        );
++
++        Assert.Equal("bat", entry.Id);
++    }
++
++    [Fact]
++    public void ParseInstallList_ParsesSourcesContainingParentheses()
++    {
++        var entry = Assert.Single(
++            Cargo.ParseInstallList(Lines(@"mycrate v0.1.0 (C:\Program Files (x86)\mycrate):"))
++        );
++
++        Assert.Equal("mycrate", entry.Id);
++        Assert.Equal("0.1.0", entry.InstalledVersion);
++    }
++
++    [Fact]
++    public void ParseInstallList_ParsesPackageLinesAndIgnoresBinaries()
++    {
++        var entries = Cargo.ParseInstallList(
++            Lines(
++                """
++                cargo-binstall v1.21.1:
++                    cargo-binstall.exe
++                cargo-update v16.4.1:
++                    cargo-install-update-config.exe
++                    cargo-install-update.exe
++                ripgrep v14.1.0 (https://github.com/BurntSushi/ripgrep?branch=master#1a2b3c4d):
++                    rg.exe
++                """
++            )
++        );
++
++        Assert.Equal(3, entries.Count);
++        Assert.Equal("cargo-binstall", entries[0].Id);
++        Assert.Equal("1.21.1", entries[0].InstalledVersion);
++        Assert.Equal("cargo-update", entries[1].Id);
++        Assert.Equal("ripgrep", entries[2].Id);
++        Assert.Equal("14.1.0", entries[2].InstalledVersion);
++        Assert.All(
++            entries,
++            entry =>
++            {
++                Assert.Null(entry.LatestVersion);
++                Assert.False(entry.NeedsUpdate);
++            }
++        );
++    }
++}

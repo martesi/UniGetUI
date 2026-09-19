@@ -1,0 +1,460 @@
+From dc5c1958e4010d1ed06ae64ea5ecd11aec40feab Mon Sep 17 00:00:00 2001
+From: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 30 Aug 2026 06:49:03 +0000
+Subject: [PATCH] backport: handle underscore version revisions
+
+Upstream-Commit: 6f9b1d8227dfed5378d294f23b639c4e317d4b9c
+
+Upstream-PR: Devolutions/UniGetUI#5296
+
+Classic-Source-Commit: dc5c1958e4010d1ed06ae64ea5ecd11aec40feab
+---
+diff --git a/maintenance/backports.yml b/maintenance/backports.yml
+--- a/maintenance/backports.yml
++++ b/maintenance/backports.yml
+@@ -3,6 +3,12 @@ upstream_base:
+   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
+ 
+ backports:
++  - commit: 6f9b1d8227dfed5378d294f23b639c4e317d4b9c
++    upstream_pr: 5296
++    status: applied-semantic
++    class: backend-shared-versioning
++    reason: Treats numeric underscore build revisions as version segments and compares segments past the fourth. Classic keeps its legacy IsUpdateMinor signature, so extra-segment detection is translated there rather than importing upstream's newer skip-level API.
++
+   - commit: b0d8bcb11569f5b3eb007fe2315c782e6ce97f5d
+     upstream_pr: 5312
+     status: applied
+diff --git a/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs b/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
+--- a/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
++++ b/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
+@@ -304,10 +304,17 @@ public async Task TestFileSizeLoader(string uri, long expectedSize)
+         [InlineData("", 0, 0, 0, 0)]
+         [InlineData("dfgfdsgdfg", 0, 0, 0, 0)]
+         [InlineData("-12", 12, 0, 0, 0)]
+-        [InlineData("4.0.0.1.0", 4, 0, 0, 10)]
+-        [InlineData("4.0.0.1.05", 4, 0, 0, 105)]
++        // Segments past the fourth are kept separately instead of being appended to Remainder,
++        // which used to turn "1" followed by "0" into 10 and "1" followed by "05" into 105.
++        [InlineData("4.0.0.1.0", 4, 0, 0, 1)]
++        [InlineData("4.0.0.1.05", 4, 0, 0, 1)]
+         [InlineData("2024.30.04.1223", 2024, 30, 4, 1223)]
+         [InlineData("0.0", 0, 0, 0, 0)]
++        // Build revisions appended with '_' (Homebrew) must become their own segment, so that
++        // 18.4_1 stays below 18.6 instead of being read as 18.41 (issue #5293).
++        [InlineData("18.4_1", 18, 4, 1, 0)]
++        [InlineData("3.14.3_1", 3, 14, 3, 1)]
++        [InlineData("1_2_3_4", 1, 2, 3, 4)]
+         public void TestGetVersionStringAsFloat(string version, int i1, int i2, int i3, int i4)
+         {
+             CoreTools.Version v = CoreTools.VersionStringToStruct(version);
+@@ -324,6 +331,93 @@ public void TestGetVersionStringAsFloat_WithNonNumericVersion_ReturnsNull()
+             Assert.Equal(CoreTools.Version.Null, v);
+         }
+ 
++        // An underscore introducing a pre-release tag rather than a numeric revision must keep
++        // reporting as unknown, as it did before '_' became a segment separator. Parsing these
++        // would rank the pre-release above the final release and hide the 2.0.0_rc1 -> 2.0.0
++        // update, so the ambiguity check deliberately does not split on '_'.
++        [Theory]
++        [InlineData("2.0.0_rc1")]
++        [InlineData("2.0.0_beta2")]
++        [InlineData("1.0.0+build_1")]
++        [InlineData("1.2_3a4")]
++        public void TestGetVersionStringAsFloat_WithUnderscoredPreReleaseTag_ReturnsNull(string version)
++        {
++            Assert.Equal(CoreTools.Version.Null, CoreTools.VersionStringToStruct(version));
++        }
++
++        // ...while an underscore introducing a numeric revision must parse, since that is the
++        // whole point of treating '_' as a separator.
++        [Theory]
++        [InlineData("18.4_1", 18, 4, 1, 0)]
++        [InlineData("1.2.3_1", 1, 2, 3, 1)]
++        public void TestGetVersionStringAsFloat_WithUnderscoredRevision_Parses(
++            string version, int i1, int i2, int i3, int i4)
++        {
++            CoreTools.Version v = CoreTools.VersionStringToStruct(version);
++            Assert.NotEqual(CoreTools.Version.Null, v);
++            Assert.Equal(i1, v.Major);
++            Assert.Equal(i2, v.Minor);
++            Assert.Equal(i3, v.Patch);
++            Assert.Equal(i4, v.Remainder);
++        }
++
++        // Known limitation, recorded rather than endorsed: a pre-release tag carrying no number is
++        // dropped entirely, so the pre-release parses equal to its final release and
++        // NewerVersionIsInstalled() hides the upgrade onto that release. Every separator behaves
++        // this way, which is why '_' is not special-cased for it -- fixing this means ranking
++        // pre-releases below their release for all managers, well beyond the scope of the '_' work.
++        // Asserted against the '-' and '.' spellings so all variants move together when it is
++        // fixed.
++        [Theory]
++        [InlineData("2.0.0_alpha", "2.0.0")]
++        [InlineData("2.0.0-alpha", "2.0.0")]
++        [InlineData("2.0.0.alpha", "2.0.0")]
++        [InlineData("1.0.0_pre", "1.0.0")]
++        public void TestPreReleaseTagWithoutNumberStillParsesEqualToItsRelease(
++            string preRelease, string release)
++        {
++            Assert.Equal(
++                CoreTools.VersionStringToStruct(release),
++                CoreTools.VersionStringToStruct(preRelease)
++            );
++        }
++
++        // Versions that only differ past the fourth segment must still order correctly. The
++        // four-component assertions above cannot express this, since the difference lives in the
++        // segments beyond Remainder.
++        [Theory]
++        // A build revision on a four-part version used to inflate Remainder (1.2.3.41), making
++        // the installed version compare as greater than the newer release (issue #5293).
++        [InlineData("1.2.3.4_1", "1.2.3.5")]
++        [InlineData("1.2.3.4_1", "1.2.3.4_2")]
++        [InlineData("3.1.4.1_1", "3.1.4.2")]
++        [InlineData("4.0.0.1.0", "4.0.0.1.05")]
++        [InlineData("4.0.0.1.5", "4.0.0.1.10")]
++        public void TestVersionOrderingBeyondFourthSegment(string lower, string higher)
++        {
++            CoreTools.Version low = CoreTools.VersionStringToStruct(lower);
++            CoreTools.Version high = CoreTools.VersionStringToStruct(higher);
++
++            Assert.True(low < high, $"expected {lower} < {higher}");
++            Assert.True(high > low, $"expected {higher} > {lower}");
++            Assert.NotEqual(low, high);
++        }
++
++        [Theory]
++        // Trailing zeroes past the fourth segment are trimmed, so these are the same version and
++        // must agree on equality and hash code.
++        [InlineData("1.2.3.4", "1.2.3.4.0")]
++        [InlineData("1.2.3.4", "1.2.3.4.0.0")]
++        [InlineData("18.4_1", "18.4.1")]
++        public void TestVersionEqualityIgnoresTrailingZeroSegments(string left, string right)
++        {
++            CoreTools.Version a = CoreTools.VersionStringToStruct(left);
++            CoreTools.Version b = CoreTools.VersionStringToStruct(right);
++
++            Assert.Equal(a, b);
++            Assert.Equal(a.GetHashCode(), b.GetHashCode());
++        }
++
+         [Theory]
+         [InlineData("2026.1.0", "2026.1.0")]
+         [InlineData("2026.1.0.0", "2026.1.0")]
+diff --git a/src/UniGetUI.Core.Tools/Tools.cs b/src/UniGetUI.Core.Tools/Tools.cs
+--- a/src/UniGetUI.Core.Tools/Tools.cs
++++ b/src/UniGetUI.Core.Tools/Tools.cs
+@@ -386,7 +386,7 @@ or HttpStatusCode.PermanentRedirect
+ 
+         public static Task<string> GetFileNameAsync(Uri url) => Task.Run(() => GetFileName(url));
+ 
+-        public struct Version : IComparable
++        public struct Version : IComparable, IComparable<Version>, IEquatable<Version>
+         {
+             public static readonly Version Null = new(-1, -1, -1, -1);
+ 
+@@ -395,19 +395,64 @@ public struct Version : IComparable
+             public readonly int Patch;
+             public readonly int Remainder;
+ 
++            /// <summary>
++            /// Segments past the fourth, with trailing zeroes trimmed so that equal versions
++            /// always carry an identical array. Null when the version has four segments or fewer.
++            /// These are compared too, so that versions differing only past the fourth segment
++            /// (e.g. a build revision on a four-part version: 1.2.3.4_1 vs 1.2.3.4_2) order
++            /// correctly instead of collapsing into Remainder.
++            /// </summary>
++            private readonly int[]? _extraSegments;
++
+             public Version(int major, int minor = 0, int patch = 0, int remainder = 0)
++                : this(major, minor, patch, remainder, null) { }
++
++            private Version(int major, int minor, int patch, int remainder, int[]? extraSegments)
+             {
+                 Major = major;
+                 Minor = minor;
+                 Patch = patch;
+                 Remainder = remainder;
++                _extraSegments = extraSegments;
+             }
+ 
+-            public int CompareTo(object? other_)
++            /// <summary>
++            /// Builds a Version from an arbitrary number of segments. Segments past the fourth are
++            /// retained for comparison rather than being folded into Remainder.
++            /// </summary>
++            internal static Version FromSegments(IReadOnlyList<int> segments)
+             {
+-                if (other_ is not Version other)
+-                    return 0;
++                int count = segments.Count;
++                while (count > 4 && segments[count - 1] == 0)
++                    count--;
++
++                int[]? extra = null;
++                if (count > 4)
++                {
++                    extra = new int[count - 4];
++                    for (int i = 4; i < count; i++)
++                        extra[i - 4] = segments[i];
++                }
++
++                return new Version(
++                    Segment(segments, 0),
++                    Segment(segments, 1),
++                    Segment(segments, 2),
++                    Segment(segments, 3),
++                    extra
++                );
+ 
++                static int Segment(IReadOnlyList<int> values, int index) =>
++                    index < values.Count ? values[index] : 0;
++            }
++
++            private int ExtraSegment(int index) =>
++                _extraSegments is not null && index < _extraSegments.Length ? _extraSegments[index] : 0;
++
++            public int CompareTo(object? other_) => other_ is Version other ? CompareTo(other) : 0;
++
++            public int CompareTo(Version other)
++            {
+                 int major = Major.CompareTo(other.Major);
+                 if (major != 0)
+                     return major;
+@@ -420,7 +465,36 @@ public int CompareTo(object? other_)
+                 if (patch != 0)
+                     return patch;
+ 
+-                return Remainder.CompareTo(other.Remainder);
++                int remainder = Remainder.CompareTo(other.Remainder);
++                if (remainder != 0)
++                    return remainder;
++
++                int extraCount = Math.Max(
++                    _extraSegments?.Length ?? 0,
++                    other._extraSegments?.Length ?? 0
++                );
++                for (int i = 0; i < extraCount; i++)
++                {
++                    int extra = ExtraSegment(i).CompareTo(other.ExtraSegment(i));
++                    if (extra != 0)
++                        return extra;
++                }
++
++                return 0;
++            }
++
++            /// <summary>
++            /// The 1-based position of the most significant segment that differs from
++            /// <paramref name="other"/>, or 0 when both versions are equal. Differences past the
++            /// fourth segment all report 4, as they are the least significant change there is.
++            /// </summary>
++            public int FirstDifferingComponent(Version other)
++            {
++                if (Major != other.Major) return 1;
++                if (Minor != other.Minor) return 2;
++                if (Patch != other.Patch) return 3;
++                if (Remainder != other.Remainder) return 4;
++                return CompareTo(other) == 0 ? 0 : 4;
+             }
+ 
+             public static bool operator ==(Version left, Version right) =>
+@@ -439,15 +513,22 @@ public int CompareTo(object? other_)
+ 
+             public static bool operator <(Version left, Version right) => left.CompareTo(right) < 0;
+ 
+-            public bool Equals(Version other) =>
+-                Major == other.Major
+-                && Minor == other.Minor
+-                && Patch == other.Patch
+-                && Remainder == other.Remainder;
++            public bool Equals(Version other) => CompareTo(other) == 0;
+ 
+             public override bool Equals(object? obj) => obj is Version other && Equals(other);
+ 
+-            public override int GetHashCode() => HashCode.Combine(Major, Minor, Patch, Remainder);
++            public override int GetHashCode()
++            {
++                // Trailing zeroes are trimmed from _extraSegments, so equal versions hash equally.
++                HashCode hash = new();
++                hash.Add(Major);
++                hash.Add(Minor);
++                hash.Add(Patch);
++                hash.Add(Remainder);
++                foreach (int segment in _extraSegments ?? [])
++                    hash.Add(segment);
++                return hash.ToHashCode();
++            }
+         }
+ 
+         /// <summary>
+@@ -459,10 +540,24 @@ public static Version VersionStringToStruct(string version)
+         {
+             try
+             {
+-                char[] separators = ['.', '-', '/', '#'];
+-                string[] versionItems = ["", "", "", ""];
+-
+-                string[] segments = version.Split(separators, StringSplitOptions.RemoveEmptyEntries);
++                // '_' is a segment separator too: package managers use it to append a build
++                // revision to an upstream version (e.g. Homebrew's `18.4_1`). Without it, the
++                // revision digits get concatenated into the previous segment (18.41), which
++                // compares as greater than later upstream releases (18.6) and hides updates.
++                char[] separators = ['.', '-', '/', '#', '_'];
++
++                // The ambiguity check below deliberately does NOT split on '_', so that a version
++                // whose underscore introduces a pre-release tag rather than a numeric revision
++                // ("2.0.0_rc1") keeps reporting as unknown, exactly as it did before '_' became a
++                // separator. Parsing it instead would rank the pre-release above the final release
++                // and hide the 2.0.0_rc1 -> 2.0.0 update. A numeric revision ("18.4_1") still
++                // passes, because '_' is neither a digit nor a letter and so trips no flag.
++                char[] ambiguityCheckSeparators = ['.', '-', '/', '#'];
++
++                string[] segments = version.Split(
++                    ambiguityCheckSeparators,
++                    StringSplitOptions.RemoveEmptyEntries
++                );
+                 foreach (var segment in segments)
+                 {
+                     bool seenDigit = false;
+@@ -490,28 +585,29 @@ public static Version VersionStringToStruct(string version)
+                     }
+                 }
+ 
+-                int dotCount = 0;
++                // Collect every segment rather than capping at four. Capping used to append the
++                // surplus digits to the fourth segment, which inflated it: 1.2.3.4_1 became
++                // 1.2.3.41 and so compared as greater than the newer 1.2.3.5, hiding the update.
++                List<string> segmentDigits = [""];
+                 bool first = true;
+ 
+                 foreach (char c in version)
+                 {
+                     if (char.IsDigit(c))
+-                        versionItems[dotCount] += c;
++                        segmentDigits[^1] += c;
+                     else if (!first && separators.Contains(c))
+-                        if (dotCount < 3)
+-                            dotCount++;
++                        segmentDigits.Add("");
+                     first = false;
+                 }
+ 
+-                int[] numbers = { 0, 0, 0, 0 };
+-                for (int i = 0; i < 4; i++)
++                int[] numbers = new int[segmentDigits.Count];
++                for (int i = 0; i < numbers.Length; i++)
+                 {
+-                    if (int.TryParse(versionItems[i], out int val))
++                    if (int.TryParse(segmentDigits[i], out int val))
+                         numbers[i] = val;
+                 }
+ 
+-                var ver = new Version(numbers[0], numbers[1], numbers[2], numbers[3]);
+-                return ver;
++                return Version.FromSegments(numbers);
+             }
+             catch
+             {
+diff --git a/src/UniGetUI.PackageEngine.PackageLoader/UpgradablePackagesLoader.cs b/src/UniGetUI.PackageEngine.PackageLoader/UpgradablePackagesLoader.cs
+--- a/src/UniGetUI.PackageEngine.PackageLoader/UpgradablePackagesLoader.cs
++++ b/src/UniGetUI.PackageEngine.PackageLoader/UpgradablePackagesLoader.cs
+@@ -37,7 +37,12 @@ protected override async Task<bool> IsPackageValid(IPackage package)
+                 return false;
+ 
+             if (package.NewerVersionIsInstalled())
++            {
++                Logger.Info(
++                    $"Ignoring package {package.Id} because a newer or equal version than {package.NewVersionString} is already installed."
++                );
+                 return false;
++            }
+ 
+             if (package.IsUpdateMinor() && (await package.GetInstallOptions()).SkipMinorUpdates)
+             {
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+@@ -328,13 +328,15 @@ public virtual bool IsUpdateMinor()
+         {
+             if (!IsUpgradable)
+                 return false;
++            if (
++                NormalizedVersion == CoreTools.Version.Null
++                || NormalizedNewVersion == CoreTools.Version.Null
++            )
++                return false;
+ 
+             return NormalizedVersion.Major == NormalizedNewVersion.Major
+                 && NormalizedVersion.Minor == NormalizedNewVersion.Minor
+-                && (
+-                    NormalizedVersion.Patch != NormalizedNewVersion.Patch
+-                    || NormalizedVersion.Remainder != NormalizedNewVersion.Remainder
+-                );
++                && NormalizedVersion != NormalizedNewVersion;
+         }
+ 
+         public virtual Task<InstallOptions> GetInstallOptions() =>
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageTests.cs
+--- a/src/UniGetUI.PackageEngine.Tests/PackageTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageTests.cs
+@@ -41,6 +41,19 @@ public void Dispose()
+     [InlineData("2.0.0", "8b640eef", false)]
+     [InlineData("", "2.0.0", false)]
+     [InlineData("1.0.0;3.0.0", "2.0.0", true)]
++    // Issue #5293: a Homebrew build revision ("18.4_1") used to parse as 18.41 and shadow the
++    // newer upstream release, silently hiding the update.
++    [InlineData("18.4_1", "18.6", false)]
++    [InlineData("18.6_1", "18.6", true)]
++    // Same bug on a four-part upstream version, where the revision used to be folded into the
++    // fourth component (1.2.3.4_1 -> 1.2.3.41) because the parser only kept four segments.
++    [InlineData("1.2.3.4_1", "1.2.3.5", false)]
++    [InlineData("1.2.3.4_1", "1.2.3.4_2", false)]
++    [InlineData("1.2.3.4_2", "1.2.3.4_1", true)]
++    // An underscore before a pre-release tag stays unparseable, so upgrading off a pre-release
++    // onto the final release must remain visible rather than being read as 2.0.0.1 >= 2.0.0.
++    [InlineData("2.0.0_rc1", "2.0.0", false)]
++    [InlineData("2.0.0_beta2", "2.0.0", false)]
+     public async Task NewerVersionIsInstalled_ReturnsExpectedResult(string installedVersions, string newVersion, bool expected)
+     {
+         var manager = new PackageManagerBuilder().Build();
+diff --git a/src/UniGetUI.PackageEngine.Tests/UpgradablePackagesLoaderTests.cs b/src/UniGetUI.PackageEngine.Tests/UpgradablePackagesLoaderTests.cs
+--- a/src/UniGetUI.PackageEngine.Tests/UpgradablePackagesLoaderTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/UpgradablePackagesLoaderTests.cs
+@@ -100,6 +100,35 @@ await installedLoader.AddForeign(
+         Assert.False(await loader.EvaluatePackageAsync(supersededPackage));
+     }
+ 
++    // Regression test for issue #5293: the installed version carried a Homebrew build revision
++    // ("18.4_1"), which the version parser read as 18.41. That compared as greater than the
++    // available 18.6, so the loader discarded the update and it never reached the UI.
++    [Fact]
++    public async Task EvaluatePackageAsync_KeepsUpdateWhenInstalledVersionHasBuildRevision()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        var installedLoader = new InstalledPackagesLoader([manager]);
++        _ = new DiscoverablePackagesLoader([manager]);
++        var loader = new TestUpgradablePackagesLoader([manager]);
++
++        await installedLoader.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithId("postgresql@18")
++                .WithVersion("18.4_1")
++                .Build()
++        );
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("postgresql@18")
++            .WithVersion("18.4_1")
++            .WithNewVersion("18.6")
++            .Build();
++
++        Assert.True(await loader.EvaluatePackageAsync(package));
++    }
++
+     [Fact]
+     public async Task ApplyWhenAddingPackageAsync_UpdatesDiscoverableAndInstalledTags()
+     {

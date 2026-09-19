@@ -1,0 +1,211 @@
+From 042edddd0ed07cf26916f4d1ca12216112da3817 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Sat, 19 Sep 2026 12:44:04 +0000
+Subject: [PATCH] backport: refresh WinGet catalog snapshot after index updates
+
+Upstream-Commit: 1f4bd2d5c42f2fe55f8ae37b0f2cf85190d34051
+Upstream-PR: Devolutions/UniGetUI#5365
+
+Classic-Source-Commit: 042edddd0ed07cf26916f4d1ca12216112da3817
+---
+diff --git a/maintenance/backports.yml b/maintenance/backports.yml
+--- a/maintenance/backports.yml
++++ b/maintenance/backports.yml
+@@ -3,6 +3,12 @@ upstream_base:
+   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
+ 
+ backports:
++  - commit: 1f4bd2d5c42f2fe55f8ae37b0f2cf85190d34051
++    upstream_pr: 5365
++    status: applied
++    class: backend
++    reason: Refreshes the cached WinGet catalog snapshot after source-index refreshes and avoids refreshing indexes twice on retry, preventing first-scan update under-reporting.
++
+   - commit: 460178a3e99361946e570025a3a8e0c8b0257336
+     upstream_pr: 5311
+     status: applied-semantic
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -443,19 +443,27 @@ public IReadOnlyList<Package> GetInstalledPackages_UnSafe()
+ 
+     private IReadOnlyList<CatalogPackage> GetCachedLocalWinGetPackages(int? cacheSeconds = null)
+     {
+-        if (_localPackagesProvider is not null)
+-        {
+-            return _localPackagesProvider();
+-        }
++        long sourceIndexGeneration = WinGet.SourceIndexGeneration;
+ 
+         return cacheSeconds is null
+-            ? TaskRecycler<IReadOnlyList<CatalogPackage>>.RunOrAttach(GetLocalWinGetPackages)
++            ? TaskRecycler<IReadOnlyList<CatalogPackage>>.RunOrAttach(
++                EnumerateLocalWinGetPackages,
++                sourceIndexGeneration
++            )
+             : TaskRecycler<IReadOnlyList<CatalogPackage>>.RunOrAttach(
+-                GetLocalWinGetPackages,
++                EnumerateLocalWinGetPackages,
++                sourceIndexGeneration,
+                 cacheSeconds.Value
+             );
+     }
+ 
++    private IReadOnlyList<CatalogPackage> EnumerateLocalWinGetPackages(long sourceIndexGeneration)
++    {
++        return _localPackagesProvider is not null
++            ? _localPackagesProvider()
++            : GetLocalWinGetPackages();
++    }
++
+     private IReadOnlyList<Package> GetAvailableUpdatesFromSystemCli(Exception ex)
+     {
+         var unwrappedException = UnwrapException(ex);
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+@@ -88,6 +88,13 @@ public void Dispose()
+             }
+         }
+ 
++        private static long _sourceIndexGeneration;
++
++        internal static long SourceIndexGeneration => Volatile.Read(ref _sourceIndexGeneration);
++
++        internal static void MarkSourceIndexRefreshed() =>
++            Interlocked.Increment(ref _sourceIndexGeneration);
++
+         public WinGet()
+         {
+             Capabilities = new ManagerCapabilities
+@@ -782,12 +789,19 @@ public override void RefreshPackageIndexes()
+                 p.StartInfo.Environment["TMP"] = WinGetTemp;
+             }
+ 
+-            p.Start();
+-            logger.AddToStdOut(p.StandardOutput.ReadToEnd());
+-            logger.AddToStdErr(p.StandardError.ReadToEnd());
+-            logger.Close(p.ExitCode);
+-            p.WaitForExit();
+-            p.Close();
++            try
++            {
++                p.Start();
++                logger.AddToStdOut(p.StandardOutput.ReadToEnd());
++                logger.AddToStdErr(p.StandardError.ReadToEnd());
++                logger.Close(p.ExitCode);
++                p.WaitForExit();
++                p.Close();
++            }
++            finally
++            {
++                MarkSourceIndexRefreshed();
++            }
+         }
+ 
+         private string GetCliToolProxyArgument()
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+@@ -426,7 +426,10 @@ private IReadOnlyList<IPackage> _getAvailableUpdates(bool SecondAttempt)
+             }
+             try
+             {
+-                RefreshPackageIndexesSafely();
++                if (!SecondAttempt)
++                {
++                    RefreshPackageIndexesSafely();
++                }
+ 
+                 var packages = RunListingTaskWithTimeout(
+                     GetAvailableUpdates_UnSafe,
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageManagerTests.cs
+--- a/src/UniGetUI.PackageEngine.Tests/PackageManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageManagerTests.cs
+@@ -266,7 +266,7 @@ public void FindPackagesRetriesOnceAfterFailure()
+     }
+ 
+     [Fact]
+-    public void GetAvailableUpdatesRetriesOnceAndRefreshesIndexesPerAttempt()
++    public void GetAvailableUpdatesRetriesOnceWithoutRefreshingIndexesAgain()
+     {
+         var manager = CreateReadyManager();
+         var attempts = 0;
+@@ -283,7 +283,7 @@ public void GetAvailableUpdatesRetriesOnceAndRefreshesIndexesPerAttempt()
+         var package = Assert.Single(packages);
+         Assert.Equal("Contoso.Update", package.Id);
+         Assert.Equal(1, manager.AttemptFastRepairCalls);
+-        Assert.Equal(2, manager.RefreshPackageIndexesCalls);
++        Assert.Equal(1, manager.RefreshPackageIndexesCalls);
+     }
+ 
+     [Fact]
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -557,6 +557,65 @@ public void NativeWinGetHelperUsesSystemCliFallbackForUpdatesWhenCompositeCatalo
+         Assert.Equal("2.0.0", package.NewVersionString);
+     }
+ 
++    [Fact]
++    public void NativeWinGetHelperTakesANewCatalogSnapshotAfterTheSourceIndexIsRefreshed()
++    {
++        WinGet.MarkSourceIndexRefreshed();
++        int snapshots = 0;
++        var helper = new NativeWinGetHelper(
++            new TestableWinGet(),
++            systemCliHelperFactory: null,
++            skipInitialization: true,
++            localPackagesProvider: () =>
++            {
++                snapshots++;
++                return [];
++            }
++        );
++
++        helper.GetInstalledPackages_UnSafe();
++        Assert.Equal(1, snapshots);
++
++        WinGet.MarkSourceIndexRefreshed();
++        helper.GetAvailableUpdates_UnSafe();
++
++        Assert.Equal(2, snapshots);
++    }
++
++    [Fact]
++    public void NativeWinGetHelperReusesTheCatalogSnapshotWhileTheSourceIndexIsUnchanged()
++    {
++        WinGet.MarkSourceIndexRefreshed();
++        int snapshots = 0;
++        var helper = new NativeWinGetHelper(
++            new TestableWinGet(),
++            systemCliHelperFactory: null,
++            skipInitialization: true,
++            localPackagesProvider: () =>
++            {
++                snapshots++;
++                return [];
++            }
++        );
++
++        helper.GetInstalledPackages_UnSafe();
++        helper.GetAvailableUpdates_UnSafe();
++        helper.GetAvailableUpdates_UnSafe();
++
++        Assert.Equal(1, snapshots);
++    }
++
++    [Fact]
++    public void RefreshPackageIndexesAdvancesTheSourceIndexGenerationWhenTheCliCallFails()
++    {
++        var manager = new TestableWinGet();
++        long generationBefore = WinGet.SourceIndexGeneration;
++
++        Assert.ThrowsAny<Exception>(manager.RefreshPackageIndexes);
++
++        Assert.NotEqual(generationBefore, WinGet.SourceIndexGeneration);
++    }
++
+     [Fact]
+     public void NativeWinGetHelperSelectReachableCatalogsSkipsUnavailableSources()
+     {

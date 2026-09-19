@@ -1,0 +1,537 @@
+From 9f17f4fa5fca6806b75ce269cc18dedf08f39328 Mon Sep 17 00:00:00 2001
+From: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+Date: Sun, 30 Aug 2026 06:49:03 +0000
+Subject: [PATCH] backport: clean stale bundled Chocolatey state
+
+Upstream-Commit: 67322ffdf3c14761b64fc9b78dcf1e82adcbd247
+
+Upstream-PR: Devolutions/UniGetUI#5306
+
+Classic-Source-Commit: 9f17f4fa5fca6806b75ce269cc18dedf08f39328
+---
+diff --git a/maintenance/backports.yml b/maintenance/backports.yml
+--- a/maintenance/backports.yml
++++ b/maintenance/backports.yml
+@@ -3,6 +3,12 @@ upstream_base:
+   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
+ 
+ backports:
++  - commit: 67322ffdf3c14761b64fc9b78dcf1e82adcbd247
++    upstream_pr: 5306
++    status: applied
++    class: backend
++    reason: Removes stale ChocolateyInstall user and inherited process values that point at retired bundled Chocolatey locations before manager initialization.
++
+   - commit: 6f9b1d8227dfed5378d294f23b639c4e317d4b9c
+     upstream_pr: 5296
+     status: applied-semantic
+diff --git a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
+@@ -62,13 +62,23 @@ public class Chocolatey : BaseNuGet
+             "no",
+         ];
+         private const string DefaultSystemChocoPath = @"C:\ProgramData\chocolatey\bin\choco.exe";
++        private const string LegacyInstallVariable = "ChocolateyInstall";
++        private static int _inheritedProcessValueSanitized;
+         private static readonly string[] LegacyBundledChocolateyPaths =
+         [
+             Path.Join(
+                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                 "Programs\\WingetUI\\choco-cli"
+             ),
+             Path.Join(CoreData.UniGetUIDataDirectory, "Chocolatey"),
++            Path.Join(
++                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++                "UniGetUI\\Chocolatey"
++            ),
++            Path.Join(
++                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
++                ".wingetui\\Chocolatey"
++            ),
+         ];
+ 
+         // AttemptFastRepair is a no-op here, so retrying a timed-out choco listing just spawns another (#4974).
+@@ -167,6 +177,179 @@ public static bool HasLegacyBundledInstallation()
+             return false;
+         }
+ 
++        protected override void _performPreInitializationSteps()
++        {
++            RemoveStaleLegacyInstallVariable();
++        }
++
++        public static bool IsLegacyBundledChocolateyRoot(string? path)
++        {
++            string? normalized = NormalizeDirectory(path);
++            if (normalized is null)
++            {
++                return false;
++            }
++
++            foreach (string legacyPath in LegacyBundledChocolateyPaths)
++            {
++                string? legacyRoot = NormalizeDirectory(legacyPath);
++                if (legacyRoot is null)
++                {
++                    continue;
++                }
++
++                if (normalized.Equals(legacyRoot, StringComparison.OrdinalIgnoreCase))
++                {
++                    return true;
++                }
++
++                if (
++                    normalized.StartsWith(
++                        legacyRoot + Path.DirectorySeparatorChar,
++                        StringComparison.OrdinalIgnoreCase
++                    )
++                )
++                {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++
++        private static string? NormalizeDirectory(string? path)
++        {
++            if (string.IsNullOrWhiteSpace(path))
++            {
++                return null;
++            }
++
++            try
++            {
++                return Path.TrimEndingDirectorySeparator(
++                    Path.GetFullPath(
++                        Environment.ExpandEnvironmentVariables(path.Trim().Trim('"'))
++                    )
++                );
++            }
++            catch (Exception)
++            {
++                return null;
++            }
++        }
++
++        internal readonly record struct LegacyInstallVariablePlan(
++            bool RemoveUserValue,
++            bool ReplaceProcessValue,
++            string? NewProcessValue
++        );
++
++        internal static LegacyInstallVariablePlan PlanStaleLegacyInstallVariableRemoval(
++            string? userValue,
++            string? machineValue,
++            string? processValue
++        )
++        {
++            bool removeUserValue = IsLegacyBundledChocolateyRoot(userValue);
++            string? remainingUserValue = removeUserValue ? null : userValue;
++
++            if (!IsLegacyBundledChocolateyRoot(processValue))
++            {
++                return new LegacyInstallVariablePlan(removeUserValue, false, processValue);
++            }
++
++            string? replacement = null;
++            if (!string.IsNullOrWhiteSpace(remainingUserValue))
++            {
++                replacement = remainingUserValue;
++            }
++            else if (!string.IsNullOrWhiteSpace(machineValue))
++            {
++                replacement = machineValue;
++            }
++
++            if (IsLegacyBundledChocolateyRoot(replacement))
++            {
++                replacement = null;
++            }
++
++            return new LegacyInstallVariablePlan(removeUserValue, true, replacement);
++        }
++
++        internal static void TEST_ResetInheritedProcessValueSanitation()
++        {
++            Interlocked.Exchange(ref _inheritedProcessValueSanitized, 0);
++        }
++
++        internal static void RemoveStaleLegacyInstallVariable()
++        {
++            if (!OperatingSystem.IsWindows())
++            {
++                return;
++            }
++
++            try
++            {
++                bool sanitizeInheritedProcessValue =
++                    Interlocked.Exchange(ref _inheritedProcessValueSanitized, 1) == 0;
++
++                string? userValue = Environment.GetEnvironmentVariable(
++                    LegacyInstallVariable,
++                    EnvironmentVariableTarget.User
++                );
++                string? machineValue = Environment.GetEnvironmentVariable(
++                    LegacyInstallVariable,
++                    EnvironmentVariableTarget.Machine
++                );
++                string? processValue = Environment.GetEnvironmentVariable(
++                    LegacyInstallVariable,
++                    EnvironmentVariableTarget.Process
++                );
++
++                LegacyInstallVariablePlan plan = PlanStaleLegacyInstallVariableRemoval(
++                    userValue,
++                    machineValue,
++                    processValue
++                );
++
++                if (plan.RemoveUserValue)
++                {
++                    Logger.ImportantInfo(
++                        $"Removing the stale {LegacyInstallVariable} user environment variable, which "
++                            + $"pointed at the no longer supported bundled Chocolatey path {userValue}"
++                    );
++
++                    Environment.SetEnvironmentVariable(
++                        LegacyInstallVariable,
++                        null,
++                        EnvironmentVariableTarget.User
++                    );
++                }
++
++                if (sanitizeInheritedProcessValue && plan.ReplaceProcessValue)
++                {
++                    Logger.ImportantInfo(
++                        $"Refreshing the inherited {LegacyInstallVariable} process environment "
++                            + $"variable, which pointed at the no longer supported bundled Chocolatey "
++                            + $"path {processValue}, to {plan.NewProcessValue ?? "no value"}"
++                    );
++
++                    Environment.SetEnvironmentVariable(
++                        LegacyInstallVariable,
++                        plan.NewProcessValue,
++                        EnvironmentVariableTarget.Process
++                    );
++                }
++            }
++            catch (Exception ex)
++            {
++                Logger.Error(
++                    $"Could not remove the stale {LegacyInstallVariable} user environment variable"
++                );
++                Logger.Error(ex);
++            }
++        }
++
+         internal IReadOnlyList<Package> ParseAvailableUpdates(IEnumerable<string> lines)
+         {
+             List<Package> packages = [];
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+@@ -64,6 +64,8 @@ out string callArguments
+         );
+         protected abstract void _loadManagerVersion(out string version);
+ 
++        protected virtual void _performPreInitializationSteps() { }
++
+         protected virtual void _performExtraLoadingSteps() { }
+ 
+         public virtual void Initialize()
+@@ -72,6 +74,7 @@ public virtual void Initialize()
+             {
+                 _ready = false;
+                 _ensurePropertlyConstructed();
++                _performPreInitializationSteps();
+ 
+                 if (!IsEnabled())
+                 { // Do NOT initialise disabled package managers
+diff --git a/src/UniGetUI.PackageEngine.Tests/ChocolateyManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/ChocolateyManagerTests.cs
+--- a/src/UniGetUI.PackageEngine.Tests/ChocolateyManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/ChocolateyManagerTests.cs
+@@ -268,6 +268,279 @@ public void OperationResultReturnsFailureWhenElevationWasAlreadyRequested()
+         OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+     }
+ 
++    [Fact]
++    public void IsLegacyBundledChocolateyRootMatchesTheBundledUniGetUiLocation()
++    {
++        string legacyRoot = Path.Combine(
++            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++            "UniGetUI",
++            "Chocolatey"
++        );
++
++        Assert.True(Chocolatey.IsLegacyBundledChocolateyRoot(legacyRoot));
++        Assert.True(
++            Chocolatey.IsLegacyBundledChocolateyRoot(Path.Combine(legacyRoot, "bin"))
++        );
++        Assert.True(
++            Chocolatey.IsLegacyBundledChocolateyRoot(legacyRoot + Path.DirectorySeparatorChar)
++        );
++        Assert.True(Chocolatey.IsLegacyBundledChocolateyRoot(legacyRoot.ToUpperInvariant()));
++    }
++
++    [Fact]
++    public void IsLegacyBundledChocolateyRootMatchesTheBundledWingetUiLocation()
++    {
++        string legacyRoot = Path.Combine(
++            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++            "Programs",
++            "WingetUI",
++            "choco-cli"
++        );
++
++        Assert.True(Chocolatey.IsLegacyBundledChocolateyRoot(legacyRoot));
++    }
++
++    [Fact]
++    public void IsLegacyBundledChocolateyRootIgnoresSystemAndUnrelatedLocations()
++    {
++        Assert.False(
++            Chocolatey.IsLegacyBundledChocolateyRoot(@"C:\ProgramData\chocolatey")
++        );
++        Assert.False(Chocolatey.IsLegacyBundledChocolateyRoot(@"D:\Tools\chocolatey"));
++        Assert.False(Chocolatey.IsLegacyBundledChocolateyRoot(null));
++        Assert.False(Chocolatey.IsLegacyBundledChocolateyRoot(""));
++        Assert.False(Chocolatey.IsLegacyBundledChocolateyRoot("   "));
++    }
++
++    [Fact]
++    public void IsLegacyBundledChocolateyRootResolvesUnexpandedEnvironmentSyntax()
++    {
++        Assert.True(
++            Chocolatey.IsLegacyBundledChocolateyRoot("%LOCALAPPDATA%\\UniGetUI\\Chocolatey")
++        );
++        Assert.False(
++            Chocolatey.IsLegacyBundledChocolateyRoot("%PROGRAMDATA%\\chocolatey")
++        );
++    }
++
++    private static string LegacyRoot =>
++        Path.Combine(
++            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++            "UniGetUI",
++            "Chocolatey"
++        );
++
++    [Fact]
++    public void PlanRemovesStaleUserValueAndLeavesAHealthyProcessValueAlone()
++    {
++        var plan = Chocolatey.PlanStaleLegacyInstallVariableRemoval(
++            LegacyRoot,
++            null,
++            @"C:\ProgramData\chocolatey"
++        );
++
++        Assert.True(plan.RemoveUserValue);
++        Assert.False(plan.ReplaceProcessValue);
++    }
++
++    [Fact]
++    public void PlanFallsBackToTheMachineValueWhenTheProcessValueIsStale()
++    {
++        var plan = Chocolatey.PlanStaleLegacyInstallVariableRemoval(
++            LegacyRoot,
++            @"C:\ProgramData\chocolatey",
++            LegacyRoot
++        );
++
++        Assert.True(plan.RemoveUserValue);
++        Assert.True(plan.ReplaceProcessValue);
++        Assert.Equal(@"C:\ProgramData\chocolatey", plan.NewProcessValue);
++    }
++
++    [Fact]
++    public void PlanPrefersASurvivingUserValueOverTheMachineValue()
++    {
++        var plan = Chocolatey.PlanStaleLegacyInstallVariableRemoval(
++            @"D:\Custom\chocolatey",
++            @"C:\ProgramData\chocolatey",
++            LegacyRoot
++        );
++
++        Assert.False(plan.RemoveUserValue);
++        Assert.True(plan.ReplaceProcessValue);
++        Assert.Equal(@"D:\Custom\chocolatey", plan.NewProcessValue);
++    }
++
++    [Fact]
++    public void PlanClearsTheProcessValueWhenNoHealthyFallbackRemains()
++    {
++        var plan = Chocolatey.PlanStaleLegacyInstallVariableRemoval(
++            LegacyRoot,
++            null,
++            LegacyRoot
++        );
++
++        Assert.True(plan.RemoveUserValue);
++        Assert.True(plan.ReplaceProcessValue);
++        Assert.Null(plan.NewProcessValue);
++    }
++
++    [Fact]
++    public void PlanCleansAnInheritedProcessValueEvenWhenTheUserValueIsAlreadyGone()
++    {
++        var plan = Chocolatey.PlanStaleLegacyInstallVariableRemoval(null, null, LegacyRoot);
++
++        Assert.False(plan.RemoveUserValue);
++        Assert.True(plan.ReplaceProcessValue);
++        Assert.Null(plan.NewProcessValue);
++    }
++
++    [Fact]
++    public void PlanNeverRestoresALegacyMachineValue()
++    {
++        var plan = Chocolatey.PlanStaleLegacyInstallVariableRemoval(
++            LegacyRoot,
++            LegacyRoot,
++            LegacyRoot
++        );
++
++        Assert.True(plan.ReplaceProcessValue);
++        Assert.Null(plan.NewProcessValue);
++    }
++
++    [Fact]
++    public void PlanLeavesUnrelatedValuesUntouched()
++    {
++        var plan = Chocolatey.PlanStaleLegacyInstallVariableRemoval(
++            @"C:\ProgramData\chocolatey",
++            @"C:\ProgramData\chocolatey",
++            @"C:\ProgramData\chocolatey"
++        );
++
++        Assert.False(plan.RemoveUserValue);
++        Assert.False(plan.ReplaceProcessValue);
++    }
++
++    [Fact]
++    public void RemoveStaleLegacyInstallVariableClearsTheUserValueAndRefreshesTheProcessValue()
++    {
++        string? originalUser = Environment.GetEnvironmentVariable(
++            "ChocolateyInstall",
++            EnvironmentVariableTarget.User
++        );
++        string? originalProcess = Environment.GetEnvironmentVariable(
++            "ChocolateyInstall",
++            EnvironmentVariableTarget.Process
++        );
++        string? machineValue = Environment.GetEnvironmentVariable(
++            "ChocolateyInstall",
++            EnvironmentVariableTarget.Machine
++        );
++
++        try
++        {
++            Chocolatey.TEST_ResetInheritedProcessValueSanitation();
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                LegacyRoot,
++                EnvironmentVariableTarget.User
++            );
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                LegacyRoot,
++                EnvironmentVariableTarget.Process
++            );
++
++            Chocolatey.RemoveStaleLegacyInstallVariable();
++
++            Assert.Null(
++                Environment.GetEnvironmentVariable(
++                    "ChocolateyInstall",
++                    EnvironmentVariableTarget.User
++                )
++            );
++            Assert.Equal(
++                string.IsNullOrWhiteSpace(machineValue) ? null : machineValue,
++                Environment.GetEnvironmentVariable(
++                    "ChocolateyInstall",
++                    EnvironmentVariableTarget.Process
++                )
++            );
++        }
++        finally
++        {
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                originalUser,
++                EnvironmentVariableTarget.User
++            );
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                originalProcess,
++                EnvironmentVariableTarget.Process
++            );
++        }
++    }
++
++    [Fact]
++    public void RemoveStaleLegacyInstallVariableLeavesAReloadedProcessValueAlone()
++    {
++        string? originalUser = Environment.GetEnvironmentVariable(
++            "ChocolateyInstall",
++            EnvironmentVariableTarget.User
++        );
++        string? originalProcess = Environment.GetEnvironmentVariable(
++            "ChocolateyInstall",
++            EnvironmentVariableTarget.Process
++        );
++
++        try
++        {
++            Chocolatey.TEST_ResetInheritedProcessValueSanitation();
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                LegacyRoot,
++                EnvironmentVariableTarget.User
++            );
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                LegacyRoot,
++                EnvironmentVariableTarget.Process
++            );
++
++            Chocolatey.RemoveStaleLegacyInstallVariable();
++
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                LegacyRoot,
++                EnvironmentVariableTarget.Process
++            );
++
++            Chocolatey.RemoveStaleLegacyInstallVariable();
++
++            Assert.Equal(
++                LegacyRoot,
++                Environment.GetEnvironmentVariable(
++                    "ChocolateyInstall",
++                    EnvironmentVariableTarget.Process
++                )
++            );
++        }
++        finally
++        {
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                originalUser,
++                EnvironmentVariableTarget.User
++            );
++            Environment.SetEnvironmentVariable(
++                "ChocolateyInstall",
++                originalProcess,
++                EnvironmentVariableTarget.Process
++            );
++        }
++    }
++
+     private static string[] ReadFixtureLines(string relativePath)
+     {
+         return PackageEngineFixtureFiles.ReadAllText(relativePath).Replace("\r\n", "\n").Split('\n');

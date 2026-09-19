@@ -14,6 +14,9 @@ The target tree for this snapshot is recorded in
 the replayed Git tree with that commit, so the check covers the complete current
 Classic source/build tree rather than only a selected file list.
 
+Source-only snapshot commits are retained on the `classic-source` branch. Patch-stack
+infrastructure stays on `main` and is intentionally excluded from the replay target.
+
 ## Commands
 
 From the repository root:

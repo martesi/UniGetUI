@@ -19,3 +19,13 @@ classic/1060-classic-winui-startup.patch
 classic/1070-classic-remove-frontend-switch.patch
 security/9000-sqlitepclraw-hardening.patch
 classic/9990-classic-guard.patch
+backports/0180-cargo-list-parsing.patch
+backports/0190-listing-timeout-cleanup.patch
+backports/0200-scoop-listing-resilience.patch
+backports/0210-manager-dependency-verification.patch
+backports/0220-powershell5-operation-failures.patch
+backports/0230-pinget-no-applicable-upgrades.patch
+backports/0240-version-underscore-revisions.patch
+backports/0250-chocolatey-state-cleanup.patch
+backports/0260-package-icon-retry.patch
+backports/0270-winget-catalog-refresh.patch
