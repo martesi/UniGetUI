@@ -266,7 +266,7 @@ public sealed class PackageManagerTests : IDisposable
     }
 
     [Fact]
-    public void GetAvailableUpdatesRetriesOnceAndRefreshesIndexesPerAttempt()
+    public void GetAvailableUpdatesRetriesOnceWithoutRefreshingIndexesAgain()
     {
         var manager = CreateReadyManager();
         var attempts = 0;
@@ -283,7 +283,7 @@ public sealed class PackageManagerTests : IDisposable
         var package = Assert.Single(packages);
         Assert.Equal("Contoso.Update", package.Id);
         Assert.Equal(1, manager.AttemptFastRepairCalls);
-        Assert.Equal(2, manager.RefreshPackageIndexesCalls);
+        Assert.Equal(1, manager.RefreshPackageIndexesCalls);
     }
 
     [Fact]

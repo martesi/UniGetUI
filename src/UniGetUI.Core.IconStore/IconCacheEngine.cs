@@ -452,7 +452,7 @@ namespace UniGetUI.Core.IconEngine
                     { "image/svg+xml", "svg" },
                     { "image/vnd.microsoft.icon", "ico" },
                     { "application/octet-stream", "ico" },
-                    { "image/image/x-icon", "ico" },
+                    { "image/x-icon", "ico" },
                     { "image/tiff", "tif" },
                 }
             );
@@ -468,7 +468,7 @@ namespace UniGetUI.Core.IconEngine
                     { "png", "image/png" },
                     { "webp", "image/webp" },
                     { "svg", "image/svg+xml" },
-                    { "ico", "image/image/x-icon" },
+                    { "ico", "image/x-icon" },
                     { "tif", "image/tiff" },
                 }
             );

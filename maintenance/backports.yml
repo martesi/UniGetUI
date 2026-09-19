@@ -3,6 +3,66 @@ upstream_base:
   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
 
 backports:
+  - commit: 1f4bd2d5c42f2fe55f8ae37b0f2cf85190d34051
+    upstream_pr: 5365
+    status: applied
+    class: backend
+    reason: Refreshes the cached WinGet catalog snapshot after source-index refreshes and avoids refreshing indexes twice on retry, preventing first-scan update under-reporting.
+
+  - commit: 460178a3e99361946e570025a3a8e0c8b0257336
+    upstream_pr: 5311
+    status: applied-semantic
+    class: backend-shared-icon-cache
+    reason: Retries transient package icon lookup failures after five minutes, caches successful resolutions by full versioned hash, and fixes the x-icon MIME mapping. Avalonia bitmap-cache changes are omitted because Classic WinUI only stores icon URLs after successful lookup.
+
+  - commit: 67322ffdf3c14761b64fc9b78dcf1e82adcbd247
+    upstream_pr: 5306
+    status: applied
+    class: backend
+    reason: Removes stale ChocolateyInstall user and inherited process values that point at retired bundled Chocolatey locations before manager initialization.
+
+  - commit: 6f9b1d8227dfed5378d294f23b639c4e317d4b9c
+    upstream_pr: 5296
+    status: applied-semantic
+    class: backend-shared-versioning
+    reason: Treats numeric underscore build revisions as version segments and compares segments past the fourth. Classic keeps its legacy IsUpdateMinor signature, so extra-segment detection is translated there rather than importing upstream's newer skip-level API.
+
+  - commit: b0d8bcb11569f5b3eb007fe2315c782e6ce97f5d
+    upstream_pr: 5312
+    status: applied
+    class: backend
+    reason: Replaces fragile Cargo output regexes with column-aware parsing, safe install-list fallback, and tolerant crate metadata lookup.
+
+  - commit: ac366036a875f37e2d7b1977623a5cdd8f2d3f4d
+    upstream_pr: 4974
+    status: applied
+    class: backend
+    reason: Kills registered manager listing processes on timeout and avoids retrying Chocolatey listings that cannot be repaired safely.
+
+  - commit: 4108308bf6c0f67754da25c47135ba55fd8beee1
+    upstream_pr: 5321
+    status: applied
+    class: backend
+    reason: Drains Scoop stdout and stderr concurrently, closes command input, handles listing timeouts, and reports unknown versions safely.
+
+  - commit: 20f3296c9e5fde85201aa1cba4c897c848b3f724
+    upstream_pr: 5322
+    status: partial
+    class: backend-plus-winui
+    reason: Detects Cargo binaries under CARGO_HOME, adds dynamic dependency commands, and verifies Classic WinUI dependency installs; the upstream Avalonia dialog rewrite is intentionally excluded.
+
+  - commit: 357e1b122cc22277feeb3da146fa8430a3b2b716
+    upstream_pr: 5309
+    status: applied
+    class: backend
+    reason: Propagates non-terminating PowerShell 5.x module errors through the operation exit code while respecting caller-owned error variables.
+
+  - commit: c683fa77961b1cdf72a41599f5a91ab5699db8e6
+    upstream_pr: 5244
+    status: applied-semantic
+    class: backend
+    reason: Treats Pinget's no-applicable-upgrade message as not applicable even when the process exits with code zero, preserving Classic's existing retry and phantom-suppression guards.
+
   - commit: 21116375c8299d1db38a3c3b4c2eb7e18bc97c4e
     upstream_pr: 5072
     status: applied
