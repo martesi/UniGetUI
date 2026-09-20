@@ -4,7 +4,6 @@ using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
-using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.PackageClasses;
@@ -18,12 +17,22 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
     public static string GetIdNamePiece(IPackage package)
     {
         if (!package.Id.EndsWith("…"))
-            return $"--id \"{package.Id.TrimEnd('…')}\" --exact";
+            return $"--id {Selector(package.Id.TrimEnd('…'), "identifier")} --exact";
 
         if (!package.Name.EndsWith("…"))
-            return $"--name \"{package.Name}\" --exact";
+            return $"--name {Selector(package.Name, "name")} --exact";
 
-        return $"--id \"{package.Id.TrimEnd('…')}\"";
+        return $"--id {Selector(package.Id.TrimEnd('…'), "identifier")}";
+    }
+
+    private static string Selector(string value, string description)
+    {
+        if (!CoreTools.IsOptionSafeIdentifier(value, quotedByTheSink: true))
+            throw new InvalidOperationException(
+                $"Refusing to build a WinGet command line for the package {description} \"{value}\": it would be read as a command-line option."
+            );
+
+        return CoreTools.EscapeCommandLineArgument(value);
     }
 
     public WinGetPkgOperationHelper(WinGet manager)
@@ -63,8 +72,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         }
 
         // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
-        // WinGet_DropArchAndScope is set after an "update not applicable" result so the retry
-        // lets WinGet choose a compatible installer instead of repeating the same constraints.
+        // WinGet_DropArchAndScope is set after an "update not applicable" failure to retry without the scope/architecture constraints.
         if (!package.OverridenOptions.WinGet_DropArchAndScope)
         {
             parameters.AddRange(
@@ -83,11 +91,15 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             && package.OverridenOptions.WinGet_SpecifyVersion is not false
         )
         {
-            parameters.AddRange(["--version", $"\"{package.VersionString}\""]);
+            parameters.AddRange(
+                ["--version", CoreTools.EscapeCommandLineArgument(package.VersionString)]
+            );
         }
         else if (operation is OperationType.Install && options.Version != "")
         {
-            parameters.AddRange(["--version", $"\"{options.Version}\""]);
+            parameters.AddRange(
+                ["--version", CoreTools.EscapeCommandLineArgument(options.Version)]
+            );
         }
 
         if (usePinget && operation is OperationType.Update)
@@ -114,32 +126,17 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
 
             if (!usePinget)
             {
-                // For portable packages, always preserve the actual current install
-                // location read from the registry. A stale CustomInstallLocation in the
-                // saved InstallOptions would otherwise leave --location off and cause
-                // WinGet to uninstall the portable from its custom path and reinstall to
-                // the default portable root, silently deleting the original directory.
-                var detectedLocation = TryGetPortableInstallLocation(package);
-                if (detectedLocation is not null)
+                var effectiveLocation = GetEffectiveUpdateLocation(package, options);
+                if (effectiveLocation is not null)
                 {
-                    parameters.AddRange(["--location", $"\"{detectedLocation}\""]);
-                }
-                else if (
-                    options.CustomInstallLocation != ""
-                    && (
-                        options.CustomInstallLocationIsExplicit
-                        || Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
-                    )
-                )
-                {
-                    parameters.AddRange(["--location", $"\"{options.CustomInstallLocation}\""]);
+                    parameters.AddRange(["--location", CoreTools.EscapeCommandLineArgument(effectiveLocation)]);
                 }
             }
         }
         else if (operation is OperationType.Install)
         {
             if (options.CustomInstallLocation != "")
-                parameters.AddRange(["--location", $"\"{options.CustomInstallLocation}\""]);
+                parameters.AddRange(["--location", CoreTools.EscapeCommandLineArgument(options.CustomInstallLocation)]);
         }
 
         if (operation is not OperationType.Uninstall)
@@ -167,6 +164,37 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             }
         }
 
+        ApplyElevationRequirements(package, options, operation);
+
+        if (!usePinget)
+        {
+            parameters.Add(WinGet.GetProxyArgument());
+        }
+
+        parameters.AddRange(
+            operation switch
+            {
+                OperationType.Update => options.CustomParameters_Update,
+                OperationType.Uninstall => options.CustomParameters_Uninstall,
+                _ => options.CustomParameters_Install,
+            }
+        );
+        return parameters;
+    }
+
+    /// <summary>
+    /// Consults the WinGet native installer metadata to detect packages that require (or
+    /// prohibit) elevation, and updates <c>package.OverridenOptions.RunAsAdministrator</c>
+    /// accordingly. Used by both the local execution path (via
+    /// <see cref="_getOperationParameters"/>) and the agent-broker path, so that the
+    /// requested elevation matches regardless of where the operation runs.
+    /// </summary>
+    public override void ApplyElevationRequirements(
+        IPackage package,
+        InstallOptions options,
+        OperationType operation
+    )
+    {
         try
         {
             var installOptions = NativePackageHandler.GetInstallationOptions(
@@ -229,21 +257,6 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             Logger.Error("Recovered from fatal WinGet exception:");
             Logger.Error(ex);
         }
-
-        if (!usePinget)
-        {
-            parameters.Add(WinGet.GetProxyArgument());
-        }
-
-        parameters.AddRange(
-            operation switch
-            {
-                OperationType.Update => options.CustomParameters_Update,
-                OperationType.Uninstall => options.CustomParameters_Uninstall,
-                _ => options.CustomParameters_Install,
-            }
-        );
-        return parameters;
     }
 
     protected override OperationVeredict _getOperationResult(
@@ -279,34 +292,24 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             return OperationVeredict.AutoRetry;
         }
 
-        if (uintCode is 0x8A150011)
-        { // TODO: Integrity failed
+        if (ReportedInstallerHashMismatch(returnCode))
+        {
             return OperationVeredict.Failure;
         }
 
-        // WinGet (CLI/COM) reports "not applicable" as 0x8A15002B; bundled pinget instead exits
-        // non-zero with "No applicable installer found" in its output (#4998).
-        bool pingetReportedNotApplicable =
-            ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
-            && processOutput.Any(line =>
-                line.Contains("No applicable installer found", StringComparison.OrdinalIgnoreCase)
-                || line.Contains("No applicable upgrade found", StringComparison.OrdinalIgnoreCase)
-            );
-
-        if (uintCode is 0x8A15002B || pingetReportedNotApplicable)
-        {
-            if (
-                operation is OperationType.Update
-                && !package.OverridenOptions.WinGet_DropArchAndScope
-            )
+        if (ReportedUpdateNotApplicable(processOutput, returnCode))
+        { // The update is not applicable to the platform
+            // The scope/architecture we forced may exclude the only installer the package ships
+            // (e.g. forcing --architecture x64 on a package that only has an x86 installer). Retry
+            // once letting the package manager pick freely, matching what the CLI does by default.
+            if (operation is OperationType.Update && !package.OverridenOptions.WinGet_DropArchAndScope)
             {
                 var options = InstallOptionsFactory.LoadApplicable(package);
                 bool hasScope =
                     (package.OverridenOptions.Scope ?? options.InstallationScope)
                     is PackageScope.User or PackageScope.Machine;
                 bool hasArch =
-                    options.Architecture
-                    is Architecture.x86 or Architecture.x64 or Architecture.arm64;
+                    options.Architecture is Architecture.x86 or Architecture.x64 or Architecture.arm64;
 
                 if (hasScope || hasArch)
                 {
@@ -427,7 +430,27 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         );
     }
 
-    // Mark the offered version as already having reached the stuck-update threshold (#5199).
+    internal static bool ReportedInstallerHashMismatch(int returnCode) =>
+        (uint)returnCode is 0x8A150011;
+
+    internal static bool ReportedApplicationCurrentlyRunning(int returnCode) =>
+        (uint)returnCode is 0x8A150101 or 0x8A150103 or 0x8A150111;
+
+    internal bool ReportedUpdateNotApplicable(
+        IReadOnlyList<string> processOutput,
+        int returnCode
+    )
+    {
+        if ((uint)returnCode is 0x8A15002B)
+            return true;
+
+        return ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
+            && processOutput.Any(line =>
+                line.Contains("No applicable installer found", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("No applicable upgrade found", StringComparison.OrdinalIgnoreCase)
+            );
+    }
+
     public static void SuppressPhantomUpgrade(IPackage package)
     {
         if (IsUnknownVersion(package.NewVersionString))
@@ -512,6 +535,39 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
 
     public static bool IsUnknownVersion(string? version)
         => version is null or "" or "Unknown";
+
+    /// <summary>
+    /// Resolves the install location that should be used for a WinGet update.
+    /// For portable packages, always preserves the actual current install location read
+    /// from the registry. A stale CustomInstallLocation in the saved InstallOptions would
+    /// otherwise leave the location off and cause WinGet to uninstall the portable from
+    /// its custom path and reinstall to the default portable root, silently deleting the
+    /// original directory.
+    /// A location set explicitly for this package is honored on update (issue #5164); a
+    /// location inherited from the manager-wide default stays opt-in behind
+    /// WinGetForceLocationOnUpdate so updates don't relocate existing installs (issue #4210).
+    /// </summary>
+    internal static string? GetEffectiveUpdateLocation(IPackage package, InstallOptions options)
+    {
+        var detectedLocation = TryGetPortableInstallLocation(package);
+        if (detectedLocation is not null)
+        {
+            return detectedLocation;
+        }
+
+        if (
+            options.CustomInstallLocation != ""
+            && (
+                options.CustomInstallLocationIsExplicit
+                || Settings.Get(Settings.K.WinGetForceLocationOnUpdate)
+            )
+        )
+        {
+            return options.CustomInstallLocation;
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// For portable WinGet packages, reads the current install location from the Windows registry
