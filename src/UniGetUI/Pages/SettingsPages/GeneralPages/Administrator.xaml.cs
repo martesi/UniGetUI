@@ -14,6 +14,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         public Administrator()
         {
             this.InitializeComponent();
+            FeatureSettings.Attach(this, Scroller, _ => { });
 
             if (DoCacheAdminRights.Checked && DoCacheAdminRightsForBatches.Checked)
             {

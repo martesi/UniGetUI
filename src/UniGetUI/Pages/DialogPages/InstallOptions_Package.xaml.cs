@@ -1,3 +1,4 @@
+using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using CommunityToolkit.WinUI.Controls;
@@ -28,6 +29,21 @@ namespace UniGetUI.Interface.Dialogs
         public InstallOptions Options;
         public IPackage Package;
         public event EventHandler? Close;
+        private void CopyInstallArguments(object sender, RoutedEventArgs args)
+        {
+            if ((sender as FrameworkElement)?.Tag as string == "update") CustomParameters2.Text = CustomParameters1.Text;
+            else CustomParameters3.Text = CustomParameters1.Text;
+        }
+
+        private void CopyCommand(object sender, RoutedEventArgs args)
+            => ExternalLibraries.Clipboard.WindowsClipboard.SetText(CommandBox.Text);
+
+        private async void OpenManualConsole(object sender, RoutedEventArgs args)
+        {
+            if (!string.IsNullOrWhiteSpace(CommandBox.Text))
+                await UniGetUI.Services.ManualInstallHelper.LaunchManualAsync(CommandBox.Text);
+        }
+
         private readonly OperationType Operation;
         private readonly string packageInstallLocation;
         private bool UiLoaded { get; set; }
@@ -146,7 +162,7 @@ namespace UniGetUI.Interface.Dialogs
                     }.Contains(VersionComboBox.SelectedValue.ToString())
                 );
             };
-            AutoUpdatePackageCheckbox.IsChecked = Options.AutoUpdatePackage;
+            AutoUpdatePackageCheckbox.IsChecked = AutoUpdatesDatabase.IsAutoUpdated(Package);
 
             VersionComboBox.Items.Add(CoreTools.Translate("Latest"));
             VersionComboBox.SelectedIndex = 0;
@@ -160,6 +176,7 @@ namespace UniGetUI.Interface.Dialogs
             }
 
             SkipMinorUpdatesCheckbox.IsChecked = Options.SkipMinorUpdates;
+            SkipMinorUpdatesLevel.Value = Math.Clamp(Options.SkipMinorUpdatesLevel, 2, 4);
 
             if (Package.Manager.Capabilities.SupportsCustomVersions)
             {
@@ -369,7 +386,7 @@ namespace UniGetUI.Interface.Dialogs
             options.UninstallPreviousVersionsOnUpdate =
                 UninstallPreviousOnUpdate?.IsChecked ?? false;
             options.OverridesNextLevelOpts = !FollowGlobalOptionsSwitch.IsOn;
-            options.AutoUpdatePackage = AutoUpdatePackageCheckbox.IsChecked ?? false;
+            // Automatic-update membership is saved separately, never while generating a command preview.
 
             options.Architecture = "";
             var userSelection = ArchitectureComboBox.SelectedValue?.ToString() ?? "";
@@ -409,6 +426,9 @@ namespace UniGetUI.Interface.Dialogs
             options.KillBeforeOperation.Clear();
             foreach (var p in ProcessesToKill)
                 options.KillBeforeOperation.Add(p.Name);
+            string pendingProcess = KillProcessesBox.Text?.Trim() ?? "";
+            if (pendingProcess.Length > 0 && !options.KillBeforeOperation.Contains(pendingProcess, StringComparer.OrdinalIgnoreCase))
+                options.KillBeforeOperation.Add(pendingProcess);
 
             if (
                 VersionComboBox.SelectedValue.ToString() != CoreTools.Translate("PreRelease")
@@ -422,9 +442,13 @@ namespace UniGetUI.Interface.Dialogs
                 options.Version = "";
             }
             options.SkipMinorUpdates = SkipMinorUpdatesCheckbox?.IsChecked ?? false;
+            options.SkipMinorUpdatesLevel = double.IsFinite(SkipMinorUpdatesLevel.Value) ? Math.Clamp((int)SkipMinorUpdatesLevel.Value, 2, 4) : 2;
 
             if (updateDetachedOptions)
             {
+                string id = AutoUpdatesDatabase.GetIdForPackage(Package);
+                if (AutoUpdatePackageCheckbox.IsChecked is true) AutoUpdatesDatabase.Add(id);
+                else if (AutoUpdatesDatabase.IsAutoUpdated(id)) AutoUpdatesDatabase.Remove(id);
                 Settings.Set(
                     Settings.K.KillProcessesThatRefuseToDie,
                     KillProcessesThatWontDie.IsChecked ?? false
