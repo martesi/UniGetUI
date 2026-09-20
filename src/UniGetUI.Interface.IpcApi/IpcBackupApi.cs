@@ -1,5 +1,3 @@
-using Octokit;
-using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.SecureSettings;
 using UniGetUI.Core.SettingsEngine;
@@ -29,6 +27,7 @@ public sealed class IpcBackupStatus
     public string? CustomBackupDirectory { get; set; }
     public string BackupFileName { get; set; } = "";
     public bool TimestampingEnabled { get; set; }
+    public int MaxLocalBackupCount { get; set; }
     public string CurrentMachineBackupKey { get; set; } = "";
     public IpcGitHubAuthInfo Auth { get; set; } = new();
 }
@@ -45,6 +44,7 @@ public sealed class IpcLocalBackupResult : IpcBackupCommandResult
     public string Path { get; set; } = "";
     public string FileName { get; set; } = "";
     public int PackageCount { get; set; }
+    public int DeletedBackupCount { get; set; }
 }
 
 public sealed class IpcCloudBackupEntry
@@ -107,7 +107,7 @@ public static class IpcBackupApi
 
     private sealed class PendingGitHubDeviceFlow
     {
-        public required OauthDeviceFlowResponse DeviceFlow { get; init; }
+        public required GitHubDeviceFlow DeviceFlow { get; init; }
         public required DateTimeOffset ExpiresAtUtc { get; init; }
     }
 
@@ -116,25 +116,17 @@ public static class IpcBackupApi
         string? customBackupDirectory = Settings.Get(Settings.K.ChangeBackupOutputDirectory)
             ? Settings.GetValue(Settings.K.ChangeBackupOutputDirectory)
             : null;
-        string backupFileName = Settings.GetValue(Settings.K.ChangeBackupFileName);
-        if (string.IsNullOrWhiteSpace(backupFileName))
-        {
-            backupFileName = CoreTools.Translate(
-                "{pcName} installed packages",
-                new Dictionary<string, object?> { ["pcName"] = Environment.MachineName }
-            );
-        }
-
         return new IpcBackupStatus
         {
             LocalBackupEnabled = Settings.Get(Settings.K.EnablePackageBackup_LOCAL),
             CloudBackupEnabled = Settings.Get(Settings.K.EnablePackageBackup_CLOUD),
-            BackupDirectory = ResolveBackupDirectory(),
+            BackupDirectory = LocalBackupManager.ResolveOutputDirectory(),
             CustomBackupDirectory = string.IsNullOrWhiteSpace(customBackupDirectory)
                 ? null
                 : customBackupDirectory,
-            BackupFileName = backupFileName,
+            BackupFileName = LocalBackupManager.ResolveFileNameBase(),
             TimestampingEnabled = Settings.Get(Settings.K.EnableBackupTimestamping),
+            MaxLocalBackupCount = LocalBackupManager.GetRetentionLimit(),
             CurrentMachineBackupKey = BuildGistFileKey().Split(' ')[^1],
             Auth = await GetGitHubAuthInfoAsync(),
         };
@@ -143,15 +135,12 @@ public static class IpcBackupApi
     public static async Task<IpcLocalBackupResult> CreateLocalBackupAsync()
     {
         var packages = GetInstalledPackagesForBackup();
-        string fileName = BuildBackupFileName();
-        string outputDirectory = ResolveBackupDirectory();
-        Directory.CreateDirectory(outputDirectory);
-
-        string filePath = Path.Combine(outputDirectory, fileName);
         string content = await IpcBundleApi.CreateBundleAsync(packages);
-        await File.WriteAllTextAsync(filePath, content);
+        string filePath = await LocalBackupManager.SaveBackupAsync(content);
+        string fileName = Path.GetFileName(filePath);
 
         Logger.ImportantInfo("Local backup saved to " + filePath);
+        int deletedBackupCount = await Task.Run(LocalBackupManager.ApplyRetentionLimit);
         return new IpcLocalBackupResult
         {
             Status = "success",
@@ -159,6 +148,7 @@ public static class IpcBackupApi
             Path = filePath,
             FileName = fileName,
             PackageCount = packages.Count,
+            DeletedBackupCount = deletedBackupCount,
         };
     }
 
@@ -169,12 +159,10 @@ public static class IpcBackupApi
         request ??= new IpcGitHubDeviceFlowRequest();
         EnsureGitHubClientConfigured();
 
-        var client = CreateAnonymousGitHubClient();
-        var deviceFlow = await client.Oauth.InitiateDeviceFlow(
-            new OauthDeviceFlowRequest(Secrets.GetGitHubClientId())
-            {
-                Scopes = { "read:user", "gist" },
-            },
+        using var client = CreateAnonymousGitHubClient();
+        var deviceFlow = await client.InitiateDeviceFlowAsync(
+            Secrets.GetGitHubClientId(),
+            ["read:user", "gist"],
             CancellationToken.None
         );
 
@@ -218,8 +206,8 @@ public static class IpcBackupApi
 
         try
         {
-            var client = CreateAnonymousGitHubClient();
-            var token = await client.Oauth.CreateAccessTokenForDeviceFlow(
+            using var client = CreateAnonymousGitHubClient();
+            var token = await client.CreateAccessTokenForDeviceFlowAsync(
                 Secrets.GetGitHubClientId(),
                 pending.DeviceFlow,
                 CancellationToken.None
@@ -231,8 +219,8 @@ public static class IpcBackupApi
             }
 
             SecureGHTokenManager.StoreToken(token.AccessToken);
-            var userClient = CreateAuthenticatedGitHubClient(token.AccessToken);
-            var user = await userClient.User.Current();
+            using var userClient = CreateAuthenticatedGitHubClient(token.AccessToken);
+            var user = await userClient.GetCurrentUserAsync();
             Settings.SetValue(Settings.K.GitHubUserLogin, user.Login ?? string.Empty);
             ClearPendingGitHubDeviceFlow();
 
@@ -273,8 +261,9 @@ public static class IpcBackupApi
 
     public static async Task<IReadOnlyList<IpcCloudBackupEntry>> ListCloudBackupsAsync()
     {
-        var (client, user) = await GetAuthenticatedGitHubContextAsync();
-        var backupGist = await GetBackupGistAsync(client, user.Login, createIfMissing: false);
+        using var client = CreateAuthenticatedGitHubClient();
+        await GetAuthenticatedGitHubUserAsync(client);
+        var backupGist = await GetBackupGistAsync(client, createIfMissing: false);
         if (backupGist is null)
         {
             return [];
@@ -300,22 +289,17 @@ public static class IpcBackupApi
     {
         var packages = GetInstalledPackagesForBackup();
         string bundleContents = await IpcBundleApi.CreateBundleAsync(packages);
-        var (client, user) = await GetAuthenticatedGitHubContextAsync();
-        var backupGist = await GetBackupGistAsync(client, user.Login, createIfMissing: true)
+        using var client = CreateAuthenticatedGitHubClient();
+        await GetAuthenticatedGitHubUserAsync(client);
+        var backupGist = await GetBackupGistAsync(client, createIfMissing: true)
             ?? throw new InvalidOperationException("The GitHub backup gist could not be created.");
 
         string fileKey = BuildGistFileKey();
-        var update = new GistUpdate { Description = GistDescription };
-        if (backupGist.Files.ContainsKey(fileKey))
-        {
-            update.Files[fileKey] = new GistFileUpdate { Content = bundleContents };
-        }
-        else
-        {
-            update.Files.Add(fileKey, new GistFileUpdate { Content = bundleContents });
-        }
-
-        await client.Gist.Edit(backupGist.Id, update);
+        await client.EditGistAsync(
+            backupGist.Id,
+            GistDescription,
+            new Dictionary<string, string> { [fileKey] = bundleContents }
+        );
         return new IpcCloudBackupUploadResult
         {
             Status = "success",
@@ -375,33 +359,6 @@ public static class IpcBackupApi
             ?? throw new InvalidOperationException("The installed packages loader is not available.");
     }
 
-    private static string ResolveBackupDirectory()
-    {
-        string directory = Settings.GetValue(Settings.K.ChangeBackupOutputDirectory);
-        return string.IsNullOrWhiteSpace(directory)
-            ? CoreData.UniGetUI_DefaultBackupDirectory
-            : directory;
-    }
-
-    private static string BuildBackupFileName()
-    {
-        string fileName = Settings.GetValue(Settings.K.ChangeBackupFileName);
-        if (string.IsNullOrWhiteSpace(fileName))
-        {
-            fileName = CoreTools.Translate(
-                "{pcName} installed packages",
-                new Dictionary<string, object?> { ["pcName"] = Environment.MachineName }
-            );
-        }
-
-        if (Settings.Get(Settings.K.EnableBackupTimestamping))
-        {
-            fileName += " " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss");
-        }
-
-        return fileName + ".ubundle";
-    }
-
     private static async Task<IpcGitHubAuthInfo> GetGitHubAuthInfoAsync()
     {
         PendingGitHubDeviceFlow? pending;
@@ -446,8 +403,8 @@ public static class IpcBackupApi
 
         try
         {
-            var client = CreateAuthenticatedGitHubClient();
-            var user = await client.User.Current();
+            using var client = CreateAuthenticatedGitHubClient();
+            var user = await client.GetCurrentUserAsync();
             if (!string.IsNullOrWhiteSpace(user.Login))
             {
                 Settings.SetValue(Settings.K.GitHubUserLogin, user.Login);
@@ -479,12 +436,12 @@ public static class IpcBackupApi
         }
     }
 
-    private static GitHubClient CreateAnonymousGitHubClient()
+    private static GitHubApiClient CreateAnonymousGitHubClient()
     {
-        return new GitHubClient(new ProductHeaderValue("UniGetUI", CoreData.VersionName));
+        return new GitHubApiClient();
     }
 
-    private static GitHubClient CreateAuthenticatedGitHubClient(string? token = null)
+    private static GitHubApiClient CreateAuthenticatedGitHubClient(string? token = null)
     {
         token ??= SecureGHTokenManager.GetToken();
         if (string.IsNullOrWhiteSpace(token))
@@ -492,34 +449,31 @@ public static class IpcBackupApi
             throw new InvalidOperationException("GitHub authentication is required for cloud backups.");
         }
 
-        return new GitHubClient(new ProductHeaderValue("UniGetUI", CoreData.VersionName))
-        {
-            Credentials = new Credentials(token),
-        };
+        return new GitHubApiClient(token);
     }
 
-    private static async Task<(GitHubClient Client, User User)> GetAuthenticatedGitHubContextAsync()
+    private static async Task<GitHubUser> GetAuthenticatedGitHubUserAsync(GitHubApiClient client)
     {
-        var client = CreateAuthenticatedGitHubClient();
-        var user = await client.User.Current();
+        var user = await client.GetCurrentUserAsync();
         if (!string.IsNullOrWhiteSpace(user.Login))
         {
             Settings.SetValue(Settings.K.GitHubUserLogin, user.Login);
         }
 
-        return (client, user);
+        return user;
     }
 
     private static async Task<string> GetCloudBackupContentsAsync(string key)
     {
-        var (client, user) = await GetAuthenticatedGitHubContextAsync();
-        var backupGist = await GetBackupGistAsync(client, user.Login, createIfMissing: false);
+        using var client = CreateAuthenticatedGitHubClient();
+        await GetAuthenticatedGitHubUserAsync(client);
+        var backupGist = await GetBackupGistAsync(client, createIfMissing: false);
         if (backupGist is null)
         {
             throw new InvalidOperationException("No cloud backups are available for the current account.");
         }
 
-        var fullGist = await client.Gist.Get(backupGist.Id);
+        var fullGist = await client.GetGistAsync(backupGist.Id);
         var file = fullGist.Files.FirstOrDefault(candidate =>
             candidate.Key.StartsWith(PackageBackupStartingKey, StringComparison.Ordinal)
             && candidate.Key.EndsWith(key, StringComparison.Ordinal));
@@ -532,13 +486,12 @@ public static class IpcBackupApi
         return file.Value.Content;
     }
 
-    private static async Task<Gist?> GetBackupGistAsync(
-        GitHubClient client,
-        string userLogin,
+    private static async Task<GitHubGist?> GetBackupGistAsync(
+        GitHubApiClient client,
         bool createIfMissing
     )
     {
-        var candidates = await client.Gist.GetAllForUser(userLogin);
+        var candidates = await client.GetCurrentUserGistsAsync();
         var backupGist = candidates.FirstOrDefault(candidate =>
             candidate.Description?.EndsWith(GistDescriptionEndingKey, StringComparison.Ordinal)
             == true
@@ -549,9 +502,11 @@ public static class IpcBackupApi
             return backupGist;
         }
 
-        var newGist = new NewGist { Description = GistDescription, Public = false };
-        newGist.Files.Add("- UniGetUI Package Backups", ReadMeContents);
-        return await client.Gist.Create(newGist);
+        return await client.CreateGistAsync(
+            GistDescription,
+            isPublic: false,
+            new Dictionary<string, string> { ["- UniGetUI Package Backups"] = ReadMeContents }
+        );
     }
 
     private static string BuildGistFileKey()
