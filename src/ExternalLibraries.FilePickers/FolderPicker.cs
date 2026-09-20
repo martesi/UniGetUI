@@ -13,6 +13,8 @@ public class FolderPicker
     /// </summary>
     private readonly IntPtr _windowHandle;
 
+    public string? InitialDirectory { get; set; }
+
     /// <summary>
     /// Folder pick dialog.
     /// </summary>
@@ -28,6 +30,6 @@ public class FolderPicker
     /// <returns>Path to selected folder or empty string.</returns>
     public string Show()
     {
-        return Helper.ShowOpen(_windowHandle, FOS.FOS_PICKFOLDERS | FOS.FOS_FORCEFILESYSTEM);
+        return Helper.ShowOpen(_windowHandle, FOS.FOS_PICKFOLDERS | FOS.FOS_FORCEFILESYSTEM, initialDirectory: InitialDirectory);
     }
 }
