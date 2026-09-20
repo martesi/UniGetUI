@@ -100,47 +100,20 @@ public partial class MainApp
                     return null;
                 }
 
-                FileSavePicker savePicker = new();
-                MainWindow window = Instance.MainWindow;
-                IntPtr hWnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
-                WinRT.Interop.InitializeWithWindow.Initialize(savePicker, hWnd);
-                savePicker.SuggestedStartLocation = PickerLocationId.Downloads;
-
-                string name = await package.GetInstallerFileName() ?? "";
-                string extension;
-                if (!name.Where(x => x == '.').Any())
-                { // As a last resort, we need an extension for the file picker to work
-                    extension = "unknown";
-                    name = name + "." + extension;
-                }
-                else
+                string name = await package.GetInstallerFileName() ?? "installer.bin";
+                string extension = Path.GetExtension(name);
+                if (string.IsNullOrWhiteSpace(extension)) { extension = ".bin"; name += extension; }
+                List<string> filters = [extension, ".exe", ".msi", ".zip", ".msix", ".appx", ".tar", ".tgz", ".nupkg"];
+                var savePicker = new ExternalLibraries.Pickers.FileSavePicker(Instance.MainWindow.GetWindowHandle())
                 {
-                    extension = CoreTools.MakeValidFileName(name.Split('.')[^1]);
-                }
-
-                savePicker.SuggestedFileName = name;
-
-                if (package.Manager is BaseNuGet)
-                {
-                    extension = "nupkg";
-                    savePicker.FileTypeChoices.Add("NuGet package", [".nupkg"]);
-                }
-
-                savePicker.FileTypeChoices.Add("Automatic", [$".{extension}"]);
-                savePicker.FileTypeChoices.Add("Executable", [".exe"]);
-                savePicker.FileTypeChoices.Add("MSI", [".msi"]);
-                savePicker.FileTypeChoices.Add("Compressed file", [".zip"]);
-                savePicker.FileTypeChoices.Add("MSIX", [".msix"]);
-                savePicker.FileTypeChoices.Add("APPX", [".appx"]);
-                savePicker.FileTypeChoices.Add("Tarball", [".tar"]);
-                savePicker.FileTypeChoices.Add("Compressed Tarball", [".tgz"]);
-
-                StorageFile file = await savePicker.PickSaveFileAsync();
-
+                    InitialDirectory = InstallerDownloadLocation.ResolveStartDirectory(),
+                };
                 DialogHelper.HideLoadingDialog(loadingId);
-                if (file is not null)
+                string filePath = savePicker.Show(filters.Distinct(StringComparer.OrdinalIgnoreCase).ToList(), name);
+                DialogHelper.HideLoadingDialog(loadingId);
+                if (!string.IsNullOrEmpty(filePath))
                 {
-                    var op = new DownloadOperation(package, file.Path);
+                    var op = new DownloadOperation(package, filePath);
                     op.OperationSucceeded += (_, _) =>
                         TelemetryHandler.DownloadPackage(package, TEL_OP_RESULT.SUCCESS, referral);
                     op.OperationFailed += (_, _) =>
@@ -171,8 +144,8 @@ public partial class MainApp
             try
             {
                 var hWnd = Instance.MainWindow.GetWindowHandle();
-                var picker = new ExternalLibraries.Pickers.FolderPicker(hWnd);
-                var outputPath = await Task.Run(picker.Show);
+                var picker = new ExternalLibraries.Pickers.FolderPicker(hWnd) { InitialDirectory = InstallerDownloadLocation.ResolveStartDirectory() };
+                var outputPath = picker.Show();
                 if (string.IsNullOrEmpty(outputPath))
                     return null;
 
@@ -206,8 +179,8 @@ public partial class MainApp
                     return;
 
                 var hWnd = MainApp.Instance.MainWindow.GetWindowHandle();
-                var a = new ExternalLibraries.Pickers.FolderPicker(hWnd);
-                var outputPath = await Task.Run(a.Show);
+                var a = new ExternalLibraries.Pickers.FolderPicker(hWnd) { InitialDirectory = InstallerDownloadLocation.ResolveStartDirectory() };
+                var outputPath = a.Show();
                 if (outputPath == "")
                     return;
 
