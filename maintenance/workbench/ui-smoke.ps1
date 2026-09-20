@@ -93,6 +93,7 @@ try {
     if ($adminWarning -and !$adminWarning.Current.IsOffscreen) {
         Invoke-Element 'I understand'
     }
+    Invoke-Element 'Decline'
     Find-Element 'Settings' 60 | Out-Null
     Screenshot '01-packages'
     Invoke-Element 'Settings'
