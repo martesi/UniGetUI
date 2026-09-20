@@ -97,6 +97,19 @@ Name: "Ukrainian"; MessagesFile: "compiler:Languages\Ukrainian.isl"
 var
   RegisterUniGetUIProtocol: Boolean;
   RegisterPackageBundle: Boolean;
+  PreserveAutostartDisabled: Boolean;
+
+function IsAutostartDisabledByUser: Boolean;
+var
+  Data: AnsiString;
+begin
+  Result := False;
+  if RegQueryBinaryValue(HKEY_CURRENT_USER,
+       'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run',
+       'UniGetUIClassic', Data) then
+    Result := (Length(Data) >= 1) and ((Ord(Data[1]) and 1) = 1);
+end;
+
 
 function ShouldRegisterUniGetUIProtocol(): Boolean;
 begin
@@ -211,6 +224,7 @@ end;
 
 function InitializeSetup: Boolean;
 begin
+  PreserveAutostartDisabled := IsAutostartDisabledByUser;
   // Do not steal shared compatibility handlers from an existing upstream installation.
   RegisterUniGetUIProtocol := not RegKeyExists(HKA, 'Software\Classes\unigetui');
   RegisterPackageBundle :=
@@ -276,7 +290,7 @@ Name: "regularinstall\desktopicon"; Description: "{cm:RegDesktopIcon}"; GroupDes
 
 [Registry]
 Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "UniGetUIClassic"; ValueData: """{app}\UniGetUI.exe"" --daemon"; Flags: uninsdeletevalue noerror; Tasks: regularinstall;
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: binary; ValueName: "UniGetUIClassic"; ValueData: "03"; Flags: uninsdeletevalue; Tasks: regularinstall; Check: CmdLineParamExists('/NoRunOnStartup');
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: binary; ValueName: "UniGetUIClassic"; ValueData: "03"; Flags: uninsdeletevalue; Tasks: regularinstall; Check: CmdLineParamExists('/NoRunOnStartup') or PreserveAutostartDisabled;
 
 // Register the unigetui:// deep link
 Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueData: "URL:UniGetUI Protocol"; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
@@ -305,7 +319,7 @@ Source: "InstallerExtras\ForceUniGetUIPortable"; DestDir: "{app}"; Tasks: portab
 
 [Icons]
 Name: "{autostartmenu}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: regularinstall\startmenuicon
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: regularinstall\desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: regularinstall\desktopicon; Check: not CmdLineParamExists('/NoDesktopShortcut')
 
 [Run]
 ; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File -NonInteractive ""{tmp}\EnsureWinGet.ps1"""; StatusMsg: "Ensuring WinGet is properly installed... (this may take a while)"; WorkingDir: {app}; Check: not CmdLineParamExists('/NoWinGet'); Flags: runhidden

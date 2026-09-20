@@ -19,6 +19,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         public Interface_P()
         {
             this.InitializeComponent();
+            FeatureSettings.Attach(this, Scroller, page => NavigationRequested?.Invoke(this, page));
 
             if (Settings.GetValue(Settings.K.PreferredTheme) == "")
             {
@@ -53,11 +54,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         public string ShortTitle => CoreTools.Translate("User interface preferences");
 
         public event EventHandler? RestartRequired;
-        public event EventHandler<Type>? NavigationRequested
-        {
-            add { }
-            remove { }
-        }
+        public event EventHandler<Type>? NavigationRequested;
 
         public void ShowRestartBanner(object sender, EventArgs e) =>
             RestartRequired?.Invoke(this, e);

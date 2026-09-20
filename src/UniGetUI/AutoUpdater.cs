@@ -303,7 +303,7 @@ public partial class AutoUpdater
                 IsFirstLaunch
             );
             IsFirstLaunch = false;
-            await Task.Delay(TimeSpan.FromMinutes(updateSucceeded ? 60 : 10));
+            await Task.Delay(UpdaterDownloadEngine.DefaultAutomaticUpdateCheckInterval);
         }
     }
 
@@ -352,6 +352,8 @@ public partial class AutoUpdater
                     "UniGetUI Updater.exe"
                 );
 
+                UpdaterDownloadIdentity identity = new(updateCandidate.VersionName, updateCandidate.InstallerHash, updateCandidate.InstallerDownloadUrl);
+                string failureStatePath = UpdaterDownloadEngine.GetFailureStatePath(InstallerPath);
                 if (
                     File.Exists(InstallerPath)
                     && await CheckInstallerHash(
@@ -362,6 +364,7 @@ public partial class AutoUpdater
                     && CheckInstallerSignerThumbprint(InstallerPath, updaterOverrides)
                 )
                 {
+                    UpdaterDownloadEngine.ClearFailureState(failureStatePath, LogUpdateWarn);
                     LogUpdateInfo($"A cached valid installer was found, launching update process...");
                     return await PrepairToLaunchInstaller(
                         InstallerPath,
@@ -371,7 +374,14 @@ public partial class AutoUpdater
                     );
                 }
 
-                File.Delete(InstallerPath);
+                if (!ManualCheck && !Verbose && UpdaterDownloadEngine.IsFailureBackoffActive(
+                    failureStatePath, identity, DateTime.UtcNow, out TimeSpan remaining,
+                    out UpdaterDownloadFailureState? failure, LogUpdateWarn))
+                {
+                    LogUpdateWarn($"Installer {identity.Version} download deferred after {failure?.FailureClass}: {remaining:g} remaining.");
+                    MarkAttemptFinished("installer download skipped by failure backoff");
+                    return true;
+                }
 
                 ShowMessage_ThreadSafe(
                     CoreTools.Translate(
@@ -384,20 +394,28 @@ public partial class AutoUpdater
                 );
 
                 // Download the installer
-                await DownloadInstaller(
-                    updateCandidate.InstallerDownloadUrl,
-                    InstallerPath,
-                    updaterOverrides
-                );
+                string downloadedInstallerPath;
+                try
+                {
+                    downloadedInstallerPath = await DownloadInstaller(
+                        updateCandidate.InstallerDownloadUrl, InstallerPath, updaterOverrides, identity);
+                }
+                catch
+                {
+                    UpdaterDownloadEngine.RecordFailure(failureStatePath, identity, "download", DateTime.UtcNow, LogUpdateWarn);
+                    throw;
+                }
 
                 if (
                     await CheckInstallerHash(
-                        InstallerPath,
+                        downloadedInstallerPath,
                         updateCandidate.InstallerHash,
                         updaterOverrides
-                    ) && CheckInstallerSignerThumbprint(InstallerPath, updaterOverrides)
+                    ) && CheckInstallerSignerThumbprint(downloadedInstallerPath, updaterOverrides)
                 )
                 {
+                    UpdaterDownloadEngine.PromotePartialDownload(InstallerPath, LogUpdateWarn);
+                    UpdaterDownloadEngine.ClearFailureState(failureStatePath, LogUpdateWarn);
                     LogUpdateInfo("The downloaded installer is valid, launching update process...");
                     return await PrepairToLaunchInstaller(
                         InstallerPath,
@@ -407,6 +425,8 @@ public partial class AutoUpdater
                     );
                 }
 
+                UpdaterDownloadEngine.RecordFailure(failureStatePath, identity, "validation", DateTime.UtcNow, LogUpdateWarn);
+                UpdaterDownloadEngine.DeletePartialDownload(InstallerPath, LogUpdateWarn);
                 ShowMessage_ThreadSafe(
                     CoreTools.Translate("The installer authenticity could not be verified."),
                     CoreTools.Translate("The update process has been aborted."),
@@ -628,10 +648,11 @@ public partial class AutoUpdater
     /// <summary>
     /// Downloads the given installer to the given location
     /// </summary>
-    private static async Task DownloadInstaller(
+    private static async Task<string> DownloadInstaller(
         string downloadUrl,
         string installerLocation,
-        UpdaterOverrides updaterOverrides
+        UpdaterOverrides updaterOverrides,
+        UpdaterDownloadIdentity identity
     )
     {
         if (!IsSourceUrlAllowed(downloadUrl, updaterOverrides.AllowUnsafeUrls))
@@ -644,12 +665,10 @@ public partial class AutoUpdater
         {
             client.Timeout = TimeSpan.FromSeconds(600);
             client.DefaultRequestHeaders.UserAgent.ParseAdd(CoreData.UserAgentString);
-            HttpResponseMessage result = await client.GetAsync(downloadUrl);
-            result.EnsureSuccessStatusCode();
-            using FileStream fs = new(installerLocation, FileMode.OpenOrCreate);
-            await result.Content.CopyToAsync(fs);
+            var result = await UpdaterDownloadEngine.DownloadInstallerPartAsync(client, identity, installerLocation, LogUpdateWarn);
+            LogUpdateDebug("The download has finished successfully");
+            return result.PartialPath;
         }
-        LogUpdateDebug("The download has finished successfully");
     }
 
     /// <summary>
@@ -761,7 +780,9 @@ public partial class AutoUpdater
             {
                 FileName = installerLocation,
                 Arguments =
-                    "/SILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NoVCRedist /NoEdgeWebView /NoWinGet",
+                    UniGetUI.Shared.AutoUpdaterInstallerArguments.ForWindows(
+                        CoreData.IsPortable, CoreData.UniGetUIExecutableDirectory,
+                        UniGetUI.Shared.AutoUpdaterInstallerArguments.DetectInstallScope(CoreData.UniGetUIExecutableDirectory)),
                 UseShellExecute = true,
                 CreateNoWindow = true,
             },
