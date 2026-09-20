@@ -182,7 +182,7 @@ replace(UI + 'Pages/SoftwarePages/AbstractPackagesPage.xaml', 'OverflowButtonVis
 options = UI + 'Pages/DialogPages/InstallOptions_Package.xaml.cs'
 add_usings(options, 'UniGetUI.PackageEngine.Classes.Packages.Classes')
 replace(options, 'AutoUpdatePackageCheckbox.IsChecked = Options.AutoUpdatePackage;', 'AutoUpdatePackageCheckbox.IsChecked = AutoUpdatesDatabase.IsAutoUpdated(Package);')
-replace(options, 'SkipMinorUpdatesCheckbox.IsChecked = Options.SkipMinorUpdates;', 'SkipMinorUpdatesCheckbox.IsChecked = Options.SkipMinorUpdates;\n            SkipMinorUpdatesLevel.Value = Math.Clamp(Options.SkipMinorUpdatesLevel, 2, 4);')
+replace(options, 'SkipMinorUpdatesCheckbox.IsChecked = Options.SkipMinorUpdates;', 'SkipMinorUpdatesCheckbox.IsChecked = Options.SkipMinorUpdates;\n            SkipMinorUpdatesLevel.Value = Math.Clamp(Options.SkipMinorUpdatesLevel, 2, 4);\n            SkipMinorUpdatesLevel.IsEnabled = SkipMinorUpdatesCheckbox.IsChecked ?? false;')
 replace(options, 'options.AutoUpdatePackage = AutoUpdatePackageCheckbox.IsChecked ?? false;', '// Automatic-update membership is saved separately, never while generating a command preview.')
 replace(options, 'options.SkipMinorUpdates = SkipMinorUpdatesCheckbox?.IsChecked ?? false;', 'options.SkipMinorUpdates = SkipMinorUpdatesCheckbox?.IsChecked ?? false;\n            options.SkipMinorUpdatesLevel = double.IsFinite(SkipMinorUpdatesLevel.Value) ? Math.Clamp((int)SkipMinorUpdatesLevel.Value, 2, 4) : 2;')
 replace(options, 'foreach (var p in ProcessesToKill)\n                options.KillBeforeOperation.Add(p.Name);', '''foreach (var p in ProcessesToKill)
@@ -195,9 +195,17 @@ replace(options, 'if (updateDetachedOptions)\n            {', '''if (updateDetac
                 string id = AutoUpdatesDatabase.GetIdForPackage(Package);
                 if (AutoUpdatePackageCheckbox.IsChecked is true) AutoUpdatesDatabase.Add(id);
                 else if (AutoUpdatesDatabase.IsAutoUpdated(id)) AutoUpdatesDatabase.Remove(id);''')
+replace(UI + 'Pages/DialogPages/InstallOptions_Package.xaml', '<CheckBox Name="SkipMinorUpdatesCheckbox">', '<CheckBox Name="SkipMinorUpdatesCheckbox" Checked="SkipMinorUpdatesCheckbox_Changed" Unchecked="SkipMinorUpdatesCheckbox_Changed">')
+replace(options, '        private void CloseButton_Click(object sender, RoutedEventArgs e)', '''        private void SkipMinorUpdatesCheckbox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (SkipMinorUpdatesLevel is not null)
+                SkipMinorUpdatesLevel.IsEnabled = SkipMinorUpdatesCheckbox.IsChecked ?? false;
+        }
+
+        private void CloseButton_Click(object sender, RoutedEventArgs e)''')
 replace(UI + 'Pages/DialogPages/InstallOptions_Package.xaml', '<CheckBox Name="AutoUpdatePackageCheckbox">', '''<NumberBox Name="SkipMinorUpdatesLevel" Minimum="2" Maximum="4" SmallChange="1"
                         Value="2" SpinButtonPlacementMode="Compact" Width="110"
-                        IsEnabled="{x:Bind SkipMinorUpdatesCheckbox.IsChecked, Mode=OneWay}"
+                        IsEnabled="False"
                         ToolTipService.ToolTip="Ignore changes from this version component onward (2 = minor, 3 = patch, 4 = revision)" />
                       <CheckBox Name="AutoUpdatePackageCheckbox">''')
 
