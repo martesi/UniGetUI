@@ -1,5 +1,8 @@
+using System.Buffers;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
@@ -84,6 +87,49 @@ namespace UniGetUI.Core.Tools
             LoadStaticTranslation();
         }
 
+        /// <summary>
+        /// Splits a translated string at the first sentence boundary so it renders on two
+        /// readable lines. Handles both Latin (". ") and CJK ("。") separators. Strings that
+        /// already contain a translator-provided line break are returned unchanged.
+        /// </summary>
+        public static string FormatAsTwoLines(string text)
+        {
+            if (text.Contains('\n'))
+                return text;
+
+            var idx = text.IndexOf(". ", StringComparison.Ordinal);
+            if (idx >= 0)
+                return text[..(idx + 1)] + "\n" + text[(idx + 2)..];
+            idx = text.IndexOf('。');
+            if (idx >= 0 && idx < text.Length - 1)
+                return text[..(idx + 1)] + "\n" + text[(idx + 1)..];
+            return text;
+        }
+
+        /// <summary>
+        /// Translates a string into the operating system's UI language, independently of the
+        /// language currently selected in UniGetUI. Used for the "System language" entry of the
+        /// language selector so it appears in the language it would actually resolve to.
+        /// Falls back to the current app language if the system language cannot be loaded.
+        /// </summary>
+        public static string TranslateInSystemLanguage(string text)
+        {
+            try
+            {
+                string systemLocale = CultureInfo.CurrentUICulture.ToString().Replace("-", "_");
+                if (string.IsNullOrWhiteSpace(systemLocale))
+                    systemLocale = "en";
+
+                return new LanguageEngine(systemLocale).Translate(text);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("Could not translate string into the system language; falling back to the app language");
+                Logger.Warn(ex);
+                return Translate(text);
+            }
+        }
+
         private static void LoadStaticTranslation()
         {
             string localScopeName = CoreTools.Translate("User | Local");
@@ -124,7 +170,7 @@ namespace UniGetUI.Core.Tools
             string command =
                 $"Wait-Process -Id {currentProcessId}; Start-Process -FilePath '{escapedExecutablePath}'";
 
-            Process.Start(
+            using var process = Process.Start(
                 new ProcessStartInfo
                 {
                     FileName = "powershell.exe",
@@ -331,9 +377,8 @@ namespace UniGetUI.Core.Tools
             try
             {
                 using HttpClient client = new(CoreTools.GenericHttpClientParameters);
-                HttpResponseMessage response = client.Send(
-                    new HttpRequestMessage(HttpMethod.Head, url)
-                );
+                using var request = new HttpRequestMessage(HttpMethod.Head, url);
+                using HttpResponseMessage response = client.Send(request);
                 return response.Content.Headers.ContentLength ?? 0;
             }
             catch (Exception e)
@@ -352,9 +397,8 @@ namespace UniGetUI.Core.Tools
                 var handler = CoreTools.GenericHttpClientParameters;
                 handler.AllowAutoRedirect = false;
                 using HttpClient client = new(handler);
-                HttpResponseMessage response = client.Send(
-                    new HttpRequestMessage(HttpMethod.Head, url)
-                );
+                using var request = new HttpRequestMessage(HttpMethod.Head, url);
+                using HttpResponseMessage response = client.Send(request);
 
                 if (
                     response.StatusCode
@@ -630,20 +674,43 @@ namespace UniGetUI.Core.Tools
         /// <returns>The safe version of the query</returns>
         public static string EnsureSafeQueryString(string query)
         {
-            return query
-                .Replace(";", string.Empty)
-                .Replace("&", string.Empty)
-                .Replace("|", string.Empty)
-                .Replace(">", string.Empty)
-                .Replace("<", string.Empty)
-                .Replace("%", string.Empty)
-                .Replace("\"", string.Empty)
-                .Replace("~", string.Empty)
-                .Replace("?", string.Empty)
-                .Replace("/", string.Empty)
-                .Replace("'", string.Empty)
-                .Replace("\\", string.Empty)
-                .Replace("`", string.Empty);
+            StringBuilder builder = new();
+            foreach (char character in query)
+            {
+                if (char.IsControl(character))
+                    continue;
+
+                if (
+                    character
+                    is ';'
+                        or '&'
+                        or '|'
+                        or '>'
+                        or '<'
+                        or '%'
+                        or '"'
+                        or '~'
+                        or '?'
+                        or '\''
+                        or '\\'
+                        or '`'
+                        or '$'
+                        or '('
+                        or ')'
+                        or '{'
+                        or '}'
+                        or '['
+                        or ']'
+                        or '#'
+                        or '!'
+                        or '^'
+                )
+                    continue;
+
+                builder.Append(character);
+            }
+
+            return builder.ToString();
         }
 
         /// <summary>
@@ -674,6 +741,30 @@ namespace UniGetUI.Core.Tools
             }
 
             return new Uri(url);
+        }
+
+        // Grants every process the right to set the foreground window, bypassing the
+        // foreground lock so a UAC consent prompt can surface in front. ASFW_ANY = -1.
+        private const int ASFW_ANY = -1;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+        /// <summary>
+        /// Windows: hand our foreground rights to the imminent UAC consent prompt so it surfaces
+        /// in front instead of only flashing the taskbar (#5146). Windows decides whether we
+        /// still hold that privilege and grants nothing once another app owns the foreground.
+        /// Either way this only ever lets the consent UI come forward; it never activates our
+        /// own window, so a minimized UniGetUI stays minimized (#5102). No-op elsewhere.
+        /// Must be called immediately before launching the elevator.
+        /// </summary>
+        public static void PrepareForegroundForElevation()
+        {
+            if (!OperatingSystem.IsWindows())
+                return;
+
+            AllowSetForegroundWindow(ASFW_ANY);
         }
 
         /// <summary>
@@ -729,6 +820,11 @@ namespace UniGetUI.Core.Tools
                         StandardOutputEncoding = Encoding.UTF8,
                     },
                 };
+
+                // When admin-rights caching is enabled, the UAC consent prompt is raised here.
+                // Surface it in front instead of letting it flash unnoticed in the taskbar (#5146).
+                PrepareForegroundForElevation();
+
                 p.Start();
                 await p.WaitForExitAsync();
                 _isCaching = false;
@@ -895,6 +991,84 @@ namespace UniGetUI.Core.Tools
         }
 
         /// <summary>
+        /// Runs a command and returns its trimmed standard output. <paramref name="timeout"/> is the
+        /// total budget; the command and the children it still owns are killed once it elapses.
+        /// </summary>
+        /// <remarks>
+        /// A descendant that outlives the command itself cannot be reached: the OS reparents it as
+        /// soon as the root exits, so it stays out of the process tree while still holding the
+        /// output pipe open. Such a call times out and reports failure instead of returning output.
+        /// </remarks>
+        public static bool TryReadStandardOutput(
+            ProcessStartInfo startInfo,
+            TimeSpan timeout,
+            out string output
+        )
+        {
+            output = "";
+            Process? process = null;
+            Task<string>? reader = null;
+            var budget = Stopwatch.StartNew();
+            try
+            {
+                process = Process.Start(startInfo);
+                if (process is null)
+                    return false;
+
+                // StandardOutput.ReadToEnd() blocks until the child closes stdout, which a hung
+                // child never does, making any later WaitForExit(timeout) unreachable. Wait on
+                // the read itself instead, and kill the child so the pipe gets released.
+                reader = process.StandardOutput.ReadToEndAsync();
+                if (!reader.Wait(timeout))
+                {
+                    // An exited root means a descendant inherited stdout and is holding it open;
+                    // it is already reparented, so killing the tree below cannot reach it.
+                    string cause = process.HasExited
+                        ? "it exited but something it started still holds its output open"
+                        : "it did not respond in time and will be terminated";
+                    Logger.Warn(
+                        $"Could not read the output of '{startInfo.FileName}' within "
+                            + $"{timeout.TotalSeconds:0.#}s: {cause}"
+                    );
+                    return false;
+                }
+
+                // stdout reached EOF, so the output is complete whether or not the child has left
+                // yet. Give it what remains of the budget to exit on its own; the finally kills it
+                // otherwise, so a child that drops stdout early cannot stretch the wait past it.
+                TimeSpan remaining = timeout - budget.Elapsed;
+                if (remaining > TimeSpan.Zero)
+                    process.WaitForExit((int)remaining.TotalMilliseconds);
+
+                output = reader.Result.Trim();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not read the output of '{startInfo.FileName}':");
+                Logger.Warn(ex);
+                return false;
+            }
+            finally
+            {
+                try
+                {
+                    if (process is not null && !process.HasExited)
+                        process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // Best effort: the process may have exited on its own in the meantime.
+                }
+
+                // Dispose() leaves StandardOutput open (we read it in sync mode), so an abandoned
+                // read ends by itself once the killed child's pipe hits EOF. Observe it regardless.
+                reader?.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
+                process?.Dispose();
+            }
+        }
+
+        /// <summary>
         /// Pings the update server and 3 well-known sites to check for internet availability
         /// </summary>
         public static async Task WaitForInternetConnection() =>
@@ -1006,7 +1180,7 @@ namespace UniGetUI.Core.Tools
                     return;
                 }
 
-                Process p = new()
+                using Process p = new()
                 {
                     StartInfo = new()
                     {
@@ -1018,7 +1192,6 @@ namespace UniGetUI.Core.Tools
                 };
                 p.Start();
                 await p.WaitForExitAsync();
-                p.Dispose();
             }
             catch (Exception ex)
             {
@@ -1033,7 +1206,7 @@ namespace UniGetUI.Core.Tools
                 if (path is null)
                     return;
 
-                var p = new Process()
+                using var p = new Process()
                 {
                     StartInfo = new() { FileName = path, UseShellExecute = true, CreateNoWindow = true, },
                 };
@@ -1050,11 +1223,380 @@ namespace UniGetUI.Core.Tools
             return LanguageEngine?.Locale ?? "Unset/Unknown";
         }
 
-        private static readonly HashSet<char> _illegalPathChars = Path.GetInvalidFileNameChars()
-            .ToHashSet();
+        private static readonly HashSet<char> _illegalPathChars = BuildIllegalPathChars();
 
-        public static string MakeValidFileName(string name) =>
-            string.Concat(name.Where(x => !_illegalPathChars.Contains(x)));
+        private static HashSet<char> BuildIllegalPathChars()
+        {
+            HashSet<char> characters = new(Path.GetInvalidFileNameChars());
+
+            foreach (char character in @"""<>|:*?\/")
+                characters.Add(character);
+
+            for (char character = (char)0; character < (char)32; character++)
+                characters.Add(character);
+
+            return characters;
+        }
+
+        private static readonly HashSet<string> _reservedDeviceNames = BuildReservedDeviceNames();
+
+        private static HashSet<string> BuildReservedDeviceNames()
+        {
+            HashSet<string> names = new(StringComparer.OrdinalIgnoreCase)
+            {
+                "CON",
+                "PRN",
+                "AUX",
+                "NUL",
+            };
+
+            for (int index = 0; index <= 9; index++)
+            {
+                names.Add($"COM{index}");
+                names.Add($"LPT{index}");
+            }
+
+            foreach (char superscript in "\u00b9\u00b2\u00b3")
+            {
+                names.Add($"COM{superscript}");
+                names.Add($"LPT{superscript}");
+            }
+
+            return names;
+        }
+
+        public static string MakeValidFileName(string name)
+        {
+            string sanitized = string.Concat(name.Where(x => !_illegalPathChars.Contains(x)));
+
+            if (sanitized.Length is 0)
+                return sanitized;
+
+            if (sanitized.All(character => character is '.' || char.IsWhiteSpace(character)))
+                return "_";
+
+            string trimmed = sanitized.TrimEnd('.', ' ');
+
+            if (trimmed.Length is 0)
+                return "_";
+
+            return _reservedDeviceNames.Contains(trimmed.Split('.')[0]) ? $"_{trimmed}" : trimmed;
+        }
+
+        public const int MaxPackageVersionLength = 128;
+        public const int MaxPackageIdentifierLength = 256;
+
+        private static readonly SearchValues<char> _commandLineSensitiveCharacters =
+            SearchValues.Create(";&|$`()[]{}<>'\"%!^#\r\n\t\v\f ");
+
+        public static bool IsCommandLineInertValue(string value) =>
+            !value.AsSpan().ContainsAny(_commandLineSensitiveCharacters);
+
+        /// <summary>
+        /// Whether a package identifier can be placed on any command line without being read as an
+        /// option or splitting into further arguments. Quoting is not enough on its own: a quoted
+        /// argument still binds as an option when it starts with a dash. Applies to every manager,
+        /// including those whose command line is not interpreted by a shell.
+        /// </summary>
+        public static bool IsOptionSafeIdentifier(string identifier, bool quotedByTheSink = false)
+        {
+            if (identifier.Length is 0)
+                return false;
+
+            if (identifier[0] is '-' or '/')
+                return false;
+
+            foreach (char character in identifier)
+            {
+                if (char.IsControl(character))
+                    return false;
+
+                // Whitespace only splits an identifier into further arguments where the sink emits
+                // it bare. WinGet quotes it, and its Add/Remove-programs identifiers legitimately
+                // contain spaces, for example "ARP\Machine\X86\Microsoft Copilot".
+                if (!quotedByTheSink && char.IsWhiteSpace(character))
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Whether a value can be placed on a command line without being read as an option. Unlike
+        /// an identifier it may contain spaces, because the sinks that accept such values quote
+        /// them; WinGet publishes versions such as "2021 Update".
+        /// </summary>
+        public static bool IsOptionSafeValue(string value)
+        {
+            if (value.Length is 0)
+                return true;
+
+            if (value[0] is '-' or '/')
+                return false;
+
+            foreach (char character in value)
+            {
+                if (char.IsControl(character))
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Starts a process and closes its standard input straight away, for callers that have
+        /// nothing to write to it.
+        /// <para>
+        /// The PowerShell shims that ship with npm and Scoop pipe $input to the real program
+        /// whenever $MyInvocation.ExpectingInput is set, which it is whenever standard input is
+        /// not a console - a redirected pipe, or one inherited from a parent that has none of its
+        /// own, as in the headless daemon. Enumerating $input does not return until that pipe is
+        /// closed, so a shim invoked with the pipe left open never runs at all. Closing it makes
+        /// the pipeline enumerate empty and the shim run immediately.
+        /// </para>
+        /// </summary>
+        public static void StartAndCloseStandardInput(Process process)
+        {
+            process.Start();
+
+            if (process.StartInfo.RedirectStandardInput)
+            {
+                process.StandardInput.Close();
+            }
+        }
+
+        private static readonly SearchValues<char> _processNameSensitiveCharacters =
+            SearchValues.Create("\"%!&|<>^");
+
+        /// <summary>
+        /// Whether a process image name can be placed inside a quoted argument of a command string
+        /// that cmd.exe will parse, as the exported installation script does.
+        /// <para>
+        /// A double quote ends the quoting, and cmd expands %NAME% before it parses the command,
+        /// inside double quotes included, so an expansion whose value carries a quote and a
+        /// separator injects further commands. Delayed expansion of !NAME! is off by default but a
+        /// user can enable it. The remaining separators are inert inside intact quoting and are
+        /// refused as insurance; none of them, nor a leading option marker, is usable in a real
+        /// image name anyway.
+        /// </para>
+        /// </summary>
+        public static bool IsSafeProcessImageName(string name)
+        {
+            if (name.Length is 0)
+                return false;
+
+            if (name[0] is '-' or '/')
+                return false;
+
+            foreach (char character in name)
+            {
+                if (char.IsControl(character))
+                    return false;
+            }
+
+            return !name.AsSpan().ContainsAny(_processNameSensitiveCharacters);
+        }
+
+        public static bool IsValidPackageVersion(string version)
+        {
+            if (version.Length is 0 or > MaxPackageVersionLength)
+                return false;
+
+            if (!char.IsAsciiLetterOrDigit(version[0]))
+                return false;
+
+            foreach (char character in version)
+            {
+                if (
+                    !char.IsAsciiLetterOrDigit(character)
+                    && character is not ('.' or '_' or '+' or '-' or '~' or ':')
+                )
+                    return false;
+            }
+
+            return true;
+        }
+
+        public static bool IsValidPackageIdentifier(string identifier)
+        {
+            if (identifier.Length is 0 or > MaxPackageIdentifierLength)
+                return false;
+
+            if (identifier[0] is '@')
+            {
+                if (identifier.Length < 2 || !char.IsLetterOrDigit(identifier[1]))
+                    return false;
+            }
+            else if (!char.IsLetterOrDigit(identifier[0]))
+            {
+                return false;
+            }
+
+            foreach (char character in identifier)
+            {
+                if (
+                    !char.IsLetterOrDigit(character)
+                    && character
+                        is not ('.' or '_' or '+' or '-' or '~' or ':' or '@' or '/' or '^' or '*' or '=')
+                )
+                    return false;
+            }
+
+            return true;
+        }
+
+        private const string LauncherProbeMarker = "UNIGETUI_LAUNCHER_OK";
+
+        private const int LauncherProbeTimeout = 20000;
+
+        private static readonly ConcurrentDictionary<string, bool> _launcherProbeCache = new();
+
+        /// <summary>
+        /// Runs the operation launcher once to confirm it can actually execute before the manager
+        /// commits to the -File launch path. A machine-wide execution policy overrides the
+        /// -ExecutionPolicy argument, and antivirus or a broken deployment can block the script
+        /// too, so the mechanism is verified rather than assumed. Callers fall back to the
+        /// concatenated -Command form when this returns false.
+        /// </summary>
+        public static bool PowerShellLauncherWorks(string powerShellPath, string launcherPath)
+        {
+            if (!File.Exists(launcherPath))
+                return false;
+
+            return _launcherProbeCache.GetOrAdd(
+                $"{powerShellPath}|{launcherPath}",
+                _ => ProbePowerShellLauncher(powerShellPath, launcherPath)
+            );
+        }
+
+        private static bool ProbePowerShellLauncher(string powerShellPath, string launcherPath)
+        {
+            try
+            {
+                using Process process = new();
+                process.StartInfo.FileName = powerShellPath;
+                foreach (
+                    string argument in new[]
+                    {
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        launcherPath,
+                        "plain",
+                        "Write-Output",
+                        LauncherProbeMarker,
+                    }
+                )
+                {
+                    process.StartInfo.ArgumentList.Add(argument);
+                }
+
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.CreateNoWindow = true;
+                process.Start();
+
+                // Both pipes have to be drained while waiting, not before: reading to the end first
+                // blocks until the child closes the stream, which makes the timeout unreachable,
+                // and leaving the other pipe unread deadlocks the child once it fills.
+                Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+                if (!process.WaitForExit(LauncherProbeTimeout))
+                {
+                    Logger.Warn(
+                        "The PowerShell operation launcher probe timed out; falling back to -Command"
+                    );
+                    try
+                    {
+                        process.Kill(true);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
+                    {
+                        // The process ended between the wait and the kill.
+                    }
+
+                    return false;
+                }
+
+                Task reads = Task.WhenAll(stdout, stderr);
+                reads.ContinueWith(
+                    completed => _ = completed.Exception,
+                    TaskContinuationOptions.OnlyOnFaulted
+                );
+
+                string output = reads.Wait(LauncherProbeTimeout) ? stdout.Result : "";
+
+                bool works = process.ExitCode is 0 && output.Contains(LauncherProbeMarker);
+                if (!works)
+                    Logger.Warn(
+                        $"The PowerShell operation launcher could not be executed (exit {process.ExitCode}); falling back to -Command"
+                    );
+
+                return works;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("The PowerShell operation launcher probe failed");
+                Logger.Warn(ex);
+                return false;
+            }
+        }
+
+        public static string EscapePowerShellSingleQuoted(string value)
+        {
+            StringBuilder builder = new();
+            builder.Append('\'');
+            foreach (char character in value)
+            {
+                if (character is '"' || char.IsControl(character))
+                    continue;
+
+                if (character is '\'')
+                    builder.Append('\'');
+
+                builder.Append(character);
+            }
+            builder.Append('\'');
+            return builder.ToString();
+        }
+
+        public static string EscapeCommandLineArgument(string argument)
+        {
+            StringBuilder builder = new();
+            builder.Append('"');
+            int i = 0;
+            while (i < argument.Length)
+            {
+                int backslashes = 0;
+                while (i < argument.Length && argument[i] == '\\')
+                {
+                    i++;
+                    backslashes++;
+                }
+
+                if (i == argument.Length)
+                {
+                    builder.Append('\\', backslashes * 2);
+                }
+                else if (argument[i] == '"')
+                {
+                    builder.Append('\\', backslashes * 2 + 1);
+                    builder.Append('"');
+                    i++;
+                }
+                else
+                {
+                    builder.Append('\\', backslashes);
+                    builder.Append(argument[i]);
+                    i++;
+                }
+            }
+            builder.Append('"');
+            return builder.ToString();
+        }
 
         // Safely wait for a task that may throw an exception we don't care about
         public static async void FinalizeDangerousTask(Task t)
