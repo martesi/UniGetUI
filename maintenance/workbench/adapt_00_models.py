@@ -42,10 +42,9 @@ replace(project, '<PackageReference Include="CommunityToolkit.Common"', '<Packag
 admin = ui / 'Pages/SettingsPages/GeneralPages/Administrator.xaml.cs'
 replace(admin, 'this.InitializeComponent();', 'this.InitializeComponent();\n            FeatureSettings.Attach(this, Scroller, _ => { });')
 main = ui / 'Pages/MainView.xaml.cs'
-replace(main, 'this.InitializeComponent();', 'this.InitializeComponent();\n            UniGetUI.Pages.SettingsPages.FeatureSettings.ApplyNavigationMode(NavView);')
+replace(main, 'InitializeComponent();', 'InitializeComponent();\n            UniGetUI.Pages.SettingsPages.FeatureSettings.ApplyNavigationMode(NavView);')
 
-# Build a native settings index from actual cards, including their English keys
-# and translated labels. It stays in lockstep with the existing WinUI settings.
+# Index the actual native cards rather than maintaining a second settings model.
 entries = set()
 for path in (ui / 'Pages/SettingsPages/GeneralPages').glob('*.xaml'):
     tree = ET.parse(path)
@@ -60,7 +59,7 @@ for path in (ui / 'Pages/SettingsPages/GeneralPages').glob('*.xaml'):
 for page, label, key in [
     ('GeneralPages.Scheduler', 'Scheduled maintenance', 'MaintenanceSchedules'),
     ('GeneralPages.Scheduler', 'Manage automatic updates', 'AutoUpdates'),
-    ('GeneralPages.Operations', 'Default installer download directory', 'InstallerDownloadDirectory'),
+    ('GeneralPages.Operations', 'Default installer download directory', 'DefaultInstallerDownloadDirectory'),
     ('GeneralPages.Operations', 'Installer filenames', 'InstallerFileNameScheme'),
     ('GeneralPages.Operations', 'Manage Start Menu shortcuts', 'AskAboutNewStartMenuShortcuts'),
     ('GeneralPages.Operations', 'Expand environment variables written as %VAR% (instead of <VAR>)', 'ExpandEnvVarsWithPercentSyntax'),
@@ -76,13 +75,9 @@ write(ui / 'Pages/SettingsPages/SettingsSearch.Index.cs', 'namespace UniGetUI.Pa
 base = ui / 'Pages/SettingsPages/SettingsBasePage.xaml.cs'
 replace(base, 'SettingsTitle.Text = page.ShortTitle;', 'SettingsTitle.Text = page.ShortTitle;\n            if (e.Content is Page nativePage) SettingsSearch.Highlight(nativePage);')
 
-# Structured history is now recorded once by the engine, including failures and
-# cancellation. Retaining the old UI writer would re-import duplicate legacy logs.
+# The shared engine now persists structured history, including failed operations.
 operation = ui / 'Controls/OperationWidgets/OperationControl.cs'
 text = operation.read_text(encoding='utf-8-sig')
-start = text.index('        var newHistory =') if '        var newHistory =' in text else -1
-if start < 0:
-    start = text.index('        List<string> newHistory')
-end = text.index('Settings.SetValue(Settings.K.OperationHistory, string.Join(\'\\n\', newHistory));', start)
-end = text.index('\n', end) + 1
+start = text.index('        // Generate process output')
+end = text.index('        // Handle UAC for batches', start)
 write(operation, text[:start] + text[end:])
