@@ -26,6 +26,9 @@ namespace UniGetUI.PackageEngine.PackageLoader
             return Task.FromResult(true);
         }
 
+        protected override bool DidManagerReportFailure(IPackageManager manager)
+            => manager.LastInstalledListingFailed;
+
         protected override IReadOnlyList<IPackage> LoadPackagesFromManager(IPackageManager manager)
         {
             return manager.GetInstalledPackages();
@@ -107,8 +110,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
                     }
                 }
 
-                InvokeFinishedLoadingEvent();
                 IsLoading = false;
+                InvokeFinishedLoadingEvent();
             }
             catch (Exception ex)
             {
