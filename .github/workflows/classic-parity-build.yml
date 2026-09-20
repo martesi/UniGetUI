@@ -67,7 +67,16 @@ jobs:
         shell: pwsh
         run: |
           dotnet build src/UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/build.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $BuildExitCode = $LASTEXITCODE
+          if ($BuildExitCode -ne 0) {
+            Get-ChildItem src/UniGetUI/obj -Recurse -File -Include input.json,output.json -ErrorAction SilentlyContinue | ForEach-Object {
+              $Name = ($_.FullName.Substring((Resolve-Path src/UniGetUI).Path.Length + 1) -replace '[\\/:]', '_')
+              Copy-Item $_.FullName "../UniGetUI/parity-artifacts/xaml-$Name"
+              Write-Host "===== $($_.FullName) ====="
+              Get-Content $_.FullName -ErrorAction SilentlyContinue
+            }
+            exit $BuildExitCode
+          }
       - name: Test reconstructed source
         working-directory: ../parity-src
         shell: pwsh
