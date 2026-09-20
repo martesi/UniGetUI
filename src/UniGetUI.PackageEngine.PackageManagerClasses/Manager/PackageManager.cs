@@ -39,6 +39,7 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         }
         public IManagerLogger TaskLogger { get; }
         public IReadOnlyList<ManagerDependency> Dependencies { get; protected set; } = [];
+        public virtual bool InstallerUrlFollowsPackageVersion => false;
         public IMultiSourceHelper SourcesHelper { get; protected set; } = new NullSourceHelper();
         public IPackageDetailsHelper DetailsHelper { get; protected set; } = null!;
         public IPackageOperationHelper OperationHelper { get; protected set; } = null!;

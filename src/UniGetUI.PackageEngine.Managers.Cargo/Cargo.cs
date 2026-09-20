@@ -73,6 +73,8 @@ public partial class Cargo : PackageManager
         }
     }
 
+    public override bool InstallerUrlFollowsPackageVersion => true;
+
     public Cargo()
     {
         string cargoCommand = OperatingSystem.IsWindows() ? "cargo.exe" : "cargo";

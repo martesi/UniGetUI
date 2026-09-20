@@ -20,6 +20,7 @@ namespace UniGetUI.PackageEngine.Interfaces
         public IPackageDetailsHelper DetailsHelper { get; }
         public IPackageOperationHelper OperationHelper { get; }
         public IReadOnlyList<ManagerDependency> Dependencies { get; }
+        public bool InstallerUrlFollowsPackageVersion { get; }
 
         /// <summary>
         /// Initializes the Package Manager (asynchronously). Must be run before using any other method of the manager.

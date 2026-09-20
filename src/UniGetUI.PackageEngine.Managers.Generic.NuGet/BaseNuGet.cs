@@ -22,6 +22,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
         /// which supports full-text search across name, description, and tags.
         /// </summary>
         protected virtual bool UseSubstringSearch => false;
+        public override bool InstallerUrlFollowsPackageVersion => true;
         public static Dictionary<long, string> Manifests = new();
 
         public sealed override void Initialize()
