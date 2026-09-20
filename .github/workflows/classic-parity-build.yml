@@ -9,7 +9,7 @@ permissions:
   contents: write
 concurrency:
   group: classic-feature-parity-workbench
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   windows-source:
     runs-on: windows-latest
@@ -27,20 +27,40 @@ jobs:
         run: |
           git config core.autocrlf false
           python maintenance/workbench/assemble.py ../parity-src
+      - name: Export exact sources for review
+        shell: python
+        run: |
+          from pathlib import Path
+          import zipfile
+          output = Path('parity-artifacts')
+          output.mkdir(exist_ok=True)
+          with zipfile.ZipFile(output / 'review-sources.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+              for name, root in [('source', Path('../parity-src')), ('workbench', Path('maintenance/workbench'))]:
+                  for path in root.rglob('*'):
+                      if not path.is_file() or '.git' in path.parts or path.suffix not in {'.cs', '.xaml', '.csproj', '.py', '.yml', '.json', '.md', '.props', '.targets'}:
+                          continue
+                      archive.write(path, name + '/' + str(path.relative_to(root)).replace('\\', '/'))
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
+        id: cache
         with:
           path: ${{ env.NUGET_PACKAGES }}
-          key: classic-parity-nuget-${{ hashFiles('global.json') }}
+          key: classic-parity-nuget-v2-${{ hashFiles('global.json') }}
           restore-keys: classic-parity-nuget-
       - name: Restore source
+        id: restore
         working-directory: ../parity-src
         shell: pwsh
         run: |
           dotnet restore src/UniGetUI.Windows.slnx 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/restore.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/cache/save@v5
+        if: steps.restore.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: classic-parity-nuget-v2-${{ hashFiles('global.json') }}
       - name: Build full Windows solution
         working-directory: ../parity-src
         shell: pwsh
