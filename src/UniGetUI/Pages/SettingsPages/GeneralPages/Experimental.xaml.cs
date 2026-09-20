@@ -14,6 +14,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         public Experimental()
         {
             this.InitializeComponent();
+            FeatureSettings.Attach(this, Scroller, page => NavigationRequested?.Invoke(this, page));
         }
 
         public bool CanGoBack => true;
@@ -22,11 +23,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             CoreTools.Translate("Experimental settings and developer options");
 
         public event EventHandler? RestartRequired;
-        public event EventHandler<Type>? NavigationRequested
-        {
-            add { }
-            remove { }
-        }
+        public event EventHandler<Type>? NavigationRequested;
 
         public void ShowRestartBanner(object sender, EventArgs e) =>
             RestartRequired?.Invoke(this, e);
