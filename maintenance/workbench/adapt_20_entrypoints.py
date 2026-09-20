@@ -16,6 +16,23 @@ def replace(path, old, new, count=1):
     write(path, text.replace(old, new))
 
 
+# Raw process arguments can contain values injected by protocol activation. Keep every
+# Classic UI consumer on the shared sanitized argument source.
+for relative in [
+    'App.xaml.cs',
+    'CLIHandler.cs',
+    'CrashHandler.cs',
+    'EntryPoint.cs',
+    'MainWindow.xaml.cs',
+    'Pages/SoftwarePages/SoftwareUpdatesPage.cs',
+]:
+    path = ui / relative
+    text = path.read_text(encoding='utf-8-sig')
+    if 'Environment.GetCommandLineArgs()' not in text:
+        raise ValueError(f'{path}: expected raw process argument reads')
+    write(path, text.replace('Environment.GetCommandLineArgs()', 'CoreData.GetProcessArguments()'))
+
+
 # Both existing menu entries and post-operation prompts open the same native editor.
 dialogs = ui / 'Pages/DialogPages/DialogHelper_Generic.cs'
 text = dialogs.read_text(encoding='utf-8-sig')
