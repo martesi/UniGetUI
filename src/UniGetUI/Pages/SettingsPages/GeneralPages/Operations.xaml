@@ -58,6 +58,19 @@
       <widgets:TranslatedTextBlock
         Margin="4,32,4,8"
         FontWeight="SemiBold"
+        Text="Installer downloads"
+      />
+
+      <widgets:ComboboxCard
+        x:Name="InstallerNameSchemeCard"
+        CornerRadius="8"
+        SettingName="InstallerFileNameScheme"
+        Text="Name of the downloaded installer files"
+      />
+
+      <widgets:TranslatedTextBlock
+        Margin="4,32,4,8"
+        FontWeight="SemiBold"
         Text="Environment variables in custom install options"
       />
 

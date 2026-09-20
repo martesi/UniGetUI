@@ -333,20 +333,54 @@ namespace UniGetUI.PackageEngine.PackageClasses
             return false;
         }
 
+        private string ResolveInstallerVersion()
+        {
+            if (Manager.InstallerUrlFollowsPackageVersion)
+                return VersionString;
+
+            if (IsUpgradable)
+                return NewVersionString;
+
+            if (GetUpgradablePackage() is { } upgradable)
+                return upgradable.NewVersionString;
+
+            if (GetAvailablePackage() is { } available)
+                return available.VersionString;
+
+            return VersionString;
+        }
+
         public async Task<string?> GetInstallerFileName()
         {
+            var scheme = InstallerFileNaming.ResolveScheme();
+            string version = scheme is InstallerNameScheme.PublisherName
+                ? ""
+                : ResolveInstallerVersion();
+
             if (Manager.Name.StartsWith("PowerShell") || Manager.Name.StartsWith(".NET"))
             {
-                return CoreTools.MakeValidFileName($"{Id}.nupkg");
+                return InstallerFileNaming.Build(
+                    $"{Id}.nupkg",
+                    Name,
+                    Id,
+                    version,
+                    "nupkg",
+                    scheme
+                );
             }
-            else
-            {
-                if (!Details.IsPopulated)
-                    await Details.Load();
-                if (Details.InstallerUrl is null)
-                    return null;
-                return await CoreTools.GetFileNameAsync(Details.InstallerUrl);
-            }
+
+            if (!Details.IsPopulated)
+                await Details.Load();
+            if (Details.InstallerUrl is null)
+                return null;
+            return InstallerFileNaming.Build(
+                await CoreTools.GetFileNameAsync(Details.InstallerUrl),
+                Name,
+                Id,
+                version,
+                Details.InstallerType,
+                scheme
+            );
         }
 
         private int HighestChangedVersionComponent()
