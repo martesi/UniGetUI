@@ -1,0 +1,38 @@
+name: Classic XAML isolation
+on:
+  push:
+    branches: [classic-test-feature-parity]
+    paths: [.github/workflows/classic-xaml-isolation.yml]
+permissions:
+  contents: read
+jobs:
+  isolate:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [current, install-options, main-view, packages-page]
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: classic-feature-parity-source-35490463937
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Revert one XAML file
+        if: matrix.variant != 'current'
+        shell: pwsh
+        run: |
+          $files = @{
+            'install-options' = 'src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml'
+            'main-view' = 'src/UniGetUI/Pages/MainView.xaml'
+            'packages-page' = 'src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml'
+          }
+          $path = $files['${{ matrix.variant }}']
+          git show b5efda4c9918b5585c08ec419ed57b7c3fd8a11f:$path | Set-Content -Encoding utf8 $path
+      - name: Restore WinUI project
+        run: dotnet restore src/UniGetUI/UniGetUI.csproj /p:Platform=x64
+      - name: Build WinUI project
+        run: dotnet build src/UniGetUI/UniGetUI.csproj --no-restore --verbosity minimal /m:1 /p:Platform=x64 /p:UseSharedCompilation=false
