@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 using UniGetUI.Core.Data;
+using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine.Classes.Manager;
@@ -16,6 +17,8 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
 {
     public class PowerShell : BaseNuGet
     {
+        public override bool CommandLineIsShellInterpreted => true;
+
         public PowerShell()
         {
             Capabilities = new ManagerCapabilities
@@ -139,9 +142,29 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
             callArguments = " -NoProfile -Command";
         }
 
+        protected override IReadOnlyList<string> _getOperationCallArgs(
+            string executablePath,
+            string callArguments
+        )
+        {
+            // Degrade to the concatenated -Command form when the launcher cannot run: operations
+            // keep working exactly as they did before, and the parameter validation in
+            // BasePkgOperationHelper still rejects anything a shell could reinterpret.
+            string launcher = CoreData.PowerShellOperationLauncher;
+            if (!CoreTools.PowerShellLauncherWorks(executablePath, launcher))
+            {
+                Logger.Warn(
+                    $"Not using the PowerShell operation launcher at {launcher}; falling back to -Command"
+                );
+                return [];
+            }
+
+            return ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcher, "tls12"];
+        }
+
         protected override void _loadManagerVersion(out string version)
         {
-            Process process = new()
+            using Process process = new()
             {
                 StartInfo = new ProcessStartInfo
                 {
