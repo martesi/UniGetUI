@@ -58,6 +58,19 @@
       <widgets:TranslatedTextBlock
         Margin="4,32,4,8"
         FontWeight="SemiBold"
+        Text="Environment variables in custom install options"
+      />
+
+      <widgets:CheckboxCard
+        CornerRadius="8"
+        SettingName="ExpandEnvVarsWithPercentSyntax"
+        Text="Use %VARIABLE% syntax for environment variables in custom install arguments and locations"
+        WarningText="By default UniGetUI expands &lt;VARIABLE&gt; tokens, which cannot appear in a real path."
+      />
+
+      <widgets:TranslatedTextBlock
+        Margin="4,32,4,8"
+        FontWeight="SemiBold"
         Text="Automatic desktop shortcut remover"
       />
 

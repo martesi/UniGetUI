@@ -156,7 +156,7 @@ public sealed class InstallOptionsFactoryTests : IDisposable
     }
 
     [Fact]
-    public void LoadApplicable_ExpandsEnvironmentVariablesInCustomParametersAndLocation()
+    public void LoadApplicable_ExpandsAngleBracketEnvironmentVariablesByDefault()
     {
         var variable = $"UNIGETUI_TEST_{Guid.NewGuid():N}";
         Environment.SetEnvironmentVariable(variable, @"C:\Expanded");
@@ -167,8 +167,8 @@ public sealed class InstallOptionsFactoryTests : IDisposable
             var options = new InstallOptions
             {
                 OverridesNextLevelOpts = true,
-                CustomInstallLocation = $"%{variable}%\\app",
-                CustomParameters_Install = [$"--location=%{variable}%\\app"],
+                CustomInstallLocation = $"<{variable}>\\app",
+                CustomParameters_Install = [$"--location=<{variable}>\\app"],
             };
             SecureSettings.ApplyForUser(
                 Environment.UserName,
@@ -184,6 +184,37 @@ public sealed class InstallOptionsFactoryTests : IDisposable
         }
         finally
         {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    [Fact]
+    public void LoadApplicable_ExpandsPercentSyntaxWhenSettingEnabled()
+    {
+        var variable = $"UNIGETUI_TEST_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(variable, @"C:\Expanded");
+        try
+        {
+            Settings.Set(Settings.K.ExpandEnvVarsWithPercentSyntax, true);
+            var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+            var package = new PackageBuilder().WithManager(manager).WithId($"Pkg{Guid.NewGuid():N}").Build();
+            InstallOptionsFactory.SaveForPackage(
+                new InstallOptions
+                {
+                    OverridesNextLevelOpts = true,
+                    CustomInstallLocation = $"%{variable}%\\app",
+                },
+                package
+            );
+
+            Assert.Equal(
+                @"C:\Expanded\app",
+                InstallOptionsFactory.LoadApplicable(package).CustomInstallLocation
+            );
+        }
+        finally
+        {
+            Settings.Set(Settings.K.ExpandEnvVarsWithPercentSyntax, false);
             Environment.SetEnvironmentVariable(variable, null);
         }
     }
