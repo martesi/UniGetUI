@@ -56,7 +56,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.ImportSettings(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -69,7 +69,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.ExportSettings(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -82,7 +82,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.EnableSetting(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -95,7 +95,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.DisableSetting(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -108,7 +108,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.SetSettingValue(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -198,7 +198,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.EnableSecureSetting(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -211,7 +211,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.DisableSecureSetting(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -224,7 +224,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.EnableSecureSettingForUser(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -237,7 +237,7 @@ public static class CLIHandler
     {
         return SharedPreUiCommandDispatcher.DisableSecureSettingForUser(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 

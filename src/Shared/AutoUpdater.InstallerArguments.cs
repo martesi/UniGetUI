@@ -15,7 +15,7 @@ internal static class AutoUpdaterInstallerArguments
         "/SILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NoVCRedist /NoEdgeWebView /NoWinGet /NoRedirectionGuard /NoDesktopShortcut";
 
     private const string UninstallSubkeyName =
-        @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{889610CC-4337-4BDB-AC3B-4F21806C0BDE}_is1";
+        @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{E385AFF5-90A4-4296-8702-EC129F9DC40B}_is1";
 
     /// <summary>
     /// Arguments for the Windows installer when it is run to update an existing copy.

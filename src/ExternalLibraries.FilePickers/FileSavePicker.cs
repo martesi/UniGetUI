@@ -13,6 +13,8 @@ public class FileSavePicker
     /// </summary>
     private readonly IntPtr _windowHandle;
 
+    public string? InitialDirectory { get; set; }
+
     /// <summary>
     /// File pick dialog.
     /// </summary>
@@ -31,6 +33,6 @@ public class FileSavePicker
     public string Show(List<string>? typeFilters = null, string defaultName = "")
     {
         FOS options = FOS.FOS_FORCEFILESYSTEM | FOS.FOS_OVERWRITEPROMPT;
-        return Helper.ShowSave(_windowHandle, options, typeFilters, defaultName);
+        return Helper.ShowSave(_windowHandle, options, typeFilters, defaultName, InitialDirectory);
     }
 }
