@@ -222,10 +222,32 @@
       <widgets:CheckboxCard
         x:Name="EnableBackupTimestampingCheckBox"
         BorderThickness="1,0,1,1"
-        CornerRadius="0,0,8,8"
+        CornerRadius="0"
         IsEnabled="{x:Bind EnablePackageBackupCheckBox_LOCAL._checkbox.IsOn, Mode=OneWay}"
         SettingName="EnableBackupTimestamping"
-        Text="Add a timestamp to the backup file names"
+        StateChanged="BackupRetentionSettingChanged"
+        Text="Keep a separate file for each backup"
+      />
+
+      <widgets:ComboboxCard
+        x:Name="MaxLocalBackupCountSelector"
+        BorderThickness="1,0,1,1"
+        CornerRadius="0,0,8,8"
+        IsEnabled="{x:Bind EnableBackupTimestampingCheckBox._checkbox.IsOn, Mode=OneWay}"
+        SettingName="MaxLocalBackupCount"
+        Text="Maximum number of local backups to keep"
+        ValueChanged="BackupRetentionSettingChanged"
+      />
+
+      <widgets:TextboxCard
+        x:Name="MaxLocalBackupCountCustomInput"
+        BorderThickness="1,0,1,1"
+        CornerRadius="0,0,8,8"
+        IsEnabled="{x:Bind EnableBackupTimestampingCheckBox._checkbox.IsOn, Mode=OneWay}"
+        Placeholder="e.g. 10"
+        SettingName="MaxLocalBackupCountCustom"
+        Text="Custom maximum number of backups"
+        Visibility="Collapsed"
       />
     </StackPanel>
   </ScrollViewer>

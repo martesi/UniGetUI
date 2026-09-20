@@ -36,6 +36,21 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             _authService = new GitHubAuthService();
             _backupService = new GitHubBackupService(_authService);
 
+            foreach (
+                var item in new Dictionary<string, string>
+                {
+                    { CoreTools.Translate("Keep all backups"), "0" },
+                    { CoreTools.Translate("Keep the last {0} backups", 5), "5" },
+                    { CoreTools.Translate("Keep the last {0} backups", 10), "10" },
+                    { CoreTools.Translate("Keep the last {0} backups", 25), "25" },
+                    { CoreTools.Translate("Keep the last {0} backups", 50), "50" },
+                    { CoreTools.Translate("Custom..."), "custom" },
+                }
+            )
+                MaxLocalBackupCountSelector.AddItem(item.Key, item.Value, false);
+            MaxLocalBackupCountSelector.ShowAddedItems();
+            RefreshBackupRetentionLayout();
+
             EnablePackageBackupUI(Settings.Get(Settings.K.EnablePackageBackup_LOCAL));
             ResetBackupDirectory.Content = CoreTools.Translate("Reset");
             OpenBackupDirectory.Content = CoreTools.Translate("Open");
@@ -44,6 +59,20 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             EnablePackageBackupCheckBox_CLOUD.StateChanged +=
                 EnablePackageBackupCheckBox_CLOUD_StateChanged;
             _ = UpdateGitHubLoginStatus();
+        }
+
+        private void BackupRetentionSettingChanged(object? sender, EventArgs e)
+        {
+            RefreshBackupRetentionLayout();
+        }
+
+        private void RefreshBackupRetentionLayout()
+        {
+            bool custom =
+                Settings.GetValue(Settings.K.MaxLocalBackupCount) == "custom"
+                && Settings.Get(Settings.K.EnableBackupTimestamping);
+            MaxLocalBackupCountCustomInput.Visibility =
+                custom ? Visibility.Visible : Visibility.Collapsed;
         }
 
         public bool CanGoBack => true;

@@ -465,35 +465,8 @@ namespace UniGetUI.Interface.SoftwarePages
             try
             {
                 string backupContents = await GenerateBackupContents();
-                string dirName = Settings.GetValue(Settings.K.ChangeBackupOutputDirectory);
-                if (dirName == "")
-                {
-                    dirName = CoreData.UniGetUI_DefaultBackupDirectory;
-                }
-
-                if (!Directory.Exists(dirName))
-                {
-                    Directory.CreateDirectory(dirName);
-                }
-
-                string fileName = Settings.GetValue(Settings.K.ChangeBackupFileName);
-                if (fileName == "")
-                {
-                    fileName = CoreTools.Translate(
-                        "{pcName} installed packages",
-                        new Dictionary<string, object?> { { "pcName", Environment.MachineName } }
-                    );
-                }
-
-                if (Settings.Get(Settings.K.EnableBackupTimestamping))
-                {
-                    fileName += " " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss");
-                }
-
-                fileName += ".ubundle";
-
-                string filePath = Path.Combine(dirName, fileName);
-                await File.WriteAllTextAsync(filePath, backupContents);
+                string filePath = await LocalBackupManager.SaveBackupAsync(backupContents);
+                await Task.Run(LocalBackupManager.ApplyRetentionLimit);
                 HasDoneBackup = true;
                 Logger.ImportantInfo("Backup saved to " + filePath);
             }
