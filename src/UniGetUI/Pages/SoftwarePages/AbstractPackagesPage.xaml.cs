@@ -1703,6 +1703,20 @@ namespace UniGetUI.Interface
                     _pageIsWide = true;
                 }
             }
+
+            if (ActualWidth < 900)
+            {
+                if (_toolbarLabelsHidden != true)
+                {
+                    _toolbarLabelsHidden = true;
+                    ToolBar.DefaultLabelPosition = CommandBarDefaultLabelPosition.Collapsed;
+                }
+            }
+            else if (_toolbarLabelsHidden != false)
+            {
+                _toolbarLabelsHidden = false;
+                ToolBar.DefaultLabelPosition = CommandBarDefaultLabelPosition.Right;
+            }
         }
 
         protected async Task ExportPackagesToCsvAsync()
@@ -1765,19 +1779,6 @@ namespace UniGetUI.Interface
                     CoreTools.Translate("An error occurred"),
                     CoreTools.Translate("The file could not be saved:") + " " + ex.Message
                 );
-            }
-            if (ActualWidth < 900)
-            {
-                if (_toolbarLabelsHidden != true)
-                {
-                    _toolbarLabelsHidden = true;
-                    ToolBar.DefaultLabelPosition = CommandBarDefaultLabelPosition.Collapsed;
-                }
-            }
-            else if (_toolbarLabelsHidden != false)
-            {
-                _toolbarLabelsHidden = false;
-                ToolBar.DefaultLabelPosition = CommandBarDefaultLabelPosition.Right;
             }
         }
 
