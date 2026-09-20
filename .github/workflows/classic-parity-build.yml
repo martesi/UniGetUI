@@ -9,7 +9,7 @@ permissions:
   contents: write
 concurrency:
   group: classic-feature-parity-workbench
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   windows-source:
     runs-on: windows-latest
