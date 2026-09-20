@@ -86,6 +86,13 @@ try {
     if ($script:window.TryGetCurrentPattern([Windows.Automation.WindowPattern]::Pattern, [ref]$windowPattern)) {
         $windowPattern.SetWindowVisualState([Windows.Automation.WindowVisualState]::Maximized)
     }
+    $adminWarning = $script:window.FindFirst(
+        [Windows.Automation.TreeScope]::Descendants,
+        (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, 'I understand'))
+    )
+    if ($adminWarning -and !$adminWarning.Current.IsOffscreen) {
+        Invoke-Element 'I understand'
+    }
     Find-Element 'Settings' 60 | Out-Null
     Screenshot '01-packages'
     Invoke-Element 'Settings'
