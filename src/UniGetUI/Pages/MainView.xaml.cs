@@ -67,6 +67,7 @@ namespace UniGetUI.Interface
         public MainView(AutoSuggestBox mainTextBlock)
         {
             InitializeComponent();
+            UniGetUI.Pages.SettingsPages.FeatureSettings.ApplyNavigationMode(NavView);
             MainTextBlock = mainTextBlock;
             OperationList.ItemContainerTransitions = null;
             OperationList.ItemsSource = MainApp.Operations._operationList;
@@ -433,6 +434,15 @@ namespace UniGetUI.Interface
 
         private void HelpMenu_Click(object sender, RoutedEventArgs e) => ShowHelp();
 
+        public void ClearSearches()
+        {
+            DiscoverPage.ClearSearch();
+            UpdatesPage.ClearSearch();
+            InstalledPage.ClearSearch();
+            BundlesPage.ClearSearch();
+            MainTextBlock.Text = "";
+        }
+
         public void ShowHelp(string uriAttachment = "")
         {
             NavigateTo(PageType.Help);
@@ -469,7 +479,7 @@ namespace UniGetUI.Interface
                 }
                 else
                 {
-                    ContentGrid.RowDefinitions[2].Height = new GridLength(Math.Min(maxHeight, 200));
+                    ContentGrid.RowDefinitions[2].Height = new GridLength(Math.Min(maxHeight, (3 * 58) - 7));
                     ContentGrid.RowDefinitions[1].Height = new GridLength(16);
                     OperationSplitter.Visibility = Visibility.Visible;
                     OperationSplitterMenuButton.Visibility = Visibility.Visible;

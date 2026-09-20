@@ -18,12 +18,13 @@ namespace UniGetUI
             // Having an async main method breaks WebView2
             try
             {
+                args = SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(args);
                 if (ShouldPrepareCliConsole(args))
                 {
                     WindowsConsoleHost.PrepareCliIO();
                 }
 
-                if (SharedPreUiCommandDispatcher.TryHandle(args, SharedPreUiCommandDispatcher.WinUiExitCodes) is { } preUiExitCode)
+                if (SharedPreUiCommandDispatcher.TryHandle(args, SharedPreUiCommandDispatcher.WindowsCliExitCodes) is { } preUiExitCode)
                 {
                     Environment.ExitCode = preUiExitCode;
                     return;

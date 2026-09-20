@@ -17,6 +17,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         public Operations()
         {
             this.InitializeComponent();
+            FeatureSettings.Attach(this, Scroller, page => NavigationRequested?.Invoke(this, page));
 
             for (int i = 1; i <= 10; i++)
             {
