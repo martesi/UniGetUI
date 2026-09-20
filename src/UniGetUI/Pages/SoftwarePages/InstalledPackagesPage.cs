@@ -1,3 +1,4 @@
+using UniGetUI.Core.Tools.Scheduling;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -316,15 +317,10 @@ namespace UniGetUI.Interface.SoftwarePages
         {
             if (!HasDoneBackup)
             {
-                if (Settings.Get(Settings.K.EnablePackageBackup_LOCAL))
-                {
-                    _ = BackupPackages_LOCAL();
-                }
-
-                if (Settings.Get(Settings.K.EnablePackageBackup_CLOUD))
-                {
-                    _ = BackupPackages_CLOUD();
-                }
+                HasDoneBackup = true;
+                foreach (var kind in new[] { MaintenanceTaskKind.LocalBackup, MaintenanceTaskKind.CloudBackup })
+                    if (MaintenanceScheduler.ShouldRunAtAppStart(kind))
+                        _ = MaintenanceScheduler.RunAsync(kind);
             }
 
             var infoBar = MainApp.Instance.MainWindow.WinGetWarningBanner;
@@ -432,6 +428,9 @@ namespace UniGetUI.Interface.SoftwarePages
 
         public static Task<string> GenerateBackupContents()
         {
+            var loader = InstalledPackagesLoader.Instance;
+            if (!loader.IsLoaded || loader.IsLoading || loader.LastLoadReportedFailures || !loader.Packages.Any())
+                throw new InvalidOperationException("Refusing to back up an incomplete or empty installed-package list");
             Logger.Debug("Starting package backup");
             List<IPackage> packagesToExport = [];
             foreach (IPackage package in InstalledPackagesLoader.Instance.Packages)
@@ -442,65 +441,40 @@ namespace UniGetUI.Interface.SoftwarePages
             return PackageBundlesPage.CreateBundle(packagesToExport.ToArray());
         }
 
-        public static async Task BackupPackages_CLOUD()
+        public static async Task<bool> BackupPackages_CLOUD()
         {
             try
             {
                 await CoreTools.WaitForInternetConnection();
                 string backupContents = await GenerateBackupContents();
-                var authService = new GitHubAuthService();
-                var backupService = new GitHubBackupService(authService);
+                var backupService = new GitHubBackupService(new GitHubAuthService());
                 await backupService.UploadPackageBundle(backupContents);
                 Logger.ImportantInfo("Cloud backup succeeded");
+                return true;
             }
             catch (Exception ex)
             {
                 Logger.Error("An error occurred while performing a CLOUD backup");
                 Logger.Error(ex);
+                return false;
             }
         }
 
-        public static async Task BackupPackages_LOCAL()
+        public static async Task<bool> BackupPackages_LOCAL()
         {
             try
             {
                 string backupContents = await GenerateBackupContents();
-                string dirName = Settings.GetValue(Settings.K.ChangeBackupOutputDirectory);
-                if (dirName == "")
-                {
-                    dirName = CoreData.UniGetUI_DefaultBackupDirectory;
-                }
-
-                if (!Directory.Exists(dirName))
-                {
-                    Directory.CreateDirectory(dirName);
-                }
-
-                string fileName = Settings.GetValue(Settings.K.ChangeBackupFileName);
-                if (fileName == "")
-                {
-                    fileName = CoreTools.Translate(
-                        "{pcName} installed packages",
-                        new Dictionary<string, object?> { { "pcName", Environment.MachineName } }
-                    );
-                }
-
-                if (Settings.Get(Settings.K.EnableBackupTimestamping))
-                {
-                    fileName += " " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss");
-                }
-
-                fileName += ".ubundle";
-
-                string filePath = Path.Combine(dirName, fileName);
-                await File.WriteAllTextAsync(filePath, backupContents);
-                HasDoneBackup = true;
+                string filePath = await LocalBackupManager.SaveBackupAsync(backupContents);
+                LocalBackupManager.ApplyRetentionLimit();
                 Logger.ImportantInfo("Backup saved to " + filePath);
+                return true;
             }
             catch (Exception ex)
             {
                 Logger.Error("An error occurred while performing a LOCAL backup");
                 Logger.Error(ex);
+                return false;
             }
         }
 

@@ -75,7 +75,7 @@ namespace UniGetUI.Interface
             ApplyProxyVariableToProcess();
             _applySubtitleToWindow();
 
-            foreach (var arg in Environment.GetCommandLineArgs())
+            foreach (var arg in CoreData.GetProcessArguments())
             {
                 ParametersToProcess.Enqueue(arg);
             }
@@ -281,6 +281,7 @@ namespace UniGetUI.Interface
                         Logger.Error(ex);
                     }
 
+                    NavigationPage?.ClearSearches();
                     MainContentFrame.Content = null;
                     AppWindow.Hide();
                 }
@@ -350,6 +351,9 @@ namespace UniGetUI.Interface
         /// </summary>
         public void ProcessCommandLineParameters()
         {
+            var normalized = UniGetUI.Shared.StartupBundleArguments.Normalize(ParametersToProcess.ToArray(), Environment.CurrentDirectory);
+            ParametersToProcess.Clear();
+            foreach (string argument in normalized) ParametersToProcess.Enqueue(argument);
             while (ParametersToProcess.Count > 0)
             {
                 string? param = ParametersToProcess.Dequeue()?.Trim('\'')?.Trim('"');
@@ -399,10 +403,10 @@ namespace UniGetUI.Interface
                 else if (Path.IsPathFullyQualified(param) && File.Exists(param))
                 {
                     if (
-                        param.EndsWith(".ubundle")
-                        || param.EndsWith(".json")
-                        || param.EndsWith(".xml")
-                        || param.EndsWith(".yaml")
+                        param.EndsWith(".ubundle", StringComparison.OrdinalIgnoreCase)
+                        || param.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                        || param.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
+                        || param.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase)
                     )
                     {
                         // Handle potential JSON files
@@ -700,6 +704,7 @@ namespace UniGetUI.Interface
         {
             AppWindow.Show();
             Activate();
+            if (!MainApp.Operations.AreThereRunningOperations()) _ = DialogHelper.HandleNewShortcuts();
         }
 
         private void ApplySplashImage()

@@ -11,6 +11,18 @@ namespace UniGetUI.Interface.Widgets
     {
         public IPackage? Package { get; set; }
 
+        public PackageItemContainer()
+        {
+            Loaded += (_, _) => LoadRowValues();
+        }
+
+        private void LoadRowValues()
+        {
+            if (!IsLoaded || _wrapper is null) return;
+            _wrapper.EnsureInstallerHostLoaded();
+            _wrapper.EnsureDownloadSizeLoaded();
+        }
+
         private PackageWrapper _wrapper = null!;
         public PackageWrapper Wrapper
         {
@@ -20,11 +32,14 @@ namespace UniGetUI.Interface.Widgets
                 _wrapper?.PropertyChanged -= Wrapper_PropertyChanged;
                 _wrapper = value;
                 _wrapper?.PropertyChanged += Wrapper_PropertyChanged;
+                LoadRowValues();
             }
         }
 
         private void Wrapper_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
+            if (e.PropertyName is nameof(PackageWrapper.InstallerHostWidth) or nameof(PackageWrapper.DownloadSizeWidth))
+                LoadRowValues();
             if (e.PropertyName == nameof(PackageWrapper.IsChecked))
             {
                 var peer = FrameworkElementAutomationPeer.FromElement(this) as PackageItemContainerAutomationPeer;

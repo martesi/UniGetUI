@@ -168,27 +168,6 @@ public partial class OperationControl : INotifyPropertyChanged
         }
         MainApp.Instance.MainWindow.UpdateSystemTrayStatus();
 
-        // Generate process output
-        List<string> rawOutput =
-        [
-            "                           ",
-            "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
-        ];
-        foreach (var line in Operation.GetOutput())
-        {
-            rawOutput.Add(line.Item1);
-        }
-
-        string[] oldHistory = Settings.GetValue(Settings.K.OperationHistory).Split("\n");
-        if (oldHistory.Length > 300)
-            oldHistory = oldHistory.Take(300).ToArray();
-
-        List<string> newHistory = [.. rawOutput, .. oldHistory];
-        Settings.SetValue(Settings.K.OperationHistory, string.Join('\n', newHistory));
-        rawOutput.Add("");
-        rawOutput.Add("");
-        rawOutput.Add("");
-
         // Handle UAC for batches
         if (Settings.Get(Settings.K.DoCacheAdminRightsForBatches))
         {
@@ -199,15 +178,10 @@ public partial class OperationControl : INotifyPropertyChanged
             }
         }
 
-        // Handle newly created shortcuts
-        if (
-            Settings.Get(Settings.K.AskToDeleteNewDesktopShortcuts)
-            && !MainApp.Operations.AreThereRunningOperations()
-            && DesktopShortcutsDatabase.GetUnknownShortcuts().Any()
-        )
-        {
-            _ = DialogHelper.HandleNewDesktopShortcuts();
-        }
+        // Do not surface dialogs or activate the application while it is hidden.
+        // Pending shortcuts are reviewed when the user next opens the interface.
+        if (!MainApp.Operations.AreThereRunningOperations() && MainApp.Instance.MainWindow.AppWindow.IsVisible)
+            _ = DialogHelper.HandleNewShortcuts();
     }
 
     private async Task LoadIcon()
@@ -266,6 +240,16 @@ public partial class OperationControl : INotifyPropertyChanged
             default:
                 throw new ArgumentOutOfRangeException(nameof(newStatus), newStatus, null);
         }
+    }
+
+    public void CardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs args)
+    {
+        for (var node = args.OriginalSource as Microsoft.UI.Xaml.DependencyObject;
+             node is not null && !ReferenceEquals(node, sender);
+             node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+            if (node is Microsoft.UI.Xaml.Controls.Primitives.ButtonBase) return;
+        args.Handled = true;
+        LiveLineClick();
     }
 
     public void LiveLineClick() => _ = LiveLineClickAsync();
@@ -535,7 +519,7 @@ public partial class OperationControl : INotifyPropertyChanged
 
     private void ShowSuccessToast()
     {
-        if (Settings.AreSuccessNotificationsDisabled())
+        if (MainApp.Instance.MainWindow.AppWindow.IsVisible || Settings.AreSuccessNotificationsDisabled())
             return;
 
         try
@@ -560,7 +544,7 @@ public partial class OperationControl : INotifyPropertyChanged
 
     private void ShowErrorToast()
     {
-        if (Settings.AreErrorNotificationsDisabled())
+        if (MainApp.Instance.MainWindow.AppWindow.IsVisible || Settings.AreErrorNotificationsDisabled())
             return;
 
         try
