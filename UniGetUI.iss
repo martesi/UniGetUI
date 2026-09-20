@@ -11,6 +11,10 @@
 #include "InstallerExtras\CodeDependencies.iss"
 
 
+#ifndef InstallerCompression
+#define InstallerCompression "lzma"
+#endif
+
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
@@ -46,7 +50,7 @@ SignedUninstallerDir=InstallerExtras\
 MinVersion=10.0
 SetupIconFile=src\UniGetUI\Assets\Images\icon.ico
 UninstallDisplayIcon={app}\UniGetUI.exe
-Compression=lzma
+Compression={#InstallerCompression}
 SolidCompression=yes
 WizardStyle=modern dynamic
 WizardImageFile=InstallerExtras\installer-banner.png
@@ -97,6 +101,19 @@ Name: "Ukrainian"; MessagesFile: "compiler:Languages\Ukrainian.isl"
 var
   RegisterUniGetUIProtocol: Boolean;
   RegisterPackageBundle: Boolean;
+  PreserveAutostartDisabled: Boolean;
+
+function IsAutostartDisabledByUser: Boolean;
+var
+  Data: AnsiString;
+begin
+  Result := False;
+  if RegQueryBinaryValue(HKEY_CURRENT_USER,
+       'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run',
+       'UniGetUIClassic', Data) then
+    Result := (Length(Data) >= 1) and ((Ord(Data[1]) and 1) = 1);
+end;
+
 
 function ShouldRegisterUniGetUIProtocol(): Boolean;
 begin
@@ -209,8 +226,15 @@ begin
   end;
 end;
 
+function ShouldSuppressRunOnStartup: Boolean;
+begin
+  Result := CmdLineParamExists('/NoRunOnStartup') or
+    CmdLineParamExists('/MSStore') or PreserveAutostartDisabled;
+end;
+
 function InitializeSetup: Boolean;
 begin
+  PreserveAutostartDisabled := IsAutostartDisabledByUser;
   // Do not steal shared compatibility handlers from an existing upstream installation.
   RegisterUniGetUIProtocol := not RegKeyExists(HKA, 'Software\Classes\unigetui');
   RegisterPackageBundle :=
@@ -218,11 +242,11 @@ begin
     not RegValueExists(HKA, 'Software\Classes\.ubundle', '');
 
   try
-    if not CmdLineParamExists('/NoVCRedist') then
+    if not (CmdLineParamExists('/NoVCRedist') or CmdLineParamExists('/MSStore')) then
     begin
       Dependency_AddVC2015To2022;
     end;
-    if not CmdLineParamExists('/NoEdgeWebView') then
+    if not (CmdLineParamExists('/NoEdgeWebView') or CmdLineParamExists('/MSStore')) then
     begin
       Dependency_AddWebView2;
     end;
@@ -276,7 +300,7 @@ Name: "regularinstall\desktopicon"; Description: "{cm:RegDesktopIcon}"; GroupDes
 
 [Registry]
 Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "UniGetUIClassic"; ValueData: """{app}\UniGetUI.exe"" --daemon"; Flags: uninsdeletevalue noerror; Tasks: regularinstall;
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: binary; ValueName: "UniGetUIClassic"; ValueData: "03"; Flags: uninsdeletevalue; Tasks: regularinstall; Check: CmdLineParamExists('/NoRunOnStartup');
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: binary; ValueName: "UniGetUIClassic"; ValueData: "03"; Flags: uninsdeletevalue; Tasks: regularinstall; Check: ShouldSuppressRunOnStartup;
 
 // Register the unigetui:// deep link
 Root: HKA; Subkey: "Software\Classes\unigetui"; ValueType: "string"; ValueData: "URL:UniGetUI Protocol"; Tasks: regularinstall; Check: ShouldRegisterUniGetUIProtocol;
@@ -305,9 +329,9 @@ Source: "InstallerExtras\ForceUniGetUIPortable"; DestDir: "{app}"; Tasks: portab
 
 [Icons]
 Name: "{autostartmenu}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: regularinstall\startmenuicon
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: regularinstall\desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: regularinstall\desktopicon; Check: not CmdLineParamExists('/NoDesktopShortcut')
 
 [Run]
 ; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File -NonInteractive ""{tmp}\EnsureWinGet.ps1"""; StatusMsg: "Ensuring WinGet is properly installed... (this may take a while)"; WorkingDir: {app}; Check: not CmdLineParamExists('/NoWinGet'); Flags: runhidden
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: runasoriginaluser nowait postinstall; Check: not CmdLineParamExists('/NoAutoStart');
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: runasoriginaluser nowait postinstall; Check: not (CmdLineParamExists('/NoAutoStart') or CmdLineParamExists('/MSStore'));
 

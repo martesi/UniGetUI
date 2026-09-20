@@ -19,6 +19,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         public Interface_P()
         {
             this.InitializeComponent();
+            FeatureSettings.Attach(this, Scroller, page => NavigationRequested?.Invoke(this, page));
 
             if (Settings.GetValue(Settings.K.PreferredTheme) == "")
             {
@@ -29,6 +30,17 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             ThemeSelector.AddItem(CoreTools.AutoTranslated("Dark"), "dark");
             ThemeSelector.AddItem(CoreTools.AutoTranslated("Follow system color scheme"), "auto");
             ThemeSelector.ShowAddedItems();
+            if (Scroller.Content is Microsoft.UI.Xaml.Controls.Panel cards)
+            {
+                var font = new UniGetUI.Interface.Widgets.CheckboxCard
+                {
+                    SettingName = Settings.K.UseSystemUIFont,
+                    Text = "Use the font configured in Windows instead of the default interface font",
+                    WarningText = "Restart UniGetUI to apply this change",
+                };
+                font.StateChanged += (_, _) => RestartRequired?.Invoke(this, EventArgs.Empty);
+                cards.Children.Insert(0, font);
+            }
 
             StartupPageSelector.AddItem(CoreTools.AutoTranslated("Default"), "default");
             StartupPageSelector.AddItem(CoreTools.AutoTranslated("Discover Packages"), "discover");
@@ -53,11 +65,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         public string ShortTitle => CoreTools.Translate("User interface preferences");
 
         public event EventHandler? RestartRequired;
-        public event EventHandler<Type>? NavigationRequested
-        {
-            add { }
-            remove { }
-        }
+        public event EventHandler<Type>? NavigationRequested;
 
         public void ShowRestartBanner(object sender, EventArgs e) =>
             RestartRequired?.Invoke(this, e);

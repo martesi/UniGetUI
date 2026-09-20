@@ -22,6 +22,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         public Updates()
         {
             this.InitializeComponent();
+            FeatureSettings.Attach(this, Scroller, page => NavigationRequested?.Invoke(this, page));
 
             Dictionary<string, string> updates_dict = new()
             {
