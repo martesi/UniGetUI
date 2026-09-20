@@ -1,0 +1,68 @@
+name: Classic feature workbench
+on:
+  push:
+    branches: [classic-test-feature-parity]
+    paths: [.github/workflows/classic-feature-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  export-sources:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch pinned upstream
+        run: git fetch --no-tags https://github.com/Devolutions/UniGetUI.git 5e8b14e102780e05a72dd79afc9e20f584da8d12
+      - name: Export source snapshots and change inventory
+        shell: python
+        run: |
+          import json
+          import pathlib
+          import subprocess
+          import zipfile
+
+          refs = {
+              'classic': 'd628348581f870cf8fe52ed693a2924b3f9c62a6',
+              'main': '8cfc090b217d193e3573ff78392678686a2f79a7',
+              'stack': 'd74a721db78f94ae39e18f7b5b77613272dc6cb6',
+              'base': '68411409d001b9f34cfb896af1543a1d7067ca5e',
+              'upstream': '5e8b14e102780e05a72dd79afc9e20f584da8d12',
+          }
+          suffixes = {'.cs', '.csproj', '.props', '.targets', '.sln', '.slnx', '.xaml', '.axaml', '.json', '.yml', '.yaml', '.ps1', '.py', '.sh', '.md', '.txt', '.patch', '.resx', '.iss', '.config', '.manifest', '.xml', '.toml'}
+          output = pathlib.Path('source-snapshots')
+          output.mkdir()
+          (output / 'refs.json').write_text(json.dumps(refs, indent=2))
+          for name, ref in refs.items():
+              entries = subprocess.check_output(['git', 'ls-tree', '-r', '-z', ref]).split(b'\0')
+              tree = {}
+              with zipfile.ZipFile(output / (name + '.zip'), 'w', zipfile.ZIP_DEFLATED) as archive:
+                  for entry in entries:
+                      if not entry:
+                          continue
+                      metadata, path_bytes = entry.split(b'\t', 1)
+                      mode, kind, sha = metadata.decode().split()
+                      path = path_bytes.decode()
+                      tree[path] = {'mode': mode, 'type': kind, 'sha': sha}
+                      if kind != 'blob':
+                          continue
+                      if pathlib.Path(path).suffix not in suffixes and pathlib.Path(path).name not in {'series', '.editorconfig', '.gitattributes', '.gitignore'}:
+                          continue
+                      content = subprocess.check_output(['git', 'cat-file', 'blob', sha])
+                      if b'\0' not in content:
+                          archive.writestr(path, content)
+              (output / (name + '-tree.json')).write_text(json.dumps(tree))
+          for name, args in {
+              'upstream-commits.txt': ['log', '--reverse', '--format=%H %s', refs['base'] + '..' + refs['upstream']],
+              'upstream-changes.txt': ['diff', '--stat', refs['base'], refs['upstream']],
+              'upstream.diff': ['diff', refs['base'], refs['upstream'], '--', 'src', 'scripts'],
+              'classic.diff': ['diff', refs['base'], refs['classic'], '--', 'src', 'scripts'],
+          }.items():
+              (output / name).write_bytes(subprocess.check_output(['git', *args]))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: classic-feature-sources
+          path: source-snapshots
+          retention-days: 7
+          if-no-files-found: error
