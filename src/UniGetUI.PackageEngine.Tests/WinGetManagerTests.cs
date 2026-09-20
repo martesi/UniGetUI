@@ -1,12 +1,15 @@
 #if WINDOWS
+using System.Diagnostics;
 using Devolutions.Pinget.Core;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.SettingsEngine;
+using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.Managers.WingetManager;
 using UniGetUI.PackageEngine.ManagerClasses.Classes;
+using UniGetUI.PackageEngine.Operations;
 using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.Serializable;
 using UniGetUI.PackageEngine.Tests.Infrastructure.Assertions;
@@ -143,6 +146,18 @@ public sealed class WinGetManagerTests : IDisposable
             ["packaged COM registration", "lower-trust COM registration"],
             NativeWinGetHelper.PreferredActivationModes
         );
+    }
+
+    [Fact]
+    public void NativeWinGetCollectionCopiesWithoutEnumeratingWinRtCollections()
+    {
+        IReadOnlyList<string> nativeCollection = new EnumeratorThrowingReadOnlyList<string>(
+            ["winget", "msstore"]
+        );
+
+        var collectionCopy = NativeWinGetCollection.Copy(nativeCollection);
+
+        Assert.Equal(["winget", "msstore"], collectionCopy);
     }
 
     [Fact]
@@ -298,6 +313,261 @@ public sealed class WinGetManagerTests : IDisposable
     }
 
     [Fact]
+    public void FindCandidateExecutableFilesPrefersOffPathSystemWinGetOverBundledPinget()
+    {
+        const string bundledPinget = @"C:\Program Files\UniGetUI\pinget.exe";
+        const string packagedWinGet =
+            @"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe\winget.exe";
+
+        var candidates = WinGet.FindCandidateExecutableFiles(
+            static _ => [],
+            path => path == bundledPinget,
+            bundledPinget,
+            WinGetCliToolPreference.Default,
+            static () => [packagedWinGet]
+        );
+
+        Assert.Equal([packagedWinGet, bundledPinget], candidates);
+    }
+
+    [Fact]
+    public void FindCandidateExecutableFilesDeduplicatesOffPathSystemWinGetAlreadyFoundOnPath()
+    {
+        const string systemWinGet = @"C:\WindowsApps\winget.exe";
+        const string bundledPinget = @"C:\Program Files\UniGetUI\pinget.exe";
+
+        var candidates = WinGet.FindCandidateExecutableFiles(
+            static executableName => executableName == "winget.exe" ? [systemWinGet] : [],
+            path => path == bundledPinget,
+            bundledPinget,
+            WinGetCliToolPreference.Default,
+            static () => [systemWinGet]
+        );
+
+        Assert.Equal([systemWinGet, bundledPinget], candidates);
+    }
+
+    [Fact]
+    public void FindCandidateExecutableFilesIgnoresOffPathSystemWinGetInPingetMode()
+    {
+        const string bundledPinget = @"C:\Program Files\UniGetUI\pinget.exe";
+
+        var candidates = WinGet.FindCandidateExecutableFiles(
+            static _ => [],
+            path => path == bundledPinget,
+            bundledPinget,
+            WinGetCliToolPreference.BundledPinget,
+            static () =>
+                throw new InvalidOperationException(
+                    "System WinGet should not be queried in Pinget mode."
+                )
+        );
+
+        Assert.Equal([bundledPinget], candidates);
+    }
+
+    [Fact]
+    public void ManagerStaysNotReadyWhenNoCandidateExecutableCanBeStarted()
+    {
+        string brokenWinGet = Path.Combine(_testRoot, "winget.exe");
+        File.WriteAllBytes(brokenWinGet, []);
+
+        var manager = new ScriptedCandidatesWinGet([brokenWinGet]);
+        manager.Initialize();
+
+        Assert.True(manager.Status.Found);
+        Assert.False(manager.IsReady());
+        Assert.Equal(brokenWinGet, manager.Status.ExecutablePath);
+    }
+
+    [Fact]
+    public void ManagerStaysNotReadyWhenTheOnlyCandidateExecutableReportsNoVersion()
+    {
+        string failingExecutable = Path.Combine(Environment.SystemDirectory, "timeout.exe");
+        Assert.True(File.Exists(failingExecutable));
+
+        var manager = new ScriptedCandidatesWinGet([failingExecutable]);
+        manager.Initialize();
+
+        Assert.True(manager.Status.Found);
+        Assert.False(manager.IsReady());
+    }
+
+    [Fact]
+    public void TryReadExecutableVersionFailsOnAnExecutableThatCannotBeStarted()
+    {
+        string brokenWinGet = Path.Combine(_testRoot, "winget.exe");
+        File.WriteAllBytes(brokenWinGet, []);
+
+        var (succeeded, output, failureReason) = WinGet.TryReadExecutableVersion(brokenWinGet, "");
+
+        Assert.False(succeeded);
+        Assert.Empty(output);
+        Assert.NotEmpty(failureReason);
+    }
+
+    [Fact]
+    public void TryReadExecutableVersionFailsOnAMissingExecutable()
+    {
+        string missingWinGet = Path.Combine(_testRoot, "missing", "winget.exe");
+
+        var (succeeded, output, failureReason) = WinGet.TryReadExecutableVersion(missingWinGet, "");
+
+        Assert.False(succeeded);
+        Assert.Empty(output);
+        Assert.NotEmpty(failureReason);
+    }
+
+    [Fact]
+    public void ResolveLaunchableExecutableFileKeepsThePreferredExecutableWhenItCanBeRun()
+    {
+        const string systemWinGet = @"C:\WindowsApps\winget.exe";
+
+        var (resolved, versionOutput, failureReason) = WinGet.ResolveLaunchableExecutableFile(
+            systemWinGet,
+            _ => (true, "v1.11.400", ""),
+            () => throw new InvalidOperationException(
+                "Other candidates should not be looked up when the preferred executable runs."
+            )
+        );
+
+        Assert.Equal(systemWinGet, resolved);
+        Assert.Equal("v1.11.400", versionOutput);
+        Assert.Null(failureReason);
+    }
+
+    [Fact]
+    public void ResolveLaunchableExecutableFileFallsBackToTheFirstCandidateThatCanBeRun()
+    {
+        const string systemWinGet = @"C:\WindowsApps\winget.exe";
+        const string packagedWinGet =
+            @"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe\winget.exe";
+        const string bundledPinget = @"C:\Program Files\UniGetUI\pinget.exe";
+        List<string> attempted = [];
+
+        var (resolved, versionOutput, failureReason) = WinGet.ResolveLaunchableExecutableFile(
+            systemWinGet,
+            executablePath =>
+            {
+                attempted.Add(executablePath);
+                return executablePath == bundledPinget
+                    ? (true, "pinget 0.12.0", "")
+                    : (false, "", "no applicable app licenses found");
+            },
+            () => [systemWinGet, packagedWinGet, bundledPinget]
+        );
+
+        Assert.Equal(bundledPinget, resolved);
+        Assert.Equal("pinget 0.12.0", versionOutput);
+        Assert.Null(failureReason);
+        Assert.Equal([systemWinGet, packagedWinGet, bundledPinget], attempted);
+    }
+
+    [Fact]
+    public void ResolveLaunchableExecutableFileKeepsThePreferredExecutableWhenNoCandidateCanBeRun()
+    {
+        const string systemWinGet = @"C:\WindowsApps\winget.exe";
+        const string bundledPinget = @"C:\Program Files\UniGetUI\pinget.exe";
+
+        var (resolved, versionOutput, failureReason) = WinGet.ResolveLaunchableExecutableFile(
+            systemWinGet,
+            _ => (false, "", "no applicable app licenses found"),
+            () => [systemWinGet, bundledPinget]
+        );
+
+        Assert.Equal(systemWinGet, resolved);
+        Assert.Null(versionOutput);
+        Assert.Equal("no applicable app licenses found", failureReason);
+    }
+
+    [Fact]
+    public void EnumerateOffPathExecutablesReturnsExecutionAliasAndAppInstallerLocations()
+    {
+        const string localAppData = @"C:\Users\test\AppData\Local";
+        string alias = Path.Join(localAppData, "Microsoft", "WindowsApps", "winget.exe");
+        const string packageRoot =
+            @"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe";
+        string packagedWinGet = Path.Join(packageRoot, "winget.exe");
+
+        var executables = SystemWinGetLocator
+            .EnumerateOffPathExecutables(
+                path => path == alias || path == packagedWinGet,
+                localAppData,
+                () => [packageRoot]
+            )
+            .ToArray();
+
+        Assert.Equal([alias, packagedWinGet], executables);
+    }
+
+    [Fact]
+    public void EnumerateOffPathExecutablesSkipsDirectoriesWithoutWinGet()
+    {
+        const string packageRoot =
+            @"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe";
+        string packagedWinGet = Path.Join(packageRoot, "winget.exe");
+
+        var executables = SystemWinGetLocator
+            .EnumerateOffPathExecutables(
+                path => path == packagedWinGet,
+                @"C:\Users\test\AppData\Local",
+                () => [@"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_0.0.0.0_x64__8wekyb3d8bbwe", packageRoot]
+            )
+            .ToArray();
+
+        Assert.Equal([packagedWinGet], executables);
+    }
+
+    [Fact]
+    public void EnumerateOffPathExecutablesIgnoresTheExecutionAliasWhenAppInstallerIsNotRegistered()
+    {
+        const string localAppData = @"C:\Users\test\AppData\Local";
+        string alias = Path.Join(localAppData, "Microsoft", "WindowsApps", "winget.exe");
+
+        var executables = SystemWinGetLocator
+            .EnumerateOffPathExecutables(path => path == alias, localAppData, static () => [])
+            .ToArray();
+
+        Assert.Empty(executables);
+    }
+
+    [Theory]
+    [InlineData("Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe", true)]
+    [InlineData("Microsoft.DesktopAppInstaller_1.29.290.0_neutral_split.scale-100_8wekyb3d8bbwe", true)]
+    [InlineData("Microsoft.DesktopAppInstaller_9.9.9.0_x64__1abcdefghijkl", false)]
+    [InlineData("Microsoft.DesktopAppInstallerExtra_1.0.0.0_x64__8wekyb3d8bbwe", false)]
+    [InlineData("Contoso.DesktopAppInstaller_1.0.0.0_x64__8wekyb3d8bbwe", false)]
+    [InlineData("Microsoft.WindowsTerminal_1.0.0.0_x64__8wekyb3d8bbwe", false)]
+    [InlineData("Microsoft.DesktopAppInstaller_8wekyb3d8bbwe", false)]
+    [InlineData("Microsoft.DesktopAppInstaller", false)]
+    public void IsAppInstallerPackageFullNameRequiresTheMicrosoftPublisherId(
+        string packageFullName,
+        bool expected
+    )
+    {
+        Assert.Equal(
+            expected,
+            SystemWinGetLocator.IsAppInstallerPackageFullName(packageFullName)
+        );
+    }
+
+    [Theory]
+    [InlineData("Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe", "1.29.290.0")]
+    [InlineData("Microsoft.DesktopAppInstaller_1.2_neutral__8wekyb3d8bbwe", "1.2")]
+    [InlineData("Microsoft.DesktopAppInstaller", "0.0")]
+    [InlineData("Microsoft.DesktopAppInstaller_notaversion_x64__8wekyb3d8bbwe", "0.0")]
+    public void ParsePackageVersionReadsTheVersionPieceOfThePackageFullName(
+        string packageFullName,
+        string expected
+    )
+    {
+        Assert.Equal(
+            Version.Parse(expected),
+            SystemWinGetLocator.ParsePackageVersion(packageFullName)
+        );
+    }
+
+    [Fact]
     public void PingetCliHelperDeserializesListResponsesWithGeneratedContext()
     {
         // Pinget emits PascalCase keys.
@@ -410,6 +680,10 @@ public sealed class WinGetManagerTests : IDisposable
     [InlineData(@"C:\Program Files\UniGetUI\pinget.exe", 1)]
     [InlineData(@"C:\Tools\pinget.exe", 1)]
     [InlineData(@"C:\WindowsApps\winget.exe", 0)]
+    [InlineData(
+        @"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe\winget.exe",
+        0
+    )]
     public void GetCliToolKindRecognizesPingetExecutableName(
         string executablePath,
         int expectedKind
@@ -498,6 +772,25 @@ public sealed class WinGetManagerTests : IDisposable
                 WinGetComApiPolicy.Enabled
             )
         );
+    }
+
+    [Fact]
+    public void CreateCliHelperForSelectedCliToolUsesExplicitExecutablePath()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+
+        IWinGetManagerHelper helper = manager.CreateCliHelperForSelectedCliTool(
+            @"C:\WindowsApps\winget.exe"
+        );
+
+        var pathField = typeof(WinGetCliHelper).GetField(
+            "_cliExecutablePath",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+        );
+
+        Assert.NotNull(pathField);
+        Assert.Equal(@"C:\WindowsApps\winget.exe", pathField.GetValue(helper));
     }
 
     [Fact]
@@ -696,6 +989,155 @@ public sealed class WinGetManagerTests : IDisposable
             dependency.Name == "Contoso.Dependency" && dependency.Version == "2.0"
         );
         Assert.Contains("utility", details.Tags);
+    }
+
+    [Fact]
+    public void TryGetInstallerUrlsCollectsEveryInstallerUrlWithoutDuplicates()
+    {
+        var package = CreatePingetQueryPackage();
+        var urls = PingetPackageDetailsProvider.TryGetInstallerUrls(
+            package,
+            null,
+            _ => CreatePingetShowResult(
+                installerUrls:
+                [
+                    "https://example.test/tool-x64.exe",
+                    "https://EXAMPLE.test/TOOL-X64.exe",
+                    "",
+                    "https://cdn.example.test/tool-arm64.exe",
+                ]
+            )
+        );
+
+        Assert.Equal(
+            ["https://example.test/tool-x64.exe", "https://cdn.example.test/tool-arm64.exe"],
+            urls
+        );
+    }
+
+    [Fact]
+    public void TryGetInstallerUrlsFallsBackToTheLatestManifestWhenTheVersionIsNotIndexed()
+    {
+        var package = CreatePingetQueryPackage();
+        List<string?> requestedVersions = [];
+
+        var urls = PingetPackageDetailsProvider.TryGetInstallerUrls(
+            package,
+            "9.9.9",
+            query =>
+            {
+                requestedVersions.Add(query.Version);
+                if (query.Version is not null)
+                    throw new InvalidOperationException("version not found in index");
+
+                return CreatePingetShowResult(installerUrls: ["https://example.test/latest.exe"]);
+            }
+        );
+
+        Assert.Equal(["9.9.9", null], requestedVersions);
+        Assert.Equal(["https://example.test/latest.exe"], urls);
+    }
+
+    [Fact]
+    public void TryGetInstallerUrlsReturnsNullWhenTheManifestHasNoInstaller()
+    {
+        var package = CreatePingetQueryPackage();
+
+        Assert.Null(
+            PingetPackageDetailsProvider.TryGetInstallerUrls(
+                package,
+                null,
+                _ => CreatePingetShowResult(installerUrls: [])
+            )
+        );
+    }
+
+    [Fact]
+    public void TryGetInstallerHostsForVersionRejectsAManifestOfAnotherVersion()
+    {
+        var package = CreatePingetQueryPackage();
+
+        Assert.Null(
+            PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
+                package,
+                "9.9.9",
+                _ => CreatePingetShowResult(installerUrls: ["https://example.test/latest.exe"])
+            )
+        );
+    }
+
+    [Fact]
+    public void TryGetInstallerHostsForVersionFallsBackToTheTrimmedMsixVersion()
+    {
+        var package = CreatePingetQueryPackage();
+
+        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
+            package,
+            "1.2.3.0",
+            _ => CreatePingetShowResult(installerUrls: ["https://example.test/tool.msixbundle"])
+        );
+
+        Assert.NotNull(hosts);
+        Assert.Equal(["example.test"], hosts.Order());
+    }
+
+    [Fact]
+    public void TryGetInstallerHostsForVersionDoesNotRetryWhenThereIsNothingToTrim()
+    {
+        var package = CreatePingetQueryPackage();
+        int lookups = 0;
+
+        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
+            package,
+            "9.9.9",
+            _ =>
+            {
+                lookups++;
+                return CreatePingetShowResult(installerUrls: ["https://example.test/tool.exe"]);
+            }
+        );
+
+        Assert.Null(hosts);
+        Assert.Equal(1, lookups);
+    }
+
+    [Theory]
+    [InlineData("2.7.11.0", "2.7.11")]
+    [InlineData("2.7.11.0.0", "2.7.11")]
+    [InlineData("1.0.0.0", "1")]
+    [InlineData("0.0.0.0", "0")]
+    [InlineData("2.7.11", null)]
+    [InlineData("2.7.0.11", null)]
+    [InlineData("1.2.3-beta.0", null)]
+    [InlineData("4", null)]
+    [InlineData("", null)]
+    public void TrimTrailingZeroSegmentsOnlyTrimsPlainDottedVersions(
+        string version,
+        string? expected
+    )
+    {
+        Assert.Equal(expected, PingetPackageDetailsProvider.TrimTrailingZeroSegments(version));
+    }
+
+    [Fact]
+    public void TryGetInstallerHostsForVersionReturnsTheHostsOfTheRequestedVersion()
+    {
+        var package = CreatePingetQueryPackage();
+
+        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
+            package,
+            "1.2.3",
+            _ => CreatePingetShowResult(
+                installerUrls:
+                [
+                    "https://example.test/tool-x64.exe",
+                    "https://cdn.example.test/tool-arm64.exe",
+                ]
+            )
+        );
+
+        Assert.NotNull(hosts);
+        Assert.Equal(["cdn.example.test", "example.test"], hosts.Order());
     }
 
     [Fact]
@@ -912,6 +1354,32 @@ public sealed class WinGetManagerTests : IDisposable
     }
 
     [Fact]
+    public void WinGetInstallEscapesQuotesInCustomLocationToPreventArgumentInjection()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.QuotedLocation")
+            .WithVersion("1.0.0")
+            .Build();
+        var options = new InstallOptions
+        {
+            CustomInstallLocation = "C:\\apps\" --evil-injected-switch",
+        };
+
+        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Install).ToList();
+
+        int locationIndex = parameters.IndexOf("--location");
+        Assert.True(locationIndex >= 0);
+        Assert.Equal(
+            CoreTools.EscapeCommandLineArgument("C:\\apps\" --evil-injected-switch"),
+            parameters[locationIndex + 1]
+        );
+        Assert.DoesNotContain("--evil-injected-switch", parameters);
+    }
+
+    [Fact]
     public void WinGetUpdateOmitsInheritedLocationWhenForceSettingIsOff()
     {
         // #4210: a location inherited from the manager-wide default must not relocate installs
@@ -1040,6 +1508,8 @@ public sealed class WinGetManagerTests : IDisposable
     [Fact]
     public void WinGetUpdateNotApplicableRetriesOnceWithoutScopeAndArchitecture()
     {
+        // Regression test for #4954: a package whose only installer is x86 (e.g. Bulk Crap
+        // Uninstaller) reports "update not applicable" when we force --architecture/--scope.
         var manager = new WinGet();
         SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
         var package = new PackageBuilder()
@@ -1049,19 +1519,14 @@ public sealed class WinGetManagerTests : IDisposable
             .WithNewVersion("6.2")
             .Build();
         package.OverridenOptions.Scope = PackageScope.Machine;
-        var options = new InstallOptions
-        {
-            Architecture = UniGetUI.PackageEngine.Enums.Architecture.x64,
-        };
+        var options = new InstallOptions { Architecture = "x64" };
 
-        var firstAttempt = manager.OperationHelper.GetParameters(
-            package,
-            options,
-            OperationType.Update
-        );
+        // The forced constraints are present on the first attempt.
+        var firstAttempt = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
         Assert.Contains("--scope", firstAttempt);
         Assert.Contains("--architecture", firstAttempt);
 
+        // An "update not applicable" result triggers a single relaxed retry.
         var veredict = manager.OperationHelper.GetResult(
             package,
             OperationType.Update,
@@ -1072,11 +1537,8 @@ public sealed class WinGetManagerTests : IDisposable
         OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
         Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
 
-        var retryAttempt = manager.OperationHelper.GetParameters(
-            package,
-            options,
-            OperationType.Update
-        );
+        // The relaxed retry drops both constraints, matching the WinGet CLI default.
+        var retryAttempt = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
         Assert.DoesNotContain("--scope", retryAttempt);
         Assert.DoesNotContain("--architecture", retryAttempt);
     }
@@ -1092,7 +1554,7 @@ public sealed class WinGetManagerTests : IDisposable
             .WithNewVersion("6.2")
             .Build();
         package.OverridenOptions.Scope = PackageScope.Machine;
-        package.OverridenOptions.WinGet_DropArchAndScope = true;
+        package.OverridenOptions.WinGet_DropArchAndScope = true; // the relaxed retry already happened
 
         var veredict = manager.OperationHelper.GetResult(
             package,
@@ -1127,84 +1589,9 @@ public sealed class WinGetManagerTests : IDisposable
     }
 
     [Fact]
-    public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
-    {
-        var manager = new WinGet();
-        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
-        var package = new PackageBuilder()
-            .WithManager(manager)
-            .WithId("JRSoftware.InnoSetup")
-            .WithVersion("6.7.1")
-            .WithNewVersion("6.7.3")
-            .Build();
-        package.OverridenOptions.Scope = PackageScope.Machine;
-
-        var veredict = manager.OperationHelper.GetResult(
-            package,
-            OperationType.Update,
-            [
-                "Selecting applicable installer for this system...",
-                "Error upgrading JRSoftware.InnoSetup: No applicable installer found",
-            ],
-            1
-        );
-
-        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
-        Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
-    }
-
-    [Fact]
-    public void WinGetGenericPingetFailureDoesNotRetry()
-    {
-        var manager = new WinGet();
-        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
-        var package = new PackageBuilder()
-            .WithManager(manager)
-            .WithId("JRSoftware.InnoSetup")
-            .WithVersion("6.7.1")
-            .WithNewVersion("6.7.3")
-            .Build();
-        package.OverridenOptions.Scope = PackageScope.Machine;
-
-        var veredict = manager.OperationHelper.GetResult(
-            package,
-            OperationType.Update,
-            ["error: download failed"],
-            1
-        );
-
-        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
-        Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
-    }
-
-    [Fact]
-    public void WinGetUpdateNotApplicableViaPingetWithZeroExitCodeFails()
-    {
-        var manager = new WinGet();
-        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
-        var package = new PackageBuilder()
-            .WithManager(manager)
-            .WithId("Contoso.Tool")
-            .WithVersion("1.0.0")
-            .WithNewVersion("2.0.0")
-            .Build();
-
-        var veredict = manager.OperationHelper.GetResult(
-            package,
-            OperationType.Update,
-            ["No applicable upgrade found."],
-            0
-        );
-
-        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
-        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
-    }
-
-    [Fact]
     public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
     {
         var manager = new WinGet();
-        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
         var package = new PackageBuilder()
             .WithManager(manager)
             .WithId("Hugin.Hugin")
@@ -1231,6 +1618,852 @@ public sealed class WinGetManagerTests : IDisposable
             .WithNewVersion("2026.0.0")
             .Build();
         Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
+    }
+
+    [Fact]
+    public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
+    {
+        // Bundled pinget signals "not applicable" with a non-zero exit code and a
+        // "No applicable installer found" message instead of WinGet's 0x8A15002B.
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("JRSoftware.InnoSetup")
+            .WithVersion("6.7.1")
+            .WithNewVersion("6.7.3")
+            .Build();
+        package.OverridenOptions.Scope = PackageScope.Machine;
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            [
+                "Selecting applicable installer for this system...",
+                "  Error upgrading JRSoftware.InnoSetup: No applicable installer found",
+            ],
+            1
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
+        Assert.True(package.OverridenOptions.WinGet_DropArchAndScope);
+    }
+
+    [Fact]
+    public void WinGetUpdateNotApplicableViaPingetWithZeroExitCodeFails()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            ["No applicable upgrade found."],
+            0
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+    }
+
+    [Fact]
+    public void WinGetGenericPingetFailureDoesNotRetry()
+    {
+        // A non-zero pinget exit without the "No applicable installer found" message
+        // is a real failure and must not be mistaken for the not-applicable case.
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("JRSoftware.InnoSetup")
+            .WithVersion("6.7.1")
+            .WithNewVersion("6.7.3")
+            .Build();
+        package.OverridenOptions.Scope = PackageScope.Machine;
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            ["error: download failed"],
+            1
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+    }
+
+    [Fact]
+    public void ConsumeAlreadyUpgradedSuppression_HidesOnceThenRevealsOnNextScan()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.OneShot")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        // Simulate a completed upgrade to 2.0.0 (as MarkUpgradeAsDone records it).
+        Settings.SetDictionaryItem<string, string>(
+            Settings.K.WinGetAlreadyUpgradedPackages,
+            package.Id,
+            "2.0.0"
+        );
+
+        // First scan hides the still-listed update once, then consumes the mark...
+        Assert.True(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package));
+        Assert.False(WinGetPkgOperationHelper.UpdateAlreadyInstalled(package));
+
+        // ...so a genuinely-outdated package (no-op upgrade) reappears next scan (issue #5042).
+        Assert.False(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package));
+    }
+
+    [Fact]
+    public void ConsumeAlreadyUpgradedSuppression_DoesNotHideDifferentAvailableVersion()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.NewerUpdate")
+            .WithVersion("1.0.0")
+            .WithNewVersion("3.0.0")
+            .Build();
+
+        // A mark from a previous upgrade to a different version must never hide a new update.
+        Settings.SetDictionaryItem<string, string>(
+            Settings.K.WinGetAlreadyUpgradedPackages,
+            package.Id,
+            "2.0.0"
+        );
+
+        Assert.False(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package));
+        Assert.Equal(
+            "2.0.0",
+            Settings.GetDictionaryItem<string, string>(
+                Settings.K.WinGetAlreadyUpgradedPackages,
+                package.Id
+            )
+        );
+    }
+
+    [Fact]
+    public void ConsumeAlreadyUpgradedSuppression_NoMarkNeverHides()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.NoMark")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        Assert.False(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package));
+    }
+
+    [Fact]
+    public void ConsumeAlreadyUpgradedSuppression_BreaksLoopAfterRepeatedPhantomUpgrades()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Stuck")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        // Below the threshold a phantom no-op still reappears (#5042).
+        OperationAssert.HasVeredict(
+            manager.OperationHelper.GetResult(package, OperationType.Update, [], 0),
+            OperationVeredict.Success
+        );
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+        Assert.True(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package));
+        Assert.False(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package));
+
+        // At the threshold it stays suppressed across scans (#5158).
+        manager.OperationHelper.GetResult(package, OperationType.Update, [], 0);
+        manager.OperationHelper.GetResult(package, OperationType.Update, [], 0);
+
+        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+        Assert.True(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package));
+        Assert.True(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package));
+    }
+
+    [Fact]
+    public void IsStuckUpgradeLoop_DoesNotSuppressANewerVersion()
+    {
+        var manager = new WinGet();
+        var stuckPackage = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Stuck2")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        for (int i = 0; i < StuckUpgradeThresholdForTest; i++)
+            manager.OperationHelper.GetResult(stuckPackage, OperationType.Update, [], 0);
+        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(stuckPackage));
+
+        // A genuinely newer version must not be hidden.
+        var newerUpdate = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Stuck2")
+            .WithVersion("1.0.0")
+            .WithNewVersion("3.0.0")
+            .Build();
+
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(newerUpdate));
+        Assert.False(WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(newerUpdate));
+    }
+
+    [Fact]
+    public void RestartRequiredUpgradesNeverTripTheLoopBreaker()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.RebootPending")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        // A reboot-pending success (#5042) must never count as a phantom no-op, however often it happens.
+        for (int i = 0; i < StuckUpgradeThresholdForTest + 2; i++)
+        {
+            OperationAssert.HasVeredict(
+                manager.OperationHelper.GetResult(
+                    package,
+                    OperationType.Update,
+                    [],
+                    unchecked((int)0x8A150109u)
+                ),
+                OperationVeredict.Success
+            );
+        }
+
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+    }
+
+    [Fact]
+    public void StuckUpgradeThreshold_IsConfigurable()
+    {
+        Settings.SetValue(Settings.K.WinGetStuckUpgradeThreshold, "2");
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.ConfigurableThreshold")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        manager.OperationHelper.GetResult(package, OperationType.Update, [], 0);
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+
+        manager.OperationHelper.GetResult(package, OperationType.Update, [], 0);
+        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+    }
+
+    private const int StuckUpgradeThresholdForTest = 3;
+
+    [Theory]
+    [InlineData("1.2.3", "1.2.3")] // A real version is passed through untouched.
+    [InlineData("Unknown", "Unknown")] // Never upgraded => stays Unknown, still shown as an update.
+    [InlineData("", "Unknown")]
+    public void ResolveReportedInstalledVersion_FallsBackForUnknownVersions(string reported, string expected)
+    {
+        Assert.Equal(
+            expected,
+            WinGetPkgOperationHelper.ResolveReportedInstalledVersion("Contoso.NoMark", reported)
+        );
+    }
+
+    [Fact]
+    public void ResolveReportedInstalledVersion_RestoresLastUpgradedVersion()
+    {
+        Settings.SetDictionaryItem<string, string>(
+            Settings.K.WinGetAlreadyUpgradedPackages,
+            "ShiftUp.NIKKE",
+            "1.2.3"
+        );
+
+        // WinGet reports the installed version as "Unknown"; we restore what we last upgraded it to.
+        Assert.Equal(
+            "1.2.3",
+            WinGetPkgOperationHelper.ResolveReportedInstalledVersion("ShiftUp.NIKKE", "Unknown")
+        );
+    }
+
+    [Fact]
+    public void BuildUpdatePackages_AlreadyUpgradedUnknownPackageIsMarkedUpToDate()
+    {
+        var manager = new WinGet();
+        var helper = new PingetCliHelper(manager, @"C:\Program Files\UniGetUI\pinget.exe");
+
+        // We already upgraded this package to 2.0.0, but WinGet still can't read its version.
+        Settings.SetDictionaryItem<string, string>(
+            Settings.K.WinGetAlreadyUpgradedPackages,
+            "ShiftUp.NIKKE",
+            "2.0.0"
+        );
+
+        var result = PingetCliHelper.DeserializeJson<ListResponse>(
+            UnknownVersionUpdateJson("ShiftUp.NIKKE", "2.0.0")
+        );
+        var package = Assert.Single(helper.BuildUpdatePackages(result));
+
+        // Restored to the upgraded version so installed == available; the loader drops it (#5158).
+        Assert.Equal("2.0.0", package.VersionString);
+        Assert.Equal("2.0.0", package.NewVersionString);
+
+        // The mark is not consumed, so it keeps hiding the package on later scans.
+        Assert.Equal(
+            "2.0.0",
+            Settings.GetDictionaryItem<string, string>(
+                Settings.K.WinGetAlreadyUpgradedPackages,
+                "ShiftUp.NIKKE"
+            )
+        );
+    }
+
+    [Fact]
+    public void BuildUpdatePackages_NeverUpgradedUnknownPackageIsStillOffered()
+    {
+        var manager = new WinGet();
+        var helper = new PingetCliHelper(manager, @"C:\Program Files\UniGetUI\pinget.exe");
+
+        var result = PingetCliHelper.DeserializeJson<ListResponse>(
+            UnknownVersionUpdateJson("Smilegate.Stove", "2.0.0")
+        );
+        var package = Assert.Single(helper.BuildUpdatePackages(result));
+
+        // No recorded upgrade => the update is genuinely available and must still be shown.
+        Assert.Equal("Unknown", package.VersionString);
+        Assert.Equal("2.0.0", package.NewVersionString);
+        Assert.True(package.InstalledVersionIsUnverified);
+    }
+
+    [Fact]
+    public void BuildUpdatePackages_FlagsARestoredVersionAsUnverified()
+    {
+        var manager = new WinGet();
+        var helper = new PingetCliHelper(manager, @"C:\Program Files\UniGetUI\pinget.exe");
+
+        Settings.SetDictionaryItem<string, string>(
+            Settings.K.WinGetAlreadyUpgradedPackages,
+            "Contoso.Restored",
+            "1.0.0"
+        );
+
+        var package = Assert.Single(
+            helper.BuildUpdatePackages(
+                PingetCliHelper.DeserializeJson<ListResponse>(
+                    UnknownVersionUpdateJson("Contoso.Restored", "2.0.0")
+                )
+            )
+        );
+
+        Assert.Equal("1.0.0", package.VersionString);
+        Assert.True(package.InstalledVersionIsUnverified);
+    }
+
+    [Fact]
+    public void BuildUpdatePackages_DoesNotFlagAVersionWinGetCouldRead()
+    {
+        var manager = new WinGet();
+        var helper = new PingetCliHelper(manager, @"C:\Program Files\UniGetUI\pinget.exe");
+
+        var package = Assert.Single(
+            helper.BuildUpdatePackages(
+                PingetCliHelper.DeserializeJson<ListResponse>(
+                    UpdateJson("Contoso.Readable", "1.0.0", "2.0.0")
+                )
+            )
+        );
+
+        Assert.Equal("1.0.0", package.VersionString);
+        Assert.False(package.InstalledVersionIsUnverified);
+    }
+
+    [Fact]
+    public void BuildUpdatePackages_DropsAKnownVersionUpdateThatKeepsFailingToStick()
+    {
+        // End-to-end: a known-version package looping through the real Pinget path is eventually dropped (#5158).
+        var manager = new WinGet();
+        var helper = new PingetCliHelper(manager, @"C:\Program Files\UniGetUI\pinget.exe");
+
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.PhantomLoop")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        for (int i = 0; i < StuckUpgradeThresholdForTest; i++)
+            manager.OperationHelper.GetResult(package, OperationType.Update, [], 0);
+
+        // WinGet still lists it as 1.0.0 -> 2.0.0, but we now suppress it.
+        Assert.Empty(
+            helper.BuildUpdatePackages(
+                PingetCliHelper.DeserializeJson<ListResponse>(
+                    UpdateJson("Contoso.PhantomLoop", "1.0.0", "2.0.0")
+                )
+            )
+        );
+
+        // A package that has not looped is still offered normally.
+        Assert.Single(
+            helper.BuildUpdatePackages(
+                PingetCliHelper.DeserializeJson<ListResponse>(
+                    UpdateJson("Contoso.NotLooping", "1.0.0", "2.0.0")
+                )
+            )
+        );
+    }
+
+    private static string UnknownVersionUpdateJson(string id, string availableVersion) =>
+        UpdateJson(id, "Unknown", availableVersion);
+
+    private static string UpdateJson(string id, string installedVersion, string availableVersion) =>
+        $$"""
+        {
+            "Matches": [
+                {
+                    "Name": "{{id}}",
+                    "Id": "{{id}}",
+                    "LocalId": null,
+                    "InstalledVersion": "{{installedVersion}}",
+                    "AvailableVersion": "{{availableVersion}}",
+                    "SourceName": null,
+                    "Publisher": null,
+                    "Scope": null,
+                    "InstallerCategory": null,
+                    "InstallLocation": null,
+                    "PackageFamilyNames": [],
+                    "ProductCodes": [],
+                    "UpgradeCodes": []
+                }
+            ],
+            "Warnings": [],
+            "Truncated": false
+        }
+        """;
+
+    [Fact]
+    public async Task WinGetUpdateNotApplicableExplainsTheFailureToTheUser()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Klocman.BulkCrapUninstaller")
+            .WithVersion("6.1")
+            .WithNewVersion("6.2")
+            .Build();
+        package.OverridenOptions.WinGet_DropArchAndScope = true;
+        using var operation = new VeredictProbingUpdateOperation(package, new InstallOptions());
+        string defaultMessage = operation.Metadata.FailureMessage;
+
+        var veredict = await operation.ProbeProcessVeredict(unchecked((int)0x8A15002B), []);
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.NotEqual(defaultMessage, operation.Metadata.FailureMessage);
+        Assert.Contains("may already be up to date", operation.Metadata.FailureMessage);
+        Assert.False(operation.Metadata.FailureMessage.EndsWith('.'));
+    }
+
+    [Fact]
+    public async Task WinGetUpdateNotApplicableExplainsTheFailureOnlyOnTheFinalAttempt()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Klocman.BulkCrapUninstaller")
+            .WithVersion("6.1")
+            .WithNewVersion("6.2")
+            .Build();
+        package.OverridenOptions.Scope = PackageScope.Machine;
+        using var operation = new VeredictProbingUpdateOperation(package, new InstallOptions());
+        string defaultMessage = operation.Metadata.FailureMessage;
+
+        var firstAttempt = await operation.ProbeProcessVeredict(unchecked((int)0x8A15002B), []);
+
+        OperationAssert.HasVeredict(firstAttempt, OperationVeredict.AutoRetry);
+        Assert.Equal(defaultMessage, operation.Metadata.FailureMessage);
+
+        var finalAttempt = await operation.ProbeProcessVeredict(unchecked((int)0x8A15002B), []);
+
+        OperationAssert.HasVeredict(finalAttempt, OperationVeredict.Failure);
+        Assert.Contains("may already be up to date", operation.Metadata.FailureMessage);
+    }
+
+    [Fact]
+    public async Task WinGetUpdateFailureUnrelatedToApplicabilityKeepsTheDefaultMessage()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Klocman.BulkCrapUninstaller")
+            .WithVersion("6.1")
+            .WithNewVersion("6.2")
+            .Build();
+        using var operation = new VeredictProbingUpdateOperation(package, new InstallOptions());
+        string defaultMessage = operation.Metadata.FailureMessage;
+
+        var veredict = await operation.ProbeProcessVeredict(1, []);
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.Equal(defaultMessage, operation.Metadata.FailureMessage);
+        Assert.DoesNotContain("may already be up to date", operation.Metadata.FailureMessage);
+    }
+
+    [Fact]
+    public async Task WinGetInstallerHashMismatchExplainsTheAdminBlock()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("XiaoweiCloud.CalendarTask")
+            .WithVersion("3.30.298.9128")
+            .WithNewVersion("3.30.299.9142")
+            .Build();
+        using var operation = new VeredictProbingUpdateOperation(package, new InstallOptions())
+        {
+            ElevationOverride = true,
+        };
+        string defaultMessage = operation.Metadata.FailureMessage;
+
+        var veredict = await operation.ProbeProcessVeredict(unchecked((int)0x8A150011), []);
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.NotEqual(defaultMessage, operation.Metadata.FailureMessage);
+        Assert.Contains("does not match the hash", operation.Metadata.FailureMessage);
+        Assert.False(operation.Metadata.FailureMessage.EndsWith('.'));
+        Assert.Contains(
+            operation.GetOutput(),
+            line => line.Item1.Contains("cannot skip this check while running as administrator")
+        );
+    }
+
+    [Fact]
+    public async Task WinGetInstallerHashMismatchPointsAtTheOverrideSettingWhenSkippingWasRequested()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("XiaoweiCloud.CalendarTask")
+            .WithVersion("3.30.298.9128")
+            .WithNewVersion("3.30.299.9142")
+            .Build();
+        using var operation = new VeredictProbingUpdateOperation(
+            package,
+            new InstallOptions { SkipHashCheck = true }
+        )
+        {
+            ElevationOverride = false,
+        };
+
+        var veredict = await operation.ProbeProcessVeredict(unchecked((int)0x8A150011), []);
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.Contains(
+            operation.GetOutput(),
+            line => line.Item1.Contains("InstallerHashOverride")
+        );
+    }
+
+    [Fact]
+    public async Task WinGetInstallerHashMismatchExplainsTheFailureWithoutElevation()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("XiaoweiCloud.CalendarTask")
+            .WithVersion("3.30.298.9128")
+            .WithNewVersion("3.30.299.9142")
+            .Build();
+        using var operation = new VeredictProbingUpdateOperation(package, new InstallOptions())
+        {
+            ElevationOverride = false,
+        };
+        string defaultMessage = operation.Metadata.FailureMessage;
+
+        var veredict = await operation.ProbeProcessVeredict(unchecked((int)0x8A150011), []);
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.NotEqual(defaultMessage, operation.Metadata.FailureMessage);
+        Assert.Contains("does not match the hash", operation.Metadata.FailureMessage);
+        Assert.DoesNotContain(
+            operation.GetOutput(),
+            line => line.Item1.Contains("running as administrator")
+        );
+    }
+
+    [Fact]
+    public async Task WinGetFailureUnrelatedToTheInstallerHashKeepsTheDefaultMessage()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("XiaoweiCloud.CalendarTask")
+            .WithVersion("3.30.298.9128")
+            .WithNewVersion("3.30.299.9142")
+            .Build();
+        using var operation = new VeredictProbingUpdateOperation(package, new InstallOptions())
+        {
+            ElevationOverride = true,
+        };
+        string defaultMessage = operation.Metadata.FailureMessage;
+
+        var veredict = await operation.ProbeProcessVeredict(unchecked((int)0x8A150012), []);
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.Equal(defaultMessage, operation.Metadata.FailureMessage);
+    }
+
+    [Fact]
+    public void WinGetDetectsAnApplicationInUseFromWinGetHresults()
+    {
+        Assert.True(
+            WinGetPkgOperationHelper.ReportedApplicationCurrentlyRunning(
+                unchecked((int)0x8A150101)
+            )
+        );
+        Assert.True(
+            WinGetPkgOperationHelper.ReportedApplicationCurrentlyRunning(
+                unchecked((int)0x8A150103)
+            )
+        );
+        Assert.True(
+            WinGetPkgOperationHelper.ReportedApplicationCurrentlyRunning(
+                unchecked((int)0x8A150111)
+            )
+        );
+        Assert.False(
+            WinGetPkgOperationHelper.ReportedApplicationCurrentlyRunning(
+                unchecked((int)0x8A150102)
+            )
+        );
+    }
+
+    [Fact]
+    public void WinGetDoesNotTreatRawInstallerExitCode26AsAnApplicationInUse()
+    {
+        Assert.False(WinGetPkgOperationHelper.ReportedApplicationCurrentlyRunning(26));
+    }
+
+    [Fact]
+    public void WinGetGuessesASingleCloseProcessNameWhenTheDisplayNameMatchesTheIdTail()
+    {
+        var package = new PackageBuilder()
+            .WithManager(new WinGet())
+            .WithId("Spotify.Spotify")
+            .WithName("Spotify")
+            .Build();
+
+        Assert.Equal(["Spotify"], PackageOperation.GuessCloseProcessNames(package));
+    }
+
+    [Fact]
+    public void WinGetGuessesCloseProcessNamesFromDisplayNameAndIdTail()
+    {
+        var package = new PackageBuilder()
+            .WithManager(new WinGet())
+            .WithId("Git.Git")
+            .WithName("Git")
+            .Build();
+
+        Assert.Equal(["Git"], PackageOperation.GuessCloseProcessNames(package));
+
+        var spaced = new PackageBuilder()
+            .WithManager(new WinGet())
+            .WithId("SomeVendor.ToolName")
+            .WithName("Some Vendor Tool")
+            .Build();
+
+        Assert.Equal(["ToolName"], PackageOperation.GuessCloseProcessNames(spaced));
+    }
+
+    [Fact]
+    public void WinGetDoesNotGuessTheCurrentProcessAsACloseTarget()
+    {
+        using Process currentProcess = Process.GetCurrentProcess();
+        string current = currentProcess.ProcessName;
+        var package = new PackageBuilder()
+            .WithManager(new WinGet())
+            .WithId($"Vendor.{current}")
+            .WithName(current)
+            .Build();
+
+        Assert.Empty(PackageOperation.GuessCloseProcessNames(package));
+        Assert.Empty(PackageOperation.GetRunningCloseProcessNames(package));
+    }
+
+    [Fact]
+    public async Task WinGetApplicationCurrentlyRunningExplainsTheFailureToTheUser()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Spotify.Spotify")
+            .WithName("Spotify")
+            .WithVersion("1.2.74.357")
+            .WithNewVersion("1.2.75.458")
+            .Build();
+        using var operation = new VeredictProbingUpdateOperation(package, new InstallOptions());
+        string defaultMessage = operation.Metadata.FailureMessage;
+
+        var veredict = await operation.ProbeProcessVeredict(
+            unchecked((int)0x8A150101),
+            [
+                "Found Spotify [Spotify.Spotify] Version 1.2.75.458",
+                "This application is currently running.",
+            ]
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.NotEqual(defaultMessage, operation.Metadata.FailureMessage);
+        Assert.Contains("currently running", operation.Metadata.FailureMessage);
+        Assert.False(operation.Metadata.FailureMessage.EndsWith('.'));
+        Assert.True(operation.FailedBecauseApplicationRunning);
+    }
+
+    [Fact]
+    public async Task WinGetFailureWithBareExitCode26KeepsTheDefaultMessage()
+    {
+        var manager = new WinGet();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Spotify.Spotify")
+            .WithName("Spotify")
+            .WithVersion("1.2.74.357")
+            .WithNewVersion("1.2.75.458")
+            .Build();
+        using var operation = new VeredictProbingUpdateOperation(package, new InstallOptions());
+        string defaultMessage = operation.Metadata.FailureMessage;
+
+        var veredict = await operation.ProbeProcessVeredict(26, []);
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.Equal(defaultMessage, operation.Metadata.FailureMessage);
+        Assert.False(operation.FailedBecauseApplicationRunning);
+        Assert.False(PackageOperation.CanRetryClosingRunningApp(operation));
+    }
+
+    [Fact]
+    public void WinGetDoesNotOfferTheIntegritySkipRetryWhenTheOperationRunsElevated()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+
+        Assert.False(
+            PackageOperation.CanRetrySkippingIntegrityChecks(
+                manager,
+                new InstallOptions(),
+                OperationType.Update,
+                willRunElevated: true
+            )
+        );
+        Assert.True(
+            PackageOperation.CanRetrySkippingIntegrityChecks(
+                manager,
+                new InstallOptions(),
+                OperationType.Update,
+                willRunElevated: false
+            )
+        );
+    }
+
+    [Fact]
+    public void WinGetOffersTheIntegritySkipRetryWhenElevatedOnPinget()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+
+        Assert.True(
+            PackageOperation.CanRetrySkippingIntegrityChecks(
+                manager,
+                new InstallOptions(),
+                OperationType.Update,
+                willRunElevated: true
+            )
+        );
+    }
+
+    [Fact]
+    public void WinGetDoesNotOfferTheIntegritySkipRetryOnUninstall()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
+
+        Assert.False(
+            PackageOperation.CanRetrySkippingIntegrityChecks(
+                manager,
+                new InstallOptions(),
+                OperationType.Uninstall,
+                willRunElevated: false
+            )
+        );
+        Assert.DoesNotContain(
+            "--ignore-security-hash",
+            manager.OperationHelper.GetParameters(
+                new PackageBuilder().WithManager(manager).WithId("Contoso.Tool").Build(),
+                new InstallOptions { SkipHashCheck = true },
+                OperationType.Uninstall
+            )
+        );
+    }
+
+    [Fact]
+    public void OtherManagersKeepTheIntegritySkipRetryOnUninstall()
+    {
+        var manager = new Infrastructure.Fakes.TestPackageManager();
+
+        Assert.True(
+            PackageOperation.CanRetrySkippingIntegrityChecks(
+                manager,
+                new InstallOptions(),
+                OperationType.Uninstall,
+                willRunElevated: true
+            )
+        );
+    }
+
+    [Fact]
+    public void WinGetNeverOffersTheIntegritySkipRetryWhenAlreadySkipping()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+
+        Assert.False(
+            PackageOperation.CanRetrySkippingIntegrityChecks(
+                manager,
+                new InstallOptions { SkipHashCheck = true },
+                OperationType.Update,
+                willRunElevated: false
+            )
+        );
+    }
+
+    private sealed class VeredictProbingUpdateOperation : UpdatePackageOperation
+    {
+        public VeredictProbingUpdateOperation(IPackage package, InstallOptions options)
+            : base(package, options) { }
+
+        public bool? ElevationOverride { get; set; }
+
+        public override bool WillRunElevated => ElevationOverride ?? base.WillRunElevated;
+
+        public Task<OperationVeredict> ProbeProcessVeredict(int returnCode, List<string> output)
+            => GetProcessVeredict(returnCode, output);
     }
 
     private static void SetCliToolKind(WinGet manager, WinGetCliToolKind kind)
@@ -1266,9 +2499,20 @@ public sealed class WinGetManagerTests : IDisposable
             .Invoke(null, [value]);
     }
 
+    private static IPackage CreatePingetQueryPackage()
+    {
+        return new PackageBuilder()
+            .WithManager(new WinGet())
+            .WithName("Contoso Tool")
+            .WithId("Contoso.Tool")
+            .WithVersion("1.2.3")
+            .Build();
+    }
+
     private static ShowResult CreatePingetShowResult(
         string? description = "Contoso description",
-        string? shortDescription = null
+        string? shortDescription = null,
+        IReadOnlyList<string>? installerUrls = null
     )
     {
         var package = new SearchMatch
@@ -1288,6 +2532,9 @@ public sealed class WinGetManagerTests : IDisposable
             ReleaseDate = "2026-04-27",
             PackageDependencies = ["Contoso.Dependency [2.0]"],
         };
+        List<Installer> installers = installerUrls is null
+            ? [installer]
+            : [.. installerUrls.Select(url => installer with { Url = url })];
 
         return new ShowResult
         {
@@ -1306,9 +2553,9 @@ public sealed class WinGetManagerTests : IDisposable
                 ReleaseNotes = "Release notes",
                 Tags = ["utility"],
                 PackageDependencies = ["Contoso.Runtime"],
-                Installers = [installer],
+                Installers = installers,
             },
-            SelectedInstaller = installer,
+            SelectedInstaller = installers.FirstOrDefault(),
             StructuredDocument = new Dictionary<string, object?>(),
         };
     }
@@ -1355,6 +2602,19 @@ public sealed class WinGetManagerTests : IDisposable
             handler(details);
             return true;
         }
+    }
+
+    private sealed class EnumeratorThrowingReadOnlyList<T>(IReadOnlyList<T> items) : IReadOnlyList<T>
+    {
+        public int Count => items.Count;
+
+        public T this[int index] => items[index];
+
+        IEnumerator<T> IEnumerable<T>.GetEnumerator() =>
+            throw new InvalidCastException("Enumeration is not available for this WinRT projection.");
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            throw new InvalidCastException("Enumeration is not available for this WinRT projection.");
     }
 
     private sealed class TestNativeTaskLogger : INativeTaskLogger

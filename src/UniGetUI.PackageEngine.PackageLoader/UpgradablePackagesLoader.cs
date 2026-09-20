@@ -9,7 +9,6 @@ namespace UniGetUI.PackageEngine.PackageLoader
 {
     public class UpgradablePackagesLoader : AbstractPackageLoader
     {
-        private System.Timers.Timer? UpdatesTimer;
         public static UpgradablePackagesLoader Instance = null!;
 
         /// <summary>
@@ -28,7 +27,6 @@ namespace UniGetUI.PackageEngine.PackageLoader
             )
         {
             Instance = this;
-            FinishedLoading += (_, _) => StartAutoCheckTimeout();
         }
 
         protected override async Task<bool> IsPackageValid(IPackage package)
@@ -44,10 +42,11 @@ namespace UniGetUI.PackageEngine.PackageLoader
                 return false;
             }
 
-            if (package.IsUpdateMinor() && (await package.GetInstallOptions()).SkipMinorUpdates)
+            var installOptions = await package.GetInstallOptions();
+            if (installOptions.SkipMinorUpdates && package.IsUpdateMinor(installOptions.SkipMinorUpdatesLevel))
             {
                 Logger.Info(
-                    $"Ignoring package {package.Id} because it is a minor update ({package.VersionString} -> {package.NewVersionString}) and SkipMinorUpdates is set to true."
+                    $"Ignoring package {package.Id} because it is a minor update ({package.VersionString} -> {package.NewVersionString}) below skip level {installOptions.SkipMinorUpdatesLevel} and SkipMinorUpdates is set to true."
                 );
                 return false;
             }
@@ -101,6 +100,9 @@ namespace UniGetUI.PackageEngine.PackageLoader
             return true;
         }
 
+        protected override bool DidManagerReportFailure(IPackageManager manager)
+            => manager.LastUpdatesListingFailed;
+
         protected override IReadOnlyList<IPackage> LoadPackagesFromManager(IPackageManager manager)
         {
             return manager.GetAvailableUpdates();
@@ -114,41 +116,6 @@ namespace UniGetUI.PackageEngine.PackageLoader
                 p.SetTag(PackageTag.IsUpgradable);
 
             return Task.CompletedTask;
-        }
-
-        protected void StartAutoCheckTimeout()
-        {
-            if (!Settings.Get(Settings.K.DisableAutoCheckforUpdates))
-            {
-                long waitTime = 3600;
-                try
-                {
-                    waitTime = long.Parse(Settings.GetValue(Settings.K.UpdatesCheckInterval));
-                    Logger.Debug(
-                        $"Starting check for updates wait interval with waitTime={waitTime}"
-                    );
-                }
-                catch
-                {
-                    Logger.Debug(
-                        "Invalid value for UpdatesCheckInterval, using default value of 3600 seconds"
-                    );
-                }
-
-                if (UpdatesTimer is not null)
-                {
-                    UpdatesTimer.Stop();
-                    UpdatesTimer.Dispose();
-                }
-
-                UpdatesTimer = new System.Timers.Timer(waitTime * 1000)
-                {
-                    Enabled = false,
-                    AutoReset = false,
-                };
-                UpdatesTimer.Elapsed += (s, e) => _ = ReloadPackages();
-                UpdatesTimer.Start();
-            }
         }
     }
 }
