@@ -86,14 +86,22 @@ try {
     if ($script:window.TryGetCurrentPattern([Windows.Automation.WindowPattern]::Pattern, [ref]$windowPattern)) {
         $windowPattern.SetWindowVisualState([Windows.Automation.WindowVisualState]::Maximized)
     }
-    $adminWarning = $script:window.FindFirst(
-        [Windows.Automation.TreeScope]::Descendants,
-        (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, 'I understand'))
-    )
-    if ($adminWarning -and !$adminWarning.Current.IsOffscreen) {
-        Invoke-Element 'I understand'
+    $startupDialogDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ([DateTime]::UtcNow -lt $startupDialogDeadline) {
+        $dismissed = $false
+        foreach ($name in @('I understand', 'Decline')) {
+            $element = $script:window.FindFirst(
+                [Windows.Automation.TreeScope]::Descendants,
+                (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, $name))
+            )
+            if ($element -and !$element.Current.IsOffscreen) {
+                Invoke-Element $name
+                $dismissed = $true
+                break
+            }
+        }
+        if (!$dismissed) { Start-Sleep -Milliseconds 250 }
     }
-    Invoke-Element 'Decline'
     Find-Element 'Settings' 60 | Out-Null
     Screenshot '01-packages'
     Invoke-Element 'Settings'
