@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Security.Cryptography;
+using System.Text;
 using PhotoSauce.MagicScaler;
 using UniGetUI.Core.Classes;
 using UniGetUI.Core.Data;
@@ -115,6 +116,28 @@ namespace UniGetUI.Core.IconEngine
                 cacheInterval
             );
 
+        /// <summary>
+        /// The directory a package's cached icon lives in. The readable components are lossy,
+        /// so a hash of the raw identity keeps distinct packages apart.
+        /// </summary>
+        public static string GetIconCacheDirectory(string managerName, string packageId)
+        {
+            return Path.Join(
+                CoreData.UniGetUICacheDirectory_Icons,
+                CoreTools.MakeValidFileName(managerName),
+                $"{CoreTools.MakeValidFileName(packageId)}_{IdentityHash(managerName, packageId)}"
+            );
+        }
+
+        private static string IdentityHash(string managerName, string packageId)
+        {
+            byte[] digest = SHA256.HashData(
+                Encoding.UTF8.GetBytes(string.Join('\u0000', managerName, packageId))
+            );
+
+            return Convert.ToHexString(digest.AsSpan(0, 8)).ToLowerInvariant();
+        }
+
         private static string? _getCacheOrDownloadIcon(
             CacheableIcon? _icon,
             string ManagerName,
@@ -129,11 +152,7 @@ namespace UniGetUI.Core.IconEngine
             if (icon.IsLocalPath)
                 return icon.LocalPath;
 
-            string iconLocation = Path.Join(
-                CoreData.UniGetUICacheDirectory_Icons,
-                ManagerName,
-                PackageId
-            );
+            string iconLocation = GetIconCacheDirectory(ManagerName, PackageId);
             if (!Directory.Exists(iconLocation))
                 Directory.CreateDirectory(iconLocation);
             string iconVersionFile = Path.Join(iconLocation, $"icon.version");
@@ -217,7 +236,8 @@ namespace UniGetUI.Core.IconEngine
                 using HttpClient client = new(CoreTools.GenericHttpClientParameters);
                 client.DefaultRequestHeaders.UserAgent.ParseAdd(CoreData.UserAgentString);
 
-                HttpResponseMessage response = client.GetAsync(icon.Url).GetAwaiter().GetResult();
+                using var request = new HttpRequestMessage(HttpMethod.Get, icon.Url);
+                using HttpResponseMessage response = client.Send(request);
                 if (!response.IsSuccessStatusCode)
                 {
                     Logger.Warn(
@@ -309,25 +329,27 @@ namespace UniGetUI.Core.IconEngine
                 if (width > MAX_SIDE || height > MAX_SIDE)
                 {
                     File.Move(cachedIconFile, $"{cachedIconFile}.copy");
-                    var image = MagicImageProcessor.BuildPipeline(
-                        $"{cachedIconFile}.copy",
-                        new ProcessImageSettings
-                        {
-                            Width = MAX_SIDE,
-                            Height = MAX_SIDE,
-                            ResizeMode = CropScaleMode.Contain,
-                        }
-                    );
-
-                    // Apply changes and save the image to disk
-                    using (FileStream fileStream = File.Create(cachedIconFile))
+                    using (
+                        var image = MagicImageProcessor.BuildPipeline(
+                            $"{cachedIconFile}.copy",
+                            new ProcessImageSettings
+                            {
+                                Width = MAX_SIDE,
+                                Height = MAX_SIDE,
+                                ResizeMode = CropScaleMode.Contain,
+                            }
+                        )
+                    )
                     {
-                        image.WriteOutput(fileStream);
+                        // Apply changes and save the image to disk
+                        using (FileStream fileStream = File.Create(cachedIconFile))
+                        {
+                            image.WriteOutput(fileStream);
+                        }
+                        Logger.Debug(
+                            $"File {cachedIconFile} was downsized from {width}x{height} to {image.Settings.Width}x{image.Settings.Height}"
+                        );
                     }
-                    Logger.Debug(
-                        $"File {cachedIconFile} was downsized from {width}x{height} to {image.Settings.Width}x{image.Settings.Height}"
-                    );
-                    image.Dispose();
                     File.Delete($"{cachedIconFile}.copy");
                 }
                 else
