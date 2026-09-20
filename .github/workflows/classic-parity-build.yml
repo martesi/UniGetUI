@@ -66,7 +66,7 @@ jobs:
         working-directory: ../parity-src
         shell: pwsh
         run: |
-          dotnet build src/UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/build.log
+          dotnet build src/UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64 /p:UseSharedCompilation=false 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/build.log
           $BuildExitCode = $LASTEXITCODE
           if ($BuildExitCode -ne 0) {
             Get-ChildItem src/UniGetUI/obj -Recurse -File -Include input.json,output.json -ErrorAction SilentlyContinue | ForEach-Object {
@@ -83,7 +83,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          dotnet test src/UniGetUI.Windows.slnx --no-build --no-restore --verbosity minimal --nologo /p:Platform=x64 --logger trx --results-directory ../UniGetUI/parity-artifacts/tests 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/tests.log
+          dotnet test src/UniGetUI.Windows.slnx --no-build --no-restore --verbosity minimal --nologo /p:Platform=x64 /p:UseSharedCompilation=false --logger trx --results-directory ../UniGetUI/parity-artifacts/tests 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/tests.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify native windows and persisted settings
         timeout-minutes: 5
