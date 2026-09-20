@@ -1,3 +1,6 @@
+using UniGetUI.Services;
+using UniGetUI.Core.Tools.Scheduling;
+using UniGetUI.PackageEngine.Operations;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -360,7 +363,8 @@ namespace UniGetUI.Interface.SoftwarePages
                 List<IPackage> upgradablePackages = [];
                 foreach (IPackage package in Loader.Packages)
                 {
-                    if (package.Tag is not PackageTag.OnQueue and not PackageTag.BeingProcessed)
+                    if (package.Tag is not PackageTag.OnQueue and not PackageTag.BeingProcessed
+                        && !PackageOperation.HasPendingOperation(package, OperationType.Update))
                         upgradablePackages.Add(package);
                 }
 
@@ -402,32 +406,26 @@ namespace UniGetUI.Interface.SoftwarePages
                     );
                     await ShowAvailableUpdatesNotification(upgradablePackages);
                 }
-                else if (Settings.Get(Settings.K.AutomaticallyUpdatePackages))
+                else if (MaintenanceScheduler.IsAutoInstallDue())
                 {
-                    _ = MainApp.Operations.UpdateAll();
-                    await ShowUpgradingPackagesNotification(upgradablePackages);
+                    MaintenanceScheduler.MarkAutoInstallHandled();
+                    bool markedOnly = MaintenanceScheduleStore.GetInstallTargets() is ScheduleInstallTargets.MarkedPackagesOnly;
+                    var targets = upgradablePackages.Where(p => !markedOnly || AutoUpdatesDatabase.IsAutoUpdated(p)).ToList();
+                    var skipped = upgradablePackages.Except(targets).ToList();
+                    if (targets.Count > 0)
+                    {
+                        foreach (var package in targets) await MainApp.Operations.Update(package);
+                        await ShowUpgradingPackagesNotification(targets);
+                    }
+                    if (skipped.Count > 0) await ShowAvailableUpdatesNotification(skipped);
                 }
                 else if (Environment.GetCommandLineArgs().Contains("--updateapps"))
                 {
-                    _ = MainApp.Operations.UpdateAll();
+                    foreach (var package in upgradablePackages) await MainApp.Operations.Update(package);
                     await ShowUpgradingPackagesNotification(upgradablePackages);
-                    Logger.Warn(
-                        "Automatic install of updates has been enabled via Command Line (user settings have been overriden)"
-                    );
                 }
                 else
                 {
-                    foreach (var package in upgradablePackages)
-                    {
-                        if (
-                            (
-                                await InstallOptionsFactory.LoadApplicableAsync(package)
-                            ).AutoUpdatePackage
-                        )
-                        {
-                            await MainApp.Operations.Update(package);
-                        }
-                    }
                     await ShowAvailableUpdatesNotification(upgradablePackages);
                 }
             }
