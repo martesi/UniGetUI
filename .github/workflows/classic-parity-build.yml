@@ -13,6 +13,7 @@ concurrency:
 jobs:
   windows-source:
     runs-on: windows-latest
+    timeout-minutes: 40
     env:
       NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
     steps:
@@ -37,7 +38,7 @@ jobs:
           with zipfile.ZipFile(output / 'review-sources.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
               for name, root in [('source', Path('../parity-src')), ('workbench', Path('maintenance/workbench'))]:
                   for path in root.rglob('*'):
-                      if not path.is_file() or '.git' in path.parts or path.suffix not in {'.cs', '.xaml', '.csproj', '.py', '.yml', '.json', '.md', '.props', '.targets'}:
+                      if not path.is_file() or '.git' in path.parts or path.suffix not in {'.cs', '.xaml', '.csproj', '.py', '.ps1', '.yml', '.json', '.md', '.props', '.targets'}:
                           continue
                       archive.write(path, name + '/' + str(path.relative_to(root)).replace('\\', '/'))
       - uses: actions/setup-dotnet@v5
@@ -75,12 +76,22 @@ jobs:
         run: |
           dotnet test src/UniGetUI.Windows.slnx --no-build --no-restore --verbosity minimal --nologo /p:Platform=x64 --logger trx --results-directory ../UniGetUI/parity-artifacts/tests 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/tests.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify native windows and persisted settings
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File maintenance/workbench/ui-smoke.ps1 -SourceRoot ../parity-src -OutputDirectory parity-artifacts/native-ui 2>&1 | Tee-Object -FilePath parity-artifacts/native-ui.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Generate and verify maintenance-only patch branch
+        timeout-minutes: 10
+        shell: pwsh
+        run: python maintenance/workbench/finalize.py ../parity-src
       - name: Summarize diagnostics
         if: always()
         shell: pwsh
         run: |
           Get-ChildItem parity-artifacts/*.log -ErrorAction SilentlyContinue | ForEach-Object {
-            Select-String -Path $_ -Pattern 'error |Failed |Passed!|Test Run|Build succeeded|Build FAILED' | ForEach-Object { $_.Line }
+            Select-String -Path $_ -Pattern 'error |Failed |Passed!|Test Run|Build succeeded|Build FAILED|Exception|Native UI|Patch stack verified' | ForEach-Object { $_.Line }
           } | Sort-Object -Unique | Set-Content parity-artifacts/diagnostics.txt
           Get-Content parity-artifacts/diagnostics.txt -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@v4
