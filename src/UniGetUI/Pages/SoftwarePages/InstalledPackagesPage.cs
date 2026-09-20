@@ -33,6 +33,8 @@ namespace UniGetUI.Interface.SoftwarePages
         private BetterMenuItem? MenuPackageDetails;
         private BetterMenuItem? MenuOpenInstallLocation;
         private BetterMenuItem? MenuDownloadInstaller;
+        private BetterMenuItem? MenuUpdate;
+        private BetterMenuItem? MenuUpdateAsAdmin;
 
         public InstalledPackagesPage()
             : base(
@@ -123,6 +125,24 @@ namespace UniGetUI.Interface.SoftwarePages
             };
             MenuRemoveData.Click += MenuRemoveData_Invoked;
             menu.Items.Add(MenuRemoveData);
+
+            menu.Items.Add(new MenuFlyoutSeparator());
+
+            MenuUpdate = new()
+            {
+                Text = CoreTools.AutoTranslated("Update"),
+                IconName = IconType.Update,
+            };
+            MenuUpdate.Click += (_, _) => LaunchUpdate(SelectedItem);
+            menu.Items.Add(MenuUpdate);
+
+            MenuUpdateAsAdmin = new()
+            {
+                Text = CoreTools.AutoTranslated("Update as administrator"),
+                IconName = IconType.UAC,
+            };
+            MenuUpdateAsAdmin.Click += (_, _) => LaunchUpdate(SelectedItem, elevated: true);
+            menu.Items.Add(MenuUpdateAsAdmin);
 
             menu.Items.Add(new MenuFlyoutSeparator());
 
@@ -345,6 +365,8 @@ namespace UniGetUI.Interface.SoftwarePages
                 || MenuPackageDetails is null
                 || MenuOpenInstallLocation is null
                 || MenuDownloadInstaller is null
+                || MenuUpdate is null
+                || MenuUpdateAsAdmin is null
             )
             {
                 Logger.Error("Menu items are null on InstalledPackagesTab");
@@ -354,6 +376,15 @@ namespace UniGetUI.Interface.SoftwarePages
             MenuAsAdmin.IsEnabled = package.Manager.Capabilities.CanRunAsAdmin;
             MenuInteractive.IsEnabled = package.Manager.Capabilities.CanRunInteractively;
             MenuRemoveData.IsEnabled = package.Manager.Capabilities.CanRemoveDataOnUninstall;
+
+            IPackage? upgradable = package.GetUpgradablePackage();
+            bool canUpdate = upgradable is not null;
+            MenuUpdate.IsEnabled = canUpdate;
+            MenuUpdate.Text = upgradable is null
+                ? CoreTools.Translate("Update")
+                : CoreTools.Translate("Update to version {0}", upgradable.NewVersionString);
+            MenuUpdateAsAdmin.IsEnabled =
+                canUpdate && package.Manager.Capabilities.CanRunAsAdmin;
 
             bool IS_LOCAL = package.Source.IsVirtualManager;
 
@@ -471,6 +502,13 @@ namespace UniGetUI.Interface.SoftwarePages
                 Logger.Error("An error occurred while performing a LOCAL backup");
                 Logger.Error(ex);
             }
+        }
+
+        private static void LaunchUpdate(IPackage? package, bool? elevated = null)
+        {
+            IPackage? upgradable = package?.GetUpgradablePackage();
+            if (upgradable is not null)
+                _ = MainApp.Operations.Update(upgradable, elevated: elevated);
         }
 
         private void MenuUninstall_Invoked(object sender, RoutedEventArgs args) =>
