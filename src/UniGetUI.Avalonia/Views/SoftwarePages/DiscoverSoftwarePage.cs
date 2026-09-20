@@ -73,6 +73,9 @@ public class DiscoverSoftwarePage : AbstractPackagesPage
         ViewModel.AddToolbarButton("options", CoreTools.Translate("Install options"),
             () => _ = ShowInstallationOptionsForPackage(SelectedItem));
         ViewModel.AddToolbarSeparator();
+        ViewModel.AddToolbarButton("console", CoreTools.Translate("Manual install"),
+            () => _ = ManualInstallHelper.LaunchManualAsync(SelectedItem, OperationType.Install));
+        ViewModel.AddToolbarSeparator();
         ViewModel.AddToolbarButton("info_round", CoreTools.Translate("Package details"),
             () => _ = ShowDetailsForPackage(SelectedItem), showLabel: false);
         ViewModel.AddToolbarSeparator();
@@ -113,19 +116,23 @@ public class DiscoverSoftwarePage : AbstractPackagesPage
         _menuDownloadInstaller.Click += (_, _) => _ = AvaloniaPackageOperationHelper.AskLocationAndDownloadAsync(
             SelectedItem, TEL_InstallReferral.DIRECT_SEARCH);
 
-        var menuInstall = new MenuItem { Header = CoreTools.Translate("Install"), Icon = LoadMenuIcon("download") };
+        var menuInstall = new MenuItem { Header = ShortcutHeader(CoreTools.Translate("Install"), MainActionShortcut), Icon = LoadMenuIcon("download") };
         menuInstall.Click += (_, _) => _ = LaunchInstall([SelectedItem!]);
 
-        var menuInstallOptions = new MenuItem { Header = CoreTools.Translate("Install options"), Icon = LoadMenuIcon("options") };
+        var menuInstallOptions = new MenuItem { Header = ShortcutHeader(CoreTools.Translate("Install options"), OptionsShortcut), Icon = LoadMenuIcon("options") };
         menuInstallOptions.Click += (_, _) => _ = ShowInstallationOptionsForPackage(SelectedItem);
 
-        var menuDetails = new MenuItem { Header = CoreTools.Translate("Package details"), Icon = LoadMenuIcon("info_round") };
+        var menuManual = new MenuItem { Header = CoreTools.Translate("Manual install"), Icon = LoadMenuIcon("console") };
+        menuManual.Click += (_, _) => _ = ManualInstallHelper.LaunchManualAsync(SelectedItem, OperationType.Install);
+
+        var menuDetails = new MenuItem { Header = ShortcutHeader(CoreTools.Translate("Package details"), DetailsShortcut), Icon = LoadMenuIcon("info_round") };
         menuDetails.Click += (_, _) => _ = ShowDetailsForPackage(SelectedItem);
 
         var menu = new ContextMenu();
         menu.Items.Add(menuInstall);
         menu.Items.Add(new Separator());
         menu.Items.Add(menuInstallOptions);
+        menu.Items.Add(menuManual);
         menu.Items.Add(new Separator());
         menu.Items.Add(_menuAsAdmin);
         menu.Items.Add(_menuInteractive);
@@ -164,7 +171,8 @@ public class DiscoverSoftwarePage : AbstractPackagesPage
         if (package is null) return;
         if (GetMainWindow() is not { } win) return;
 
-        var dialog = new PackageDetailsWindow(package, OperationType.Install);
+        var dialog = new PackageDetailsWindow(
+            package, OperationType.Install, TEL_InstallReferral.DIRECT_SEARCH);
         await dialog.ShowDialog(win);
 
         if (dialog.ShouldProceedWithOperation)
