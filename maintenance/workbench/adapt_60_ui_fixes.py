@@ -13,9 +13,6 @@ def replace(path, old, new, count=1):
 
 
 replace(ui / 'Pages/SoftwarePages/AbstractPackagesPage.xaml.cs', '            FilteredPackages.Query = "";\n', '')
-replace(ui / 'Pages/DialogPages/InstallOptions_Package.xaml.cs', '''            var kind = ProfileComboBox.SelectedIndex switch { 1 => OperationType.Update, 2 => OperationType.Uninstall, _ => OperationType.Install };
-            await UniGetUI.Services.ManualInstallHelper.LaunchManualAsync(Package, kind);''', '''            if (!string.IsNullOrWhiteSpace(CommandBox.Text))
-                await UniGetUI.Services.ManualInstallHelper.LaunchManualAsync(CommandBox.Text);''')
 # Sanitize protocol launches before any privileged CLI action, just as upstream does.
 replace(ui / 'EntryPoint.cs', '                if (ShouldPrepareCliConsole(args))', '''                args = SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(args);
                 if (ShouldPrepareCliConsole(args))''')
