@@ -1,3 +1,4 @@
+using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
@@ -29,16 +30,15 @@ internal sealed class DotNetPkgOperationHelper : BasePkgOperationHelper
             package.Id,
         ];
 
-        if (options.CustomInstallLocation != "")
-            parameters.AddRange(["--tool-path", "\"" + options.CustomInstallLocation + "\""]);
+        bool usesCustomToolPath = options.CustomInstallLocation != "";
+        if (usesCustomToolPath)
+            parameters.AddRange(["--tool-path", CoreTools.EscapeCommandLineArgument(options.CustomInstallLocation)]);
 
-        if (
-            package.OverridenOptions.Scope is PackageScope.Global
-            || (
-                package.OverridenOptions.Scope is null
-                && options.InstallationScope is PackageScope.Global
-            )
-        )
+        string? requestedScope =
+            package.OverridenOptions.Scope
+            ?? (options.InstallationScope.Length > 0 ? options.InstallationScope : null);
+
+        if (!usesCustomToolPath && requestedScope != PackageScope.Local)
             parameters.Add("--global");
 
         if (operation is OperationType.Install or OperationType.Update)
@@ -59,7 +59,9 @@ internal sealed class DotNetPkgOperationHelper : BasePkgOperationHelper
         {
             if (options.Version != "")
             {
-                parameters.AddRange(["--version", options.Version]);
+                parameters.AddRange(
+                    ["--version", CoreTools.EscapeCommandLineArgument(options.Version)]
+                );
             }
         }
 

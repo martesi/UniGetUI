@@ -19,7 +19,6 @@ public sealed class TelemetryHandlerTests : IDisposable
         "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
 
     private readonly string _testRoot;
-    private readonly string _portableMarkerPath;
     private readonly bool _originalWasDaemon;
 
     public TelemetryHandlerTests()
@@ -29,7 +28,6 @@ public sealed class TelemetryHandlerTests : IDisposable
             nameof(TelemetryHandlerTests),
             Guid.NewGuid().ToString("N")
         );
-        _portableMarkerPath = Path.Combine(Environment.CurrentDirectory, "ForceUniGetUIPortable");
         _originalWasDaemon = CoreData.WasDaemon;
 
         CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
@@ -42,7 +40,7 @@ public sealed class TelemetryHandlerTests : IDisposable
         Settings.SetValue(Settings.K.TelemetryClientToken, KnownInstallId);
 
         TelemetryHandler.ResetTestState();
-        File.Delete(_portableMarkerPath);
+        AppPaths.TEST_PortableDataDirectoryOverride = null;
         CoreData.WasDaemon = false;
     }
 
@@ -52,11 +50,7 @@ public sealed class TelemetryHandlerTests : IDisposable
         ClearSettingsCaches();
         CoreData.TEST_DataDirectoryOverride = null;
         CoreData.WasDaemon = _originalWasDaemon;
-
-        if (File.Exists(_portableMarkerPath))
-        {
-            File.Delete(_portableMarkerPath);
-        }
+        AppPaths.TEST_PortableDataDirectoryOverride = null;
 
         if (Directory.Exists(_testRoot))
         {
@@ -90,6 +84,33 @@ public sealed class TelemetryHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task Posts_DisposeResponsesReturnedByInjectionSeam()
+    {
+        TelemetryHandler.Configure("telemetry-user", "telemetry-pass");
+        var activityResponse = new TrackingHttpResponseMessage(HttpStatusCode.OK);
+        TelemetryHandler.TestSendAsyncOverride = _ => Task.FromResult<HttpResponseMessage>(activityResponse);
+
+        await TelemetryHandler.InitializeAsync();
+
+        Assert.True(activityResponse.IsDisposed);
+
+        var packageResponse = new TrackingHttpResponseMessage(HttpStatusCode.BadRequest);
+        TelemetryHandler.TestSendAsyncOverride = _ => Task.FromResult<HttpResponseMessage>(packageResponse);
+        var package = new Package(
+            "Telemetry Package",
+            "Telemetry.Package",
+            "1.0.0",
+            new NullSource("Telemetry Source"),
+            NullPackageManager.Instance
+        );
+        TelemetryHandler.UpdatePackage(package, TEL_OP_RESULT.SUCCESS);
+
+        await TelemetryHandler.FlushPackageEventsAsync();
+
+        Assert.True(packageResponse.IsDisposed);
+    }
+
+    [Fact]
     public void ComputeActiveSettingsBitmask_IncludesDeterministicSettingsAndSpecialPaths()
     {
         Settings.Set(Settings.K.DisableAutoUpdateWingetUI, false);
@@ -102,7 +123,7 @@ public sealed class TelemetryHandlerTests : IDisposable
         Settings.Set(Settings.K.EnablePackageBackup_LOCAL, false);
         Settings.Set(Settings.K.DoCacheAdminRights, false);
         Settings.Set(Settings.K.DoCacheAdminRightsForBatches, false);
-        File.WriteAllText(_portableMarkerPath, string.Empty);
+        AppPaths.TEST_PortableDataDirectoryOverride = Path.Combine(_testRoot, "Portable");
         CoreData.WasDaemon = true;
 
         int activeSettings = TelemetryHandler.ComputeActiveSettingsBitmask();
@@ -119,7 +140,7 @@ public sealed class TelemetryHandlerTests : IDisposable
         Settings.Set(Settings.K.DisableNotifications, true);
         Settings.Set(Settings.K.DisableAutoCheckforUpdates, false);
         Settings.Set(Settings.K.AutomaticallyUpdatePackages, true);
-        File.WriteAllText(_portableMarkerPath, string.Empty);
+        AppPaths.TEST_PortableDataDirectoryOverride = Path.Combine(_testRoot, "Portable");
         CoreData.WasDaemon = true;
 
         TelemetryHandler.Configure("telemetry-user", "telemetry-pass");
@@ -351,6 +372,18 @@ public sealed class TelemetryHandlerTests : IDisposable
         FieldInfo field = typeof(Settings).GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static)!;
         object dictionary = field.GetValue(null)!;
         dictionary.GetType().GetMethod("Clear")!.Invoke(dictionary, null);
+    }
+
+    private sealed class TrackingHttpResponseMessage(HttpStatusCode statusCode)
+        : HttpResponseMessage(statusCode)
+    {
+        public bool IsDisposed { get; private set; }
+
+        protected override void Dispose(bool disposing)
+        {
+            IsDisposed = true;
+            base.Dispose(disposing);
+        }
     }
 
     private sealed record CapturedRequest(

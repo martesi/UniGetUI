@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.SettingsEngine.SecureSettings;
@@ -42,6 +43,23 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         public IMultiSourceHelper SourcesHelper { get; protected set; } = new NullSourceHelper();
         public IPackageDetailsHelper DetailsHelper { get; protected set; } = null!;
         public IPackageOperationHelper OperationHelper { get; protected set; } = null!;
+        public virtual Encoding OutputEncoding => Encoding.UTF8;
+        public virtual bool InstallerUrlFollowsPackageVersion => false;
+
+        public virtual bool CommandLineIsShellInterpreted => false;
+
+        public virtual bool IdentifiersAreQuotedOnCommandLine => false;
+
+        public virtual int? CompareVersions(string versionA, string versionB)
+        {
+            var parsedA = CoreTools.VersionStringToStruct(versionA);
+            var parsedB = CoreTools.VersionStringToStruct(versionB);
+
+            if (parsedA == CoreTools.Version.Null || parsedB == CoreTools.Version.Null)
+                return null;
+
+            return parsedA.CompareTo(parsedB);
+        }
 
         private readonly bool _baseConstructorCalled;
         private bool _ready;
@@ -63,6 +81,17 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
             out string callArguments
         );
         protected abstract void _loadManagerVersion(out string version);
+
+        /// <summary>
+        /// The argument vector that precedes the operation parameters, for managers whose command
+        /// line must be built with <see cref="System.Diagnostics.ProcessStartInfo.ArgumentList"/>
+        /// instead of a single concatenated string. An empty vector selects the concatenated
+        /// <see cref="ManagerStatus.ExecutableCallArgs"/> path.
+        /// </summary>
+        protected virtual IReadOnlyList<string> _getOperationCallArgs(
+            string executablePath,
+            string callArguments
+        ) => [];
 
         protected virtual void _performPreInitializationSteps() { }
 
@@ -105,6 +134,8 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
                 }
 
                 Logger.ImportantInfo($"{Name} is enabled and was found on {path}");
+
+                Status.OperationCallArgs = _getOperationCallArgs(path, callArguments);
 
                 // Load manager version
                 _loadManagerVersion(out string version);
@@ -247,6 +278,23 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
 
                 return new(true, candidates[0]);
             }
+        }
+
+        protected bool IsUserSelectedExecutablePath(string path)
+        {
+            if (!SecureSettings.Get(SecureSettings.K.AllowCustomManagerPaths))
+            {
+                return false;
+            }
+
+            string? exeSelection = Settings.GetDictionaryItem<string, string>(
+                Settings.K.ManagerPaths,
+                Name
+            );
+
+            return !string.IsNullOrEmpty(exeSelection)
+                && File.Exists(exeSelection)
+                && exeSelection.Equals(path, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -415,7 +463,13 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         /// Returns an array of UpgradablePackage objects that represent the available updates reported by the manager.
         /// This method is fail-safe and will return an empty array if an error occurs.
         /// </summary>
-        public IReadOnlyList<IPackage> GetAvailableUpdates() => _getAvailableUpdates(false);
+        public bool LastUpdatesListingFailed { get; private set; }
+
+        public IReadOnlyList<IPackage> GetAvailableUpdates()
+        {
+            LastUpdatesListingFailed = false;
+            return _getAvailableUpdates(false);
+        }
 
         private IReadOnlyList<IPackage> _getAvailableUpdates(bool SecondAttempt)
         {
@@ -457,6 +511,7 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
 
                 Logger.Error("Error finding updates on manager " + Name);
                 Logger.Error(e);
+                LastUpdatesListingFailed = true;
                 return [];
             }
         }
@@ -465,7 +520,13 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         /// Returns an array of Package objects that represent the installed reported by the manager.
         /// This method is fail-safe and will return an empty array if an error occurs.
         /// </summary>
-        public IReadOnlyList<IPackage> GetInstalledPackages() => _getInstalledPackages(false);
+        public bool LastInstalledListingFailed { get; private set; }
+
+        public IReadOnlyList<IPackage> GetInstalledPackages()
+        {
+            LastInstalledListingFailed = false;
+            return _getInstalledPackages(false);
+        }
 
         private IReadOnlyList<IPackage> _getInstalledPackages(bool SecondAttempt)
         {
@@ -502,6 +563,7 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
 
                 Logger.Error("Error finding installed packages on manager " + Name);
                 Logger.Error(e);
+                LastInstalledListingFailed = true;
                 return [];
             }
         }

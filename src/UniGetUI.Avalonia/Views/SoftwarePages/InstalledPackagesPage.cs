@@ -9,6 +9,7 @@ using UniGetUI.Avalonia.Views;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
+using UniGetUI.Core.Tools.Scheduling;
 using UniGetUI.Interface.Telemetry;
 using UniGetUI.PackageEngine.Classes.Manager.Classes;
 using UniGetUI.PackageEngine.Enums;
@@ -32,6 +33,9 @@ public class InstalledPackagesPage : AbstractPackagesPage
     private MenuItem? _menuDetails;
     private MenuItem? _menuOpenInstallLocation;
     private MenuItem? _menuDownloadInstaller;
+    private MenuItem? _menuManual;
+    private MenuItem? _menuUpdate;
+    private MenuItem? _menuUpdateAsAdmin;
 
     private static bool _hasBackedUp;
 
@@ -50,6 +54,7 @@ public class InstalledPackagesPage : AbstractPackagesPage
         DisableFilterOnQueryChange = false,
         DisableReload = false,
         NoPackages_BackgroundText = CoreTools.Translate("No packages were found"),
+        NoPackages_ImagePath = "avares://UniGetUI/Assets/Images/maurice_penseur.png",
         NoPackages_SourcesText = CoreTools.Translate("No packages were found"),
         NoPackages_SubtitleText_Base = CoreTools.Translate("No packages were found"),
         MainSubtitle_StillLoading = CoreTools.Translate("Loading packages"),
@@ -61,10 +66,10 @@ public class InstalledPackagesPage : AbstractPackagesPage
             if (!_hasBackedUp)
             {
                 _hasBackedUp = true;
-                if (Settings.Get(Settings.K.EnablePackageBackup_LOCAL))
-                    _ = BackupViewModel.DoLocalBackupStatic();
-                if (Settings.Get(Settings.K.EnablePackageBackup_CLOUD))
-                    _ = BackupViewModel.DoCloudBackupStatic();
+                if (MaintenanceScheduler.ShouldRunAtAppStart(MaintenanceTaskKind.LocalBackup))
+                    _ = MaintenanceScheduler.RunAsync(MaintenanceTaskKind.LocalBackup);
+                if (MaintenanceScheduler.ShouldRunAtAppStart(MaintenanceTaskKind.CloudBackup))
+                    _ = MaintenanceScheduler.RunAsync(MaintenanceTaskKind.CloudBackup);
             }
 
             if (OperatingSystem.IsWindows()
@@ -105,6 +110,9 @@ public class InstalledPackagesPage : AbstractPackagesPage
         ViewModel.AddToolbarButton("options", CoreTools.Translate("Uninstall options"),
             () => _ = ShowInstallationOptionsForPackage(SelectedItem), showLabel: false);
         ViewModel.AddToolbarSeparator();
+        ViewModel.AddToolbarButton("console", CoreTools.Translate("Manual uninstall"),
+            () => _ = ManualInstallHelper.LaunchManualAsync(SelectedItem, OperationType.Uninstall));
+        ViewModel.AddToolbarSeparator();
         ViewModel.AddToolbarButton("info_round", CoreTools.Translate("Package details"),
             () => _ = ShowDetailsForPackage(SelectedItem), showLabel: false);
         ViewModel.AddToolbarSeparator();
@@ -124,6 +132,8 @@ public class InstalledPackagesPage : AbstractPackagesPage
         ViewModel.AddToolbarSeparator();
         ViewModel.AddToolbarButton("add_to", CoreTools.Translate("Add selection to bundle"),
             () => _ = ExportSelectionToBundleAsync(vm));
+        ViewModel.AddToolbarButton("save_as", CoreTools.Translate("Export to CSV"),
+            () => _ = ExportPackagesToCsvAsync());
     }
 
     // ─── Context menu ─────────────────────────────────────────────────────────
@@ -131,17 +141,20 @@ public class InstalledPackagesPage : AbstractPackagesPage
     {
         var menuUninstall = new MenuItem
         {
-            Header = CoreTools.Translate("Uninstall"),
+            Header = ShortcutHeader(CoreTools.Translate("Uninstall"), MainActionShortcut),
             Icon = LoadMenuIcon("delete"),
         };
         menuUninstall.Click += (_, _) => _ = LaunchUninstall([SelectedItem!]);
 
         _menuInstallationOptions = new MenuItem
         {
-            Header = CoreTools.Translate("Uninstall options"),
+            Header = ShortcutHeader(CoreTools.Translate("Uninstall options"), OptionsShortcut),
             Icon = LoadMenuIcon("options"),
         };
         _menuInstallationOptions.Click += (_, _) => _ = ShowInstallationOptionsForPackage(SelectedItem);
+
+        _menuManual = new MenuItem { Header = CoreTools.Translate("Manual uninstall"), Icon = LoadMenuIcon("console") };
+        _menuManual.Click += (_, _) => _ = ManualInstallHelper.LaunchManualAsync(SelectedItem, OperationType.Uninstall);
 
         _menuOpenInstallLocation = new MenuItem
         {
@@ -171,6 +184,21 @@ public class InstalledPackagesPage : AbstractPackagesPage
             Icon = LoadMenuIcon("close_round"),
         };
         _menuRemoveData.Click += (_, _) => _ = LaunchUninstall([SelectedItem!], remove_data: true);
+
+        _menuUpdate = new MenuItem
+        {
+            Header = CoreTools.Translate("Update"),
+            Icon = LoadMenuIcon("update"),
+        };
+        _menuUpdate.Click += (_, _) => _ = LaunchUpdate(SelectedItem);
+
+        _menuUpdateAsAdmin = new MenuItem
+        {
+            Header = CoreTools.Translate("Update as administrator"),
+            Icon = LoadMenuIcon("uac"),
+            IsVisible = OperatingSystem.IsWindows(),
+        };
+        _menuUpdateAsAdmin.Click += (_, _) => _ = LaunchUpdate(SelectedItem, elevated: true);
 
         _menuDownloadInstaller = new MenuItem
         {
@@ -203,7 +231,7 @@ public class InstalledPackagesPage : AbstractPackagesPage
 
         _menuDetails = new MenuItem
         {
-            Header = CoreTools.Translate("Package details"),
+            Header = ShortcutHeader(CoreTools.Translate("Package details"), DetailsShortcut),
             Icon = LoadMenuIcon("info_round"),
         };
         _menuDetails.Click += (_, _) => _ = ShowDetailsForPackage(SelectedItem);
@@ -212,11 +240,15 @@ public class InstalledPackagesPage : AbstractPackagesPage
         menu.Items.Add(menuUninstall);
         menu.Items.Add(new Separator());
         menu.Items.Add(_menuInstallationOptions);
+        menu.Items.Add(_menuManual);
         menu.Items.Add(_menuOpenInstallLocation);
         menu.Items.Add(new Separator());
         menu.Items.Add(_menuAsAdmin);
         menu.Items.Add(_menuInteractive);
         menu.Items.Add(_menuRemoveData);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(_menuUpdate);
+        menu.Items.Add(_menuUpdateAsAdmin);
         menu.Items.Add(new Separator());
         menu.Items.Add(_menuDownloadInstaller);
         menu.Items.Add(new Separator());
@@ -232,11 +264,13 @@ public class InstalledPackagesPage : AbstractPackagesPage
 
     protected override void WhenShowingContextMenu(IPackage package)
     {
-        if (_menuAsAdmin is null || _menuInteractive is null || _menuRemoveData is null
+        if (_menuUpdate is null || _menuUpdateAsAdmin is null
+            || _menuAsAdmin is null || _menuInteractive is null || _menuRemoveData is null
             || _menuInstallationOptions is null || _menuReinstall is null
             || _menuUninstallThenReinstall is null || _menuIgnoreUpdates is null
             || _menuDetails is null
-            || _menuOpenInstallLocation is null || _menuDownloadInstaller is null)
+            || _menuOpenInstallLocation is null || _menuDownloadInstaller is null
+            || _menuManual is null)
         {
             Logger.Warn("Context menu items are null on InstalledPackagesPage");
             return;
@@ -245,9 +279,21 @@ public class InstalledPackagesPage : AbstractPackagesPage
         bool isLocal = package.Source.IsVirtualManager;
         var caps = package.Manager.Capabilities;
 
+        _menuManual.IsEnabled = !isLocal;
         _menuAsAdmin.IsEnabled = caps.CanRunAsAdmin;
         _menuInteractive.IsEnabled = caps.CanRunInteractively;
         _menuRemoveData.IsEnabled = caps.CanRemoveDataOnUninstall;
+
+        // The installed entry knows no target version; its upgradable counterpart does,
+        // and is null whenever no update is pending for the package.
+        var upgradable = package.GetUpgradablePackage();
+        bool canUpdate = upgradable is not null;
+        _menuUpdate.IsEnabled = canUpdate;
+        _menuUpdate.Header = upgradable is null
+            ? CoreTools.Translate("Update")
+            : CoreTools.Translate("Update to version {0}", upgradable.NewVersionString);
+        _menuUpdateAsAdmin.IsEnabled = canUpdate && caps.CanRunAsAdmin;
+
         _menuDownloadInstaller.IsEnabled = !isLocal && caps.CanDownloadInstaller;
         _menuInstallationOptions.IsEnabled = !isLocal;
         _menuReinstall.IsEnabled = !isLocal;
@@ -272,7 +318,8 @@ public class InstalledPackagesPage : AbstractPackagesPage
         if (package is null) return;
         if (GetMainWindow() is not { } win) return;
 
-        var dialog = new PackageDetailsWindow(package, OperationType.Uninstall);
+        var dialog = new PackageDetailsWindow(
+            package, OperationType.Uninstall, TEL_InstallReferral.ALREADY_INSTALLED);
         await dialog.ShowDialog(win);
 
         if (dialog.ShouldProceedWithOperation)
@@ -305,7 +352,8 @@ public class InstalledPackagesPage : AbstractPackagesPage
             banner.Message = CoreTools.Translate(
                 "It looks like WinGet is not working properly. Do you want to attempt to repair WinGet?");
             banner.ActionButtonText = CoreTools.Translate("Repair WinGet");
-            banner.ActionButtonCommand = new AsyncRelayCommand(AvaloniaPackageOperationHelper.HandleBrokenWinGetAsync);
+            if (OperatingSystem.IsWindows())
+                banner.ActionButtonCommand = new AsyncRelayCommand(AvaloniaPackageOperationHelper.HandleBrokenWinGetAsync);
             banner.IsClosable = true;
             banner.IsOpen = true;
         }
@@ -348,6 +396,7 @@ public class InstalledPackagesPage : AbstractPackagesPage
         {
             var opts = await InstallOptionsFactory.LoadApplicableAsync(
                 pkg, elevated: elevated, interactive: interactive, remove_data: remove_data);
+            if (PackageOperation.HasPendingOperation(pkg, OperationType.Uninstall)) continue;
             var op = new UninstallPackageOperation(pkg, opts);
             op.OperationSucceeded += (_, _) => TelemetryHandler.UninstallPackage(pkg, TEL_OP_RESULT.SUCCESS);
             op.OperationFailed += (_, _) => TelemetryHandler.UninstallPackage(pkg, TEL_OP_RESULT.FAILED);
@@ -356,10 +405,25 @@ public class InstalledPackagesPage : AbstractPackagesPage
         }
     }
 
+    private static async Task LaunchUpdate(IPackage? package, bool? elevated = null)
+    {
+        // Updates must run on the upgradable instance: the installed one reports
+        // NewVersionString == VersionString, which managers read as "nothing to do".
+        if (package?.GetUpgradablePackage() is not { } upgradable) return;
+        var opts = await InstallOptionsFactory.LoadApplicableAsync(upgradable, elevated: elevated);
+        if (PackageOperation.HasPendingOperation(upgradable, OperationType.Update)) return;
+        var op = new UpdatePackageOperation(upgradable, opts);
+        op.OperationSucceeded += (_, _) => TelemetryHandler.UpdatePackage(upgradable, TEL_OP_RESULT.SUCCESS);
+        op.OperationFailed += (_, _) => TelemetryHandler.UpdatePackage(upgradable, TEL_OP_RESULT.FAILED);
+        AvaloniaOperationRegistry.Add(op);
+        _ = op.MainThread();
+    }
+
     private static async Task LaunchReinstall(IPackage? package)
     {
         if (package is null || package.Source.IsVirtualManager) return;
         var opts = await InstallOptionsFactory.LoadApplicableAsync(package);
+        if (PackageOperation.HasPendingOperation(package, OperationType.Install)) return;
         var op = new InstallPackageOperation(package, opts);
         op.OperationSucceeded += (_, _) => TelemetryHandler.InstallPackage(package, TEL_OP_RESULT.SUCCESS, TEL_InstallReferral.ALREADY_INSTALLED);
         op.OperationFailed += (_, _) => TelemetryHandler.InstallPackage(package, TEL_OP_RESULT.FAILED, TEL_InstallReferral.ALREADY_INSTALLED);
@@ -372,6 +436,7 @@ public class InstalledPackagesPage : AbstractPackagesPage
         if (package is null || package.Source.IsVirtualManager) return;
         var uninstallOpts = await InstallOptionsFactory.LoadApplicableAsync(package);
         var reinstallOpts = await InstallOptionsFactory.LoadApplicableAsync(package);
+        if (PackageOperation.HasPendingOperation(package, OperationType.Install)) return;
         var uninstallOp = new UninstallPackageOperation(package, uninstallOpts);
         uninstallOp.OperationSucceeded += (_, _) => TelemetryHandler.UninstallPackage(package, TEL_OP_RESULT.SUCCESS);
         uninstallOp.OperationFailed += (_, _) => TelemetryHandler.UninstallPackage(package, TEL_OP_RESULT.FAILED);
@@ -380,7 +445,7 @@ public class InstalledPackagesPage : AbstractPackagesPage
         reinstallOp.OperationFailed += (_, _) => TelemetryHandler.InstallPackage(package, TEL_OP_RESULT.FAILED, TEL_InstallReferral.ALREADY_INSTALLED);
         AvaloniaOperationRegistry.Add(uninstallOp);
         AvaloniaOperationRegistry.Add(reinstallOp);
-        _ = uninstallOp.MainThread();
+        // uninstallOp runs as reinstallOp's prerequisite; launching it directly too would execute it twice concurrently
         _ = reinstallOp.MainThread();
     }
 
