@@ -3,6 +3,18 @@ upstream_base:
   commit: 68411409d001b9f34cfb896af1543a1d7067ca5e
 
 backports:
+  - commit: ba61e91fb7678e8e6e08d771b6d960f9dbd11b9b
+    upstream_pr: 5366
+    status: applied-semantic
+    class: frontend-winui
+    reason: Adds Update and Update as administrator actions to Classic's Installed Packages context menu when a matching upgradable package is available.
+
+  - commit: 74a308272e8a4fb2015f8c7319f055926819206b
+    upstream_pr: 5175
+    status: applied-semantic
+    class: frontend-winui
+    reason: Adds CSV export for installed packages and software updates using Classic's WinUI file picker, including UTF-8 BOM output and spreadsheet-formula escaping.
+
   - commit: 1f4bd2d5c42f2fe55f8ae37b0f2cf85190d34051
     upstream_pr: 5365
     status: applied
