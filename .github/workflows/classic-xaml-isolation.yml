@@ -10,28 +10,36 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [current, install-options, main-view, packages-page]
+        variant: [current, baseline, no-install-options, no-packages-ui, no-install-or-packages]
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: classic-feature-parity-source-35490463937
+          ref: ${{ matrix.variant == 'baseline' && 'classic-feature-source-baseline' || 'classic-feature-parity-source-35490463937' }}
           fetch-depth: 0
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-      - name: Revert one XAML file
-        if: matrix.variant != 'current'
+      - name: Revert feature UI
+        if: startsWith(matrix.variant, 'no-')
         shell: pwsh
         run: |
-          $files = @{
-            'install-options' = 'src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml'
-            'main-view' = 'src/UniGetUI/Pages/MainView.xaml'
-            'packages-page' = 'src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml'
+          $baseline = 'b5efda4c9918b5585c08ec419ed57b7c3fd8a11f'
+          function Restore-File([string]$path) {
+            $spec = $baseline + ':' + $path
+            git show $spec | Set-Content -Encoding utf8 $path
           }
-          $path = $files['${{ matrix.variant }}']
-          git show b5efda4c9918b5585c08ec419ed57b7c3fd8a11f:$path | Set-Content -Encoding utf8 $path
+          if ('${{ matrix.variant }}' -in @('no-install-options', 'no-install-or-packages')) {
+            Restore-File 'src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml'
+            Restore-File 'src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs'
+          }
+          if ('${{ matrix.variant }}' -in @('no-packages-ui', 'no-install-or-packages')) {
+            Restore-File 'src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml'
+            Restore-File 'src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs'
+            Restore-File 'src/UniGetUI/Controls/PackageItemContainer.cs'
+            Remove-Item 'src/UniGetUI/Controls/PackageWrapper.Columns.cs' -ErrorAction SilentlyContinue
+          }
       - name: Restore WinUI project
         run: dotnet restore src/UniGetUI/UniGetUI.csproj /p:Platform=x64
       - name: Build WinUI project
