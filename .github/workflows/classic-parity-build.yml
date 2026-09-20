@@ -66,7 +66,7 @@ jobs:
         working-directory: ../parity-src
         shell: pwsh
         run: |
-          dotnet build src/UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64 /p:UseSharedCompilation=false 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/build.log
+          dotnet build src/UniGetUI.Windows.slnx --no-restore --verbosity minimal /m:1 /p:Platform=x64 /p:UseSharedCompilation=false 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/build.log
           $BuildExitCode = $LASTEXITCODE
           if ($BuildExitCode -ne 0) {
             Get-ChildItem src/UniGetUI/obj -Recurse -File -Include input.json,output.json -ErrorAction SilentlyContinue | ForEach-Object {
