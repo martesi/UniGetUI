@@ -11,8 +11,6 @@ namespace UniGetUI.Avalonia.ViewModels;
 
 public partial class ManageIgnoredUpdatesViewModel : ObservableObject
 {
-    public event EventHandler? CloseRequested;
-
     public string Title { get; } = CoreTools.Translate("Manage ignored updates");
     public string Description { get; } = CoreTools.Translate("The packages listed here won't be taken in account when checking for updates. Double-click them or click the button on their right to stop ignoring their updates.");
     public string ResetLabel { get; } = CoreTools.Translate("Reset list");
@@ -56,7 +54,7 @@ public partial class ManageIgnoredUpdatesViewModel : ObservableObject
             string managerDisplay = managerMap.TryGetValue(managerKey, out var mgr)
                 ? mgr.DisplayName
                 : managerKey;
-            string managerIconPath = ResolveManagerIcon(managerKey);
+            string managerIconPath = ManagerIconResolver.Resolve(managerKey);
             string packageName = CoreTools.FormatAsName(packageId);
 
             string versionDisplay = version == "*"
@@ -108,7 +106,11 @@ public partial class ManageIgnoredUpdatesViewModel : ObservableObject
             await entry.RemoveAsync();
     }
 
-    private static string ResolveManagerIcon(string managerKey)
+}
+
+internal static class ManagerIconResolver
+{
+    public static string Resolve(string managerKey)
     {
         string name = managerKey switch
         {
@@ -129,7 +131,7 @@ public partial class ManageIgnoredUpdatesViewModel : ObservableObject
             "pacman" => "pacman",
             _ => "ms_store",
         };
-        return $"avares://UniGetUI.Avalonia/Assets/Symbols/{name}.svg";
+        return $"avares://UniGetUI/Assets/Symbols/{name}.svg";
     }
 }
 

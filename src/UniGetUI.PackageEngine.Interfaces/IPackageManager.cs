@@ -1,3 +1,4 @@
+using System.Text;
 using UniGetUI.PackageEngine.Classes.Manager.Classes;
 using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
 using UniGetUI.PackageEngine.Interfaces.ManagerProviders;
@@ -20,6 +21,32 @@ namespace UniGetUI.PackageEngine.Interfaces
         public IPackageDetailsHelper DetailsHelper { get; }
         public IPackageOperationHelper OperationHelper { get; }
         public IReadOnlyList<ManagerDependency> Dependencies { get; }
+
+        /// <summary>
+        /// The text encoding this manager's CLI emits its output in. Defaults to UTF-8; managers
+        /// whose CLI emits in the system console code page (e.g. Chocolatey) must override this.
+        /// </summary>
+        public Encoding OutputEncoding { get; }
+
+        public bool InstallerUrlFollowsPackageVersion { get; }
+
+        public bool CommandLineIsShellInterpreted { get; }
+
+        /// <summary>
+        /// Whether this manager quotes the package identifier when it places it on the command
+        /// line. Only such a manager may carry an identifier containing whitespace.
+        /// </summary>
+        public bool IdentifiersAreQuotedOnCommandLine { get; }
+
+        /// <summary>
+        /// Compares two version strings using this manager's ecosystem semantics, returning a
+        /// negative number, zero or a positive number in the usual way, or null when the two
+        /// versions cannot be meaningfully compared.
+        /// A dash means opposite things across ecosystems - a Debian or Scoop revision is newer
+        /// than its base version, while a SemVer pre-release is older than its release - so the
+        /// shared numeric comparison cannot be right for every manager at once.
+        /// </summary>
+        public int? CompareVersions(string versionA, string versionB);
 
         /// <summary>
         /// Initializes the Package Manager (asynchronously). Must be run before using any other method of the manager.
@@ -47,6 +74,10 @@ namespace UniGetUI.PackageEngine.Interfaces
         /// This method is fail-safe and will return an empty array if an error occurs.
         /// </summary>
         public IReadOnlyList<IPackage> GetAvailableUpdates();
+
+        public bool LastUpdatesListingFailed { get; }
+
+        public bool LastInstalledListingFailed { get; }
 
         /// <summary>
         /// Returns an array of Package objects that represent the installed reported by the manager.
