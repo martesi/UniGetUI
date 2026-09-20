@@ -29,3 +29,5 @@ backports/0240-version-underscore-revisions.patch
 backports/0250-chocolatey-state-cleanup.patch
 backports/0260-package-icon-retry.patch
 backports/0270-winget-catalog-refresh.patch
+backports/0280-export-package-lists-csv.patch
+backports/0290-installed-package-update-actions.patch
