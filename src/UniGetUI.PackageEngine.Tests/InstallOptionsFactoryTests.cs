@@ -156,6 +156,39 @@ public sealed class InstallOptionsFactoryTests : IDisposable
     }
 
     [Fact]
+    public void LoadApplicable_ExpandsEnvironmentVariablesInCustomParametersAndLocation()
+    {
+        var variable = $"UNIGETUI_TEST_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(variable, @"C:\Expanded");
+        try
+        {
+            var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+            var package = new PackageBuilder().WithManager(manager).WithId($"Pkg{Guid.NewGuid():N}").Build();
+            var options = new InstallOptions
+            {
+                OverridesNextLevelOpts = true,
+                CustomInstallLocation = $"%{variable}%\\app",
+                CustomParameters_Install = [$"--location=%{variable}%\\app"],
+            };
+            SecureSettings.ApplyForUser(
+                Environment.UserName,
+                SecureSettings.ResolveKey(SecureSettings.K.AllowCLIArguments),
+                true
+            );
+            InstallOptionsFactory.SaveForPackage(options, package);
+
+            var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+            Assert.Equal(@"C:\Expanded\app", resolved.CustomInstallLocation);
+            Assert.Equal([@"--location=C:\Expanded\app"], resolved.CustomParameters_Install);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    [Fact]
     public void SaveAndLoadForPackage_RoundTripsPersistedOptions()
     {
         var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
