@@ -1,7 +1,7 @@
 name: .NET Tests
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "classic-test-full-feature-backport" ]
     paths:
       - 'global.json'
       - '**.cs'
