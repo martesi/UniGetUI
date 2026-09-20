@@ -14,6 +14,7 @@ using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
+using UniGetUI.Shared;
 
 namespace UniGetUI.Avalonia.Infrastructure;
 
@@ -23,6 +24,8 @@ namespace UniGetUI.Avalonia.Infrastructure;
 /// </summary>
 internal static partial class AvaloniaAutoUpdater
 {
+    private const string INSTALLER_VALIDATION_FAILURE_MARKER_SUFFIX = ".validation-failed";
+
     // ------------------------------------------------------------------ constants
     private const string REGISTRY_PATH = @"Software\Devolutions\UniGetUI";
     private const string DEFAULT_PRODUCTINFO_URL = "https://devolutions.net/productinfo.json";
@@ -104,8 +107,7 @@ internal static partial class AvaloniaAutoUpdater
     private static readonly Lock _updateLogLock = new();
     private static StringBuilder? _updateLogBuilder;
     private static readonly string _updateLogPath = Path.Combine(
-        Path.GetTempPath(),
-        "UniGetUI",
+        AppPaths.ScratchDirectory,
         "last-update-attempt.log"
     );
 
@@ -370,10 +372,10 @@ internal static partial class AvaloniaAutoUpdater
                 return;
             }
 
-            bool success = await CheckAndInstallUpdatesAsync(autoLaunch: isFirstLaunch);
+            await CheckAndInstallUpdatesAsync(autoLaunch: isFirstLaunch);
             isFirstLaunch = false;
 
-            await Task.Delay(TimeSpan.FromMinutes(success ? 60 : 10));
+            await Task.Delay(UpdaterDownloadEngine.DefaultAutomaticUpdateCheckInterval);
         }
     }
 
@@ -425,6 +427,11 @@ internal static partial class AvaloniaAutoUpdater
                 // macOS and Linux both ship as self-contained .tar.gz archives.
                 installerName = "UniGetUI Updater.tar.gz";
             string installerPath = Path.Join(CoreData.UniGetUIDataDirectory, installerName);
+            UpdaterDownloadIdentity installerIdentity = new(
+                candidate.VersionName,
+                candidate.InstallerHash,
+                candidate.InstallerDownloadUrl
+            );
 
             // Try cached installer first
             if (
@@ -433,12 +440,44 @@ internal static partial class AvaloniaAutoUpdater
                 && CheckInstallerSignerThumbprint(installerPath, overrides)
             )
             {
+                ClearInstallerValidationFailure(GetInstallerValidationFailureMarkerPath(installerPath));
+                UpdaterDownloadEngine.ClearFailureState(
+                    UpdaterDownloadEngine.GetFailureStatePath(installerPath),
+                    message => LogUpdateWarn(message)
+                );
                 LogUpdateInfo("Cached valid installer found, preparing to launch...");
                 return await PrepareAndLaunchAsync(installerPath, candidate.VersionName, autoLaunch, manualCheck);
             }
 
-            // Delete invalid/outdated cached copy
-            try { File.Delete(installerPath); } catch { }
+            string installerValidationFailureMarkerPath =
+                GetInstallerValidationFailureMarkerPath(installerPath);
+            string installerDownloadFailureStatePath =
+                UpdaterDownloadEngine.GetFailureStatePath(installerPath);
+            if (File.Exists(installerPath))
+            {
+                LogUpdateWarn(
+                    "Cached installer is invalid; it will be kept until a replacement is validated."
+                );
+            }
+
+            if (
+                !manualCheck
+                && UpdaterDownloadEngine.IsFailureBackoffActive(
+                    installerDownloadFailureStatePath,
+                    installerIdentity,
+                    DateTime.UtcNow,
+                    out TimeSpan remainingBackoff,
+                    out UpdaterDownloadFailureState? failureState,
+                    message => LogUpdateWarn(message)
+                )
+            )
+            {
+                LogUpdateWarn(
+                    $"Skipping installer download for version {candidate.VersionName}; previous {failureState?.FailureClass ?? "download"} failure is backed off for {remainingBackoff:g}."
+                );
+                MarkAttemptFinished("installer download skipped by failure backoff");
+                return true;
+            }
 
             RaiseStatus(
                 CoreTools.Translate(
@@ -449,16 +488,58 @@ internal static partial class AvaloniaAutoUpdater
                 isClosable: false);
 
             LogUpdateInfo("Downloading installer...");
-            await DownloadInstallerAsync(candidate.InstallerDownloadUrl, installerPath, overrides);
+            string downloadedInstallerPath;
+            try
+            {
+                downloadedInstallerPath = await DownloadInstallerAsync(
+                    candidate.InstallerDownloadUrl,
+                    installerPath,
+                    overrides,
+                    installerIdentity
+                );
+            }
+            catch (Exception ex)
+            {
+                UpdaterDownloadEngine.RecordFailure(
+                    installerDownloadFailureStatePath,
+                    installerIdentity,
+                    "download",
+                    DateTime.UtcNow,
+                    message => LogUpdateWarn(message)
+                );
+                LogUpdateWarn($"Installer download failed: {ex.Message}");
+                throw;
+            }
 
             if (
-                await CheckInstallerHashAsync(installerPath, candidate.InstallerHash, overrides)
-                && CheckInstallerSignerThumbprint(installerPath, overrides)
+                await CheckInstallerHashAsync(downloadedInstallerPath, candidate.InstallerHash, overrides)
+                && CheckInstallerSignerThumbprint(downloadedInstallerPath, overrides)
             )
             {
+                UpdaterDownloadEngine.PromotePartialDownload(
+                    installerPath,
+                    message => LogUpdateWarn(message)
+                );
+                ClearInstallerValidationFailure(installerValidationFailureMarkerPath);
+                UpdaterDownloadEngine.ClearFailureState(
+                    installerDownloadFailureStatePath,
+                    message => LogUpdateWarn(message)
+                );
                 LogUpdateInfo("Downloaded installer is valid, preparing to launch...");
                 return await PrepareAndLaunchAsync(installerPath, candidate.VersionName, autoLaunch, manualCheck);
             }
+
+            UpdaterDownloadEngine.RecordFailure(
+                installerDownloadFailureStatePath,
+                installerIdentity,
+                "validation",
+                DateTime.UtcNow,
+                message => LogUpdateWarn(message)
+            );
+            UpdaterDownloadEngine.DeletePartialDownload(
+                installerPath,
+                message => LogUpdateWarn(message)
+            );
 
             LogUpdateError("Installer authenticity could not be verified. Aborting update.");
             RaiseStatus(
@@ -469,7 +550,7 @@ internal static partial class AvaloniaAutoUpdater
                 actionButtonText: CoreTools.Translate("View log"),
                 actionButtonAction: OpenUpdateLog);
             MarkAttemptFinished("authenticity verification failed");
-            return false;
+            return !manualCheck;
         }
         catch (PlatformArtifactMissingException ex)
         {
@@ -508,6 +589,33 @@ internal static partial class AvaloniaAutoUpdater
     }
 
     // ------------------------------------------------------------------ update flow
+    internal static string GetInstallerValidationFailureMarkerPath(string installerPath)
+    {
+        return installerPath + INSTALLER_VALIDATION_FAILURE_MARKER_SUFFIX;
+    }
+
+    private static void ClearInstallerValidationFailure(string markerPath)
+    {
+        DeleteFileIfExists(markerPath, "installer validation failure marker");
+    }
+
+    private static void DeleteFileIfExists(string path, string description)
+    {
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex)
+        {
+            LogUpdateWarn($"Could not delete {description} at '{path}': {ex.Message}");
+        }
+    }
+
     private static async Task<bool> PrepareAndLaunchAsync(
         string installerPath,
         string versionName,
@@ -561,13 +669,29 @@ internal static partial class AvaloniaAutoUpdater
             return;
         }
 
+        WindowsInstallScope installScope = AutoUpdaterInstallerArguments.DetectInstallScope(
+            CoreData.UniGetUIExecutableDirectory);
+
+        string installerArguments = AutoUpdaterInstallerArguments.ForWindows(
+            CoreData.IsPortable,
+            CoreData.UniGetUIExecutableDirectory,
+            installScope);
+
+        LogUpdateInfo(
+            $"Installation scope for {CoreData.UniGetUIExecutableDirectory} resolved as {installScope}.");
+
+        if (CoreData.IsPortable)
+        {
+            LogUpdateInfo($"Portable install: updating in place at {CoreData.UniGetUIExecutableDirectory}");
+        }
+
         LogUpdateInfo($"Launching installer: {installerLocation}");
         using Process p = new()
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = installerLocation,
-                Arguments = "/SILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NoVCRedist /NoEdgeWebView /NoWinGet",
+                Arguments = installerArguments,
                 UseShellExecute = true,
                 CreateNoWindow = true,
             },
@@ -1329,10 +1453,11 @@ internal static partial class AvaloniaAutoUpdater
     }
 
     // ------------------------------------------------------------------ download
-    private static async Task DownloadInstallerAsync(
+    private static async Task<string> DownloadInstallerAsync(
         string url,
         string destination,
-        UpdaterOverrides overrides)
+        UpdaterOverrides overrides,
+        UpdaterDownloadIdentity identity)
     {
         if (!IsSourceUrlAllowed(url, overrides.AllowUnsafeUrls))
         {
@@ -1343,14 +1468,18 @@ internal static partial class AvaloniaAutoUpdater
         using HttpClient client = new(CreateHttpClientHandler(overrides));
         client.Timeout = TimeSpan.FromSeconds(600);
         client.DefaultRequestHeaders.UserAgent.ParseAdd(CoreData.UserAgentString);
+        using CancellationTokenSource downloadTimeout = new(TimeSpan.FromSeconds(600));
 
-        HttpResponseMessage response = await client.GetAsync(url);
-        response.EnsureSuccessStatusCode();
-
-        using FileStream fs = new(destination, FileMode.OpenOrCreate);
-        await response.Content.CopyToAsync(fs);
+        UpdaterDownloadResult result = await UpdaterDownloadEngine.DownloadInstallerPartAsync(
+            client,
+            identity,
+            destination,
+            message => LogUpdateDebug(message),
+            downloadTimeout.Token
+        );
 
         LogUpdateDebug("Installer download complete.");
+        return result.PartialPath;
     }
 
     // ------------------------------------------------------------------ HTTP client
@@ -1384,7 +1513,8 @@ internal static partial class AvaloniaAutoUpdater
             return false;
         }
 
-        return uri.Host.EndsWith("devolutions.net", StringComparison.OrdinalIgnoreCase)
+        return uri.Host.Equals("devolutions.net", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".devolutions.net", StringComparison.OrdinalIgnoreCase)
             || uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
             || uri.Host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase)
             || uri.Host.Equals("release-assets.githubusercontent.com", StringComparison.OrdinalIgnoreCase);

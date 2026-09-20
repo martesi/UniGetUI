@@ -49,6 +49,192 @@ public sealed class InstallOptionsFactoryTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(@"..\..\..\PWNED")]
+    [InlineData("../../../PWNED")]
+    [InlineData("..")]
+    [InlineData(".")]
+    [InlineData("")]
+    public void SaveForPackage_NeverWritesOutsideTheInstallOptionsDirectory(string packageId)
+    {
+        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
+        var package = new PackageBuilder().WithManager(manager).WithId(packageId).Build();
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { CustomInstallLocation = "MARKER-CONTENT" },
+            package
+        );
+
+        string optionsDirectory = Path.GetFullPath(
+            CoreData.UniGetUIInstallationOptionsDirectory
+        );
+
+        foreach (string written in Directory.GetFiles(
+            _testRoot,
+            "*",
+            SearchOption.AllDirectories
+        ))
+        {
+            if (Path.GetFileName(written).Contains("PWNED", StringComparison.Ordinal))
+            {
+                Assert.Equal(
+                    optionsDirectory,
+                    Path.GetDirectoryName(Path.GetFullPath(written))
+                );
+            }
+        }
+    }
+
+    [Fact]
+    public void SaveForPackage_StillRoundTripsAnOrdinaryPackageId()
+    {
+        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
+        var package = new PackageBuilder().WithManager(manager).WithId("Contoso:Tool").Build();
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { CustomInstallLocation = @"C:\Apps\Contoso" },
+            package
+        );
+
+        Assert.Equal(
+            @"C:\Apps\Contoso",
+            InstallOptionsFactory.LoadForPackage(package).CustomInstallLocation
+        );
+    }
+
+    [Fact]
+    public void SaveForPackage_DoesNotLetSanitisationCollideDistinctIds()
+    {
+        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
+        var colonId = new PackageBuilder().WithManager(manager).WithId("Contoso:Tool").Build();
+        var plainId = new PackageBuilder().WithManager(manager).WithId("ContosoTool").Build();
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { CustomInstallLocation = "FOR-COLON" },
+            colonId
+        );
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { CustomInstallLocation = "FOR-PLAIN" },
+            plainId
+        );
+
+        Assert.Equal(
+            "FOR-COLON",
+            InstallOptionsFactory.LoadForPackage(colonId).CustomInstallLocation
+        );
+        Assert.Equal(
+            "FOR-PLAIN",
+            InstallOptionsFactory.LoadForPackage(plainId).CustomInstallLocation
+        );
+    }
+
+    [Fact]
+    public void SaveForPackage_KeepsSameIdFromDifferentSourcesApart()
+    {
+        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
+        var fromA = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithSource(new SourceBuilder().WithManager(manager).WithName("winget").Build())
+            .Build();
+        var fromB = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithSource(new SourceBuilder().WithManager(manager).WithName("msstore").Build())
+            .Build();
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { CustomInstallLocation = "FROM-A" },
+            fromA
+        );
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { CustomInstallLocation = "FROM-B" },
+            fromB
+        );
+
+        Assert.Equal(
+            "FROM-A",
+            InstallOptionsFactory.LoadForPackage(fromA).CustomInstallLocation
+        );
+        Assert.Equal(
+            "FROM-B",
+            InstallOptionsFactory.LoadForPackage(fromB).CustomInstallLocation
+        );
+    }
+
+    [Fact]
+    public void SaveForPackage_KeepsAmbiguousSourceAndIdSplitsApart()
+    {
+        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
+        var dottedSource = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("c")
+            .WithSource(new SourceBuilder().WithManager(manager).WithName("a.b").Build())
+            .Build();
+        var dottedId = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("b.c")
+            .WithSource(new SourceBuilder().WithManager(manager).WithName("a").Build())
+            .Build();
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { CustomInstallLocation = "DOTTED-SOURCE" },
+            dottedSource
+        );
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { CustomInstallLocation = "DOTTED-ID" },
+            dottedId
+        );
+
+        Assert.Equal(
+            "DOTTED-SOURCE",
+            InstallOptionsFactory.LoadForPackage(dottedSource).CustomInstallLocation
+        );
+        Assert.Equal(
+            "DOTTED-ID",
+            InstallOptionsFactory.LoadForPackage(dottedId).CustomInstallLocation
+        );
+    }
+
+    [Fact]
+    public void LoadForPackage_DoesNotThrowOnPackageIdsWithControlCharacters()
+    {
+        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso\0Tool")
+            .Build();
+
+        var loaded = InstallOptionsFactory.LoadForPackage(package);
+
+        Assert.NotNull(loaded);
+    }
+
+    [Fact]
+    public void AutoUpdatesMigration_IgnoresIdentityScopedOptionFiles()
+    {
+        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
+        var package = new PackageBuilder().WithManager(manager).WithId("Contoso.Tool").Build();
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions { AutoUpdatePackage = true },
+            package
+        );
+
+        string written = Directory
+            .GetFiles(CoreData.UniGetUIInstallationOptionsDirectory, "*.json")
+            .Select(Path.GetFileName)
+            .First(name => !name!.StartsWith("GlobalValues.", StringComparison.Ordinal));
+
+        Assert.True(InstallOptionsFactory.IsIdentityScopedOptionsFile(written!));
+        Assert.False(
+            InstallOptionsFactory.IsIdentityScopedOptionsFile(
+                "WinGet.foo_0123456789abcdef.json"
+            )
+        );
+        Assert.False(InstallOptionsFactory.IsIdentityScopedOptionsFile("WinGet.Contoso.Tool.json"));
+    }
+
     [Fact]
     public void LoadApplicable_UsesManagerDefaultsAndExpandsPackageToken()
     {
@@ -71,6 +257,165 @@ public sealed class InstallOptionsFactoryTests : IDisposable
         );
         Assert.True(resolved.InteractiveInstallation);
         Assert.False(resolved.CustomInstallLocationIsExplicit);
+    }
+
+    [Fact]
+    public void LoadApplicable_ExpandsNameTokenFromManagerDefaults()
+    {
+        var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Notepad++.Notepad++")
+            .WithName("Notepad++")
+            .Build();
+
+        InstallOptionsFactory.SaveForManager(
+            new InstallOptions { CustomInstallLocation = @"D:\Programs\%NAME%" },
+            manager
+        );
+        InstallOptionsFactory.SaveForPackage(new InstallOptions(), package);
+
+        var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+        Assert.Equal(@"D:\Programs\Notepad++", resolved.CustomInstallLocation);
+        Assert.False(resolved.CustomInstallLocationIsExplicit);
+    }
+
+    [Fact]
+    public void LoadApplicable_ExpandsTokensInExplicitPackageLocation()
+    {
+        var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithName("Contoso Tool")
+            .Build();
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions
+            {
+                OverridesNextLevelOpts = true,
+                CustomInstallLocation = @"D:\Programs\%name%\%package%",
+            },
+            package
+        );
+
+        var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+        Assert.Equal(@"D:\Programs\Contoso Tool\Contoso.Tool", resolved.CustomInstallLocation);
+        Assert.True(resolved.CustomInstallLocationIsExplicit);
+    }
+
+    [Fact]
+    public void LoadApplicable_SanitizesNameTokenForUseAsAFolderName()
+    {
+        var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId($"Pkg{Guid.NewGuid():N}")
+            .WithName("Contoso: Tool*")
+            .Build();
+
+        InstallOptionsFactory.SaveForManager(
+            new InstallOptions { CustomInstallLocation = @"D:\Programs\%NAME%" },
+            manager
+        );
+        InstallOptionsFactory.SaveForPackage(new InstallOptions(), package);
+
+        var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+        Assert.Equal(@"D:\Programs\Contoso Tool", resolved.CustomInstallLocation);
+    }
+
+    [Fact]
+    public void LoadApplicable_DoesNotLetPackageMetadataIntroduceEnvironmentVariables()
+    {
+        var varName = $"UNIGETUI_TEST_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(varName, @"C:\Expanded");
+        try
+        {
+            Settings.Set(Settings.K.ExpandEnvVarsWithPercentSyntax, true);
+            var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+            var package = new PackageBuilder()
+                .WithManager(manager)
+                .WithId($"Contoso.%{varName}%")
+                .WithName($"Contoso %{varName}% Tool")
+                .Build();
+
+            InstallOptionsFactory.SaveForManager(
+                new InstallOptions { CustomInstallLocation = @"D:\Programs\%NAME%\%PACKAGE%" },
+                manager
+            );
+            InstallOptionsFactory.SaveForPackage(new InstallOptions(), package);
+
+            var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+            Assert.Equal(
+                $@"D:\Programs\Contoso {varName} Tool\Contoso.{varName}",
+                resolved.CustomInstallLocation
+            );
+            Assert.DoesNotContain(
+                @"C:\Expanded",
+                resolved.CustomInstallLocation,
+                StringComparison.Ordinal
+            );
+        }
+        finally
+        {
+            Settings.Set(Settings.K.ExpandEnvVarsWithPercentSyntax, false);
+            Environment.SetEnvironmentVariable(varName, null);
+        }
+    }
+
+    [Theory]
+    [InlineData("..")]
+    [InlineData(@"..\..\Windows\System32")]
+    [InlineData("../../etc")]
+    [InlineData("   ")]
+    [InlineData("CON")]
+    public void LoadApplicable_KeepsTheNameTokenInsideTheConfiguredDirectory(string name)
+    {
+        var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId($"Pkg{Guid.NewGuid():N}")
+            .WithName(name)
+            .Build();
+
+        InstallOptionsFactory.SaveForManager(
+            new InstallOptions { CustomInstallLocation = @"D:\Programs\%NAME%" },
+            manager
+        );
+        InstallOptionsFactory.SaveForPackage(new InstallOptions(), package);
+
+        var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+        Assert.StartsWith(@"D:\Programs\", resolved.CustomInstallLocation, StringComparison.Ordinal);
+        Assert.Equal(
+            @"D:\Programs",
+            Path.GetDirectoryName(Path.GetFullPath(resolved.CustomInstallLocation))
+        );
+    }
+
+    [Fact]
+    public void LoadApplicable_FallsBackToPackageIdWhenNameCannotBeAFolderName()
+    {
+        var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithName("?*|")
+            .Build();
+
+        InstallOptionsFactory.SaveForManager(
+            new InstallOptions { CustomInstallLocation = @"D:\Programs\%NAME%" },
+            manager
+        );
+        InstallOptionsFactory.SaveForPackage(new InstallOptions(), package);
+
+        var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+        Assert.Equal(@"D:\Programs\Contoso.Tool", resolved.CustomInstallLocation);
     }
 
     [Fact]
@@ -153,6 +498,124 @@ public sealed class InstallOptionsFactoryTests : IDisposable
         var resolved = InstallOptionsFactory.LoadApplicable(package);
 
         Assert.Equal(["--keepdrop"], resolved.CustomParameters_Install);
+    }
+
+    [Fact]
+    public void LoadApplicable_ExpandsAngleBracketEnvironmentVariablesByDefault()
+    {
+        var varName = $"UNIGETUI_TEST_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(varName, @"C:\Expanded");
+        try
+        {
+            var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+            var package = new PackageBuilder().WithManager(manager).WithId($"Pkg{Guid.NewGuid():N}").Build();
+            var packageOptions = new InstallOptions
+            {
+                OverridesNextLevelOpts = true,
+                CustomInstallLocation = $"<{varName}>\\app",
+                CustomParameters_Install = [$"--location=<{varName}>\\app"],
+                CustomParameters_Update = [$"--location=<{varName}>"],
+                CustomParameters_Uninstall = ["--purge"],
+            };
+
+            SecureSettings.ApplyForUser(Environment.UserName, SecureSettings.ResolveKey(SecureSettings.K.AllowCLIArguments), true);
+            InstallOptionsFactory.SaveForPackage(packageOptions, package);
+
+            var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+            Assert.Equal(@"C:\Expanded\app", resolved.CustomInstallLocation);
+            Assert.Equal([@"--location=C:\Expanded\app"], resolved.CustomParameters_Install);
+            Assert.Equal([@"--location=C:\Expanded"], resolved.CustomParameters_Update);
+            Assert.Equal(["--purge"], resolved.CustomParameters_Uninstall);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(varName, null);
+        }
+    }
+
+    [Fact]
+    public void LoadApplicable_DoesNotExpandPercentSyntaxByDefault()
+    {
+        var varName = $"UNIGETUI_TEST_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(varName, @"C:\Expanded");
+        try
+        {
+            var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+            var package = new PackageBuilder().WithManager(manager).WithId($"Pkg{Guid.NewGuid():N}").Build();
+            var packageOptions = new InstallOptions
+            {
+                OverridesNextLevelOpts = true,
+                CustomInstallLocation = $"%{varName}%\\app",
+            };
+
+            InstallOptionsFactory.SaveForPackage(packageOptions, package);
+
+            var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+            Assert.Equal($"%{varName}%\\app", resolved.CustomInstallLocation);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(varName, null);
+        }
+    }
+
+    [Fact]
+    public void LoadApplicable_ExpandsPercentSyntaxWhenSettingEnabled()
+    {
+        var varName = $"UNIGETUI_TEST_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(varName, @"C:\Expanded");
+        try
+        {
+            Settings.Set(Settings.K.ExpandEnvVarsWithPercentSyntax, true);
+            var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+            var package = new PackageBuilder().WithManager(manager).WithId($"Pkg{Guid.NewGuid():N}").Build();
+            var packageOptions = new InstallOptions
+            {
+                OverridesNextLevelOpts = true,
+                CustomInstallLocation = $"%{varName}%\\app",
+            };
+
+            InstallOptionsFactory.SaveForPackage(packageOptions, package);
+
+            var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+            Assert.Equal(@"C:\Expanded\app", resolved.CustomInstallLocation);
+        }
+        finally
+        {
+            Settings.Set(Settings.K.ExpandEnvVarsWithPercentSyntax, false);
+            Environment.SetEnvironmentVariable(varName, null);
+        }
+    }
+
+    [Fact]
+    public void LoadApplicable_SanitizesMetacharactersIntroducedByEnvironmentVariableExpansion()
+    {
+        var varName = $"UNIGETUI_TEST_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(varName, "safe & rm -rf");
+        try
+        {
+            var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+            var package = new PackageBuilder().WithManager(manager).WithId($"Pkg{Guid.NewGuid():N}").Build();
+            var packageOptions = new InstallOptions
+            {
+                OverridesNextLevelOpts = true,
+                CustomParameters_Install = [$"--flag=<{varName}>"],
+            };
+
+            SecureSettings.ApplyForUser(Environment.UserName, SecureSettings.ResolveKey(SecureSettings.K.AllowCLIArguments), true);
+            InstallOptionsFactory.SaveForPackage(packageOptions, package);
+
+            var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+            Assert.Equal(["--flag=safe  rm -rf"], resolved.CustomParameters_Install);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(varName, null);
+        }
     }
 
     [Fact]
