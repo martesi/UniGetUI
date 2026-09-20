@@ -10,36 +10,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [current, baseline, no-install-options, no-packages-ui, no-install-or-packages]
+        variant: [current, no-skip-level, no-command-actions]
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ matrix.variant == 'baseline' && 'classic-feature-source-baseline' || 'classic-feature-parity-source-35490463937' }}
+          ref: classic-feature-parity-source-35490463937
           fetch-depth: 0
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-      - name: Revert feature UI
-        if: startsWith(matrix.variant, 'no-')
+      - name: Remove suspect install-options chunk
+        if: matrix.variant != 'current'
         shell: pwsh
         run: |
-          $baseline = 'b5efda4c9918b5585c08ec419ed57b7c3fd8a11f'
-          function Restore-File([string]$path) {
-            $spec = $baseline + ':' + $path
-            git show $spec | Set-Content -Encoding utf8 $path
+          $xamlPath = 'src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml'
+          $csPath = 'src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs'
+          $xaml = Get-Content -Raw $xamlPath
+          $cs = Get-Content -Raw $csPath
+          if ('${{ matrix.variant }}' -eq 'no-skip-level') {
+            $xaml = $xaml.Replace(' Name="SkipMinorUpdatesCheckbox" Checked="SkipMinorUpdatesCheckbox_Changed" Unchecked="SkipMinorUpdatesCheckbox_Changed"', ' Name="SkipMinorUpdatesCheckbox"')
+            $xaml = $xaml -replace '(?s)\s*<NumberBox Name="SkipMinorUpdatesLevel".*?ToolTipService\.ToolTip="Ignore changes from this version component onward \(2 = minor, 3 = patch, 4 = revision\)" />', ''
+            $cs = $cs -replace '(?m)^\s*SkipMinorUpdatesLevel\.Value = .*?\r?\n', ''
+            $cs = $cs -replace '(?m)^\s*SkipMinorUpdatesLevel\.IsEnabled = .*?\r?\n', ''
+            $cs = $cs -replace '(?m)^\s*options\.SkipMinorUpdatesLevel = .*?\r?\n', ''
+            $cs = $cs -replace '(?s)\r?\n\s*private void SkipMinorUpdatesCheckbox_Changed\(object sender, RoutedEventArgs e\).*?\r?\n\s*}\r?\n', "`r`n"
           }
-          if ('${{ matrix.variant }}' -in @('no-install-options', 'no-install-or-packages')) {
-            Restore-File 'src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml'
-            Restore-File 'src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs'
+          if ('${{ matrix.variant }}' -eq 'no-command-actions') {
+            $xaml = $xaml -replace '(?s)\s*<widgets:TranslatedTextBlock Text="Install, update and uninstall arguments are independent\..*?</StackPanel>', ''
+            $xaml = $xaml -replace '(?s)\s*<StackPanel Orientation="Horizontal" Spacing="8">\s*<Button Click="CopyCommand".*?</StackPanel>', ''
+            $cs = $cs -replace '(?s)\s*private void CopyInstallArguments\(object sender, RoutedEventArgs args\).*?private readonly OperationType Operation;', "`r`n        private readonly OperationType Operation;"
           }
-          if ('${{ matrix.variant }}' -in @('no-packages-ui', 'no-install-or-packages')) {
-            Restore-File 'src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml'
-            Restore-File 'src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs'
-            Restore-File 'src/UniGetUI/Controls/PackageItemContainer.cs'
-            Remove-Item 'src/UniGetUI/Controls/PackageWrapper.Columns.cs' -ErrorAction SilentlyContinue
-          }
+          Set-Content -Encoding utf8 $xamlPath $xaml
+          Set-Content -Encoding utf8 $csPath $cs
       - name: Restore WinUI project
         run: dotnet restore src/UniGetUI/UniGetUI.csproj /p:Platform=x64
       - name: Build WinUI project
