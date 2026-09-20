@@ -1,0 +1,88 @@
+From b5efda4c9918b5585c08ec419ed57b7c3fd8a11f Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Sun, 20 Sep 2026 02:24:18 +0000
+Subject: [PATCH] backport: update packages from Installed Packages
+
+Adapt the upstream installed-package update actions to the Classic WinUI context menu.
+
+Upstream-Commit: ba61e91fb7678e8e6e08d771b6d960f9dbd11b9b
+Upstream-PR: Devolutions/UniGetUI#5366
+---
+diff --git a/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs b/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
+--- a/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
+@@ -33,6 +33,8 @@ public partial class InstalledPackagesPage : AbstractPackagesPage
+         private BetterMenuItem? MenuPackageDetails;
+         private BetterMenuItem? MenuOpenInstallLocation;
+         private BetterMenuItem? MenuDownloadInstaller;
++        private BetterMenuItem? MenuUpdate;
++        private BetterMenuItem? MenuUpdateAsAdmin;
+ 
+         public InstalledPackagesPage()
+             : base(
+@@ -126,6 +128,24 @@ public override BetterMenu GenerateContextMenu()
+ 
+             menu.Items.Add(new MenuFlyoutSeparator());
+ 
++            MenuUpdate = new()
++            {
++                Text = CoreTools.AutoTranslated("Update"),
++                IconName = IconType.Update,
++            };
++            MenuUpdate.Click += (_, _) => LaunchUpdate(SelectedItem);
++            menu.Items.Add(MenuUpdate);
++
++            MenuUpdateAsAdmin = new()
++            {
++                Text = CoreTools.AutoTranslated("Update as administrator"),
++                IconName = IconType.UAC,
++            };
++            MenuUpdateAsAdmin.Click += (_, _) => LaunchUpdate(SelectedItem, elevated: true);
++            menu.Items.Add(MenuUpdateAsAdmin);
++
++            menu.Items.Add(new MenuFlyoutSeparator());
++
+             MenuDownloadInstaller = new BetterMenuItem
+             {
+                 Text = CoreTools.AutoTranslated("Download installer"),
+@@ -345,6 +365,8 @@ MenuAsAdmin is null
+                 || MenuPackageDetails is null
+                 || MenuOpenInstallLocation is null
+                 || MenuDownloadInstaller is null
++                || MenuUpdate is null
++                || MenuUpdateAsAdmin is null
+             )
+             {
+                 Logger.Error("Menu items are null on InstalledPackagesTab");
+@@ -355,6 +377,15 @@ MenuAsAdmin is null
+             MenuInteractive.IsEnabled = package.Manager.Capabilities.CanRunInteractively;
+             MenuRemoveData.IsEnabled = package.Manager.Capabilities.CanRemoveDataOnUninstall;
+ 
++            IPackage? upgradable = package.GetUpgradablePackage();
++            bool canUpdate = upgradable is not null;
++            MenuUpdate.IsEnabled = canUpdate;
++            MenuUpdate.Text = upgradable is null
++                ? CoreTools.Translate("Update")
++                : CoreTools.Translate("Update to version {0}", upgradable.NewVersionString);
++            MenuUpdateAsAdmin.IsEnabled =
++                canUpdate && package.Manager.Capabilities.CanRunAsAdmin;
++
+             bool IS_LOCAL = package.Source.IsVirtualManager;
+ 
+             MenuInstallationOptions.IsEnabled = !IS_LOCAL;
+@@ -473,6 +504,13 @@ public static async Task BackupPackages_LOCAL()
+             }
+         }
+ 
++        private static void LaunchUpdate(IPackage? package, bool? elevated = null)
++        {
++            IPackage? upgradable = package?.GetUpgradablePackage();
++            if (upgradable is not null)
++                _ = MainApp.Operations.Update(upgradable, elevated: elevated);
++        }
++
+         private void MenuUninstall_Invoked(object sender, RoutedEventArgs args) =>
+             _ = MainApp.Operations.ConfirmAndUninstall(SelectedItem);
+ 
+-- 
+2.50.1
