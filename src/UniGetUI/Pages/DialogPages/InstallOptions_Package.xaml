@@ -382,6 +382,15 @@
                         Opacity="0.6"
                         TextWrapping="Wrap"
                       />
+                      <widgets:TranslatedTextBlock
+                        Grid.Row="3"
+                        Grid.ColumnSpan="3"
+                        Margin="0,4,0,0"
+                        FontSize="12"
+                        Opacity="0.7"
+                        Text="%PACKAGE% is replaced with the package ID, and %NAME% with the package name."
+                        WrappingMode="Wrap"
+                      />
                     </Grid>
                   </StackPanel>
                 </controls:Case>

@@ -17,6 +17,9 @@ namespace UniGetUI.PackageEngine.PackageClasses
     /// </summary>
     public static class InstallOptionsFactory
     {
+        public const string PackageIdPlaceholder = "%PACKAGE%";
+        public const string PackageNamePlaceholder = "%NAME%";
+
         private static class StoragePath
         {
             public static string Get(IPackageManager manager) =>
@@ -87,13 +90,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
                 );
                 instance = LoadForManager(package.Manager);
 
-                var legalizedId = CoreTools.MakeValidFileName(package.Id);
-                instance.CustomInstallLocation = instance.CustomInstallLocation.Replace(
-                    "%PACKAGE%",
-                    legalizedId
-                );
             }
 
+            instance.CustomInstallLocation = ExpandPackagePlaceholders(
+                instance.CustomInstallLocation,
+                package
+            );
             instance.CustomInstallLocationIsExplicit = locationIsExplicit;
 
             if (elevated is not null)
@@ -299,6 +301,24 @@ namespace UniGetUI.PackageEngine.PackageClasses
                     .Replace("\n", "");
             }
         }
+
+        public static string ExpandPackagePlaceholders(string location, IPackage package)
+        {
+            if (!location.Contains('%'))
+                return location;
+
+            string legalizedId = _legalizeFolderName(package.Id);
+            string legalizedName = _legalizeFolderName(package.Name);
+            if (legalizedName.Length == 0)
+                legalizedName = legalizedId;
+
+            return location
+                .Replace(PackageIdPlaceholder, legalizedId, StringComparison.OrdinalIgnoreCase)
+                .Replace(PackageNamePlaceholder, legalizedName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string _legalizeFolderName(string value) =>
+            CoreTools.MakeValidFileName(value.Replace("%", ""));
 
         private static string _expandEnvironmentVariables(string value)
         {

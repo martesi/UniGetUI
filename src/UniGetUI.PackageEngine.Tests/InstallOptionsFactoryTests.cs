@@ -220,6 +220,28 @@ public sealed class InstallOptionsFactoryTests : IDisposable
     }
 
     [Fact]
+    public void LoadApplicable_ExpandsPackageNamePlaceholder()
+    {
+        var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithName("Contoso Tool")
+            .Build();
+
+        InstallOptionsFactory.SaveForManager(
+            new InstallOptions { CustomInstallLocation = @"D:\Programs\%NAME%\%PACKAGE%" },
+            manager
+        );
+        InstallOptionsFactory.SaveForPackage(new InstallOptions(), package);
+
+        var resolved = InstallOptionsFactory.LoadApplicable(package);
+
+        Assert.Equal(@"D:\Programs\Contoso Tool\Contoso.Tool", resolved.CustomInstallLocation);
+        Assert.False(resolved.CustomInstallLocationIsExplicit);
+    }
+
+    [Fact]
     public void SaveAndLoadForPackage_RoundTripsPersistedOptions()
     {
         var manager = new PackageManagerBuilder().WithName($"Manager{Guid.NewGuid():N}").Build();
