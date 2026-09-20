@@ -1,0 +1,69 @@
+name: Classic feature parity validation
+on:
+  push:
+    branches: [classic-test-feature-parity]
+    paths:
+      - maintenance/workbench/**
+      - .github/workflows/classic-parity-build.yml
+permissions:
+  contents: write
+concurrency:
+  group: classic-feature-parity-workbench
+  cancel-in-progress: true
+jobs:
+  windows-source:
+    runs-on: windows-latest
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Assemble isolated source snapshot
+        shell: pwsh
+        run: python maintenance/workbench/assemble.py ../parity-src
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - uses: actions/cache@v5
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: classic-parity-nuget-${{ hashFiles('global.json') }}
+          restore-keys: classic-parity-nuget-
+      - name: Restore source
+        working-directory: ../parity-src
+        shell: pwsh
+        run: |
+          dotnet restore src/UniGetUI.Windows.slnx 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/restore.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build full Windows solution
+        working-directory: ../parity-src
+        shell: pwsh
+        run: |
+          dotnet build src/UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test reconstructed source
+        working-directory: ../parity-src
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          dotnet test src/UniGetUI.Windows.slnx --no-build --no-restore --verbosity minimal --nologo /p:Platform=x64 --logger trx --results-directory ../UniGetUI/parity-artifacts/tests 2>&1 | Tee-Object -FilePath ../UniGetUI/parity-artifacts/tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Summarize diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem parity-artifacts/*.log -ErrorAction SilentlyContinue | ForEach-Object {
+            Select-String -Path $_ -Pattern 'error |Failed |Passed!|Test Run|Build succeeded|Build FAILED' | ForEach-Object { $_.Line }
+          } | Sort-Object -Unique | Set-Content parity-artifacts/diagnostics.txt
+          Get-Content parity-artifacts/diagnostics.txt -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: classic-parity-validation-${{ github.run_id }}
+          path: parity-artifacts
+          retention-days: 7
