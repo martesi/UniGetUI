@@ -15,6 +15,15 @@ namespace UniGetUI.PackageEngine.Interfaces
         public string Name { get; }
         public string Id { get; }
         public string VersionString { get; }
+
+        /// <summary>
+        /// Whether <see cref="VersionString"/> names an actual version rather than text shown in
+        /// the UI in place of one. An imported package with no pinned version reports the
+        /// translated "Latest" there, which is not a version and is more than one word in several
+        /// languages, so it must never be substituted into a command line.
+        /// </summary>
+        public bool HasConcreteVersion { get; }
+        public bool InstalledVersionIsUnverified { get; }
         public CoreTools.Version NormalizedVersion { get; }
         public CoreTools.Version NormalizedNewVersion { get; }
         public IManagerSource Source { get; }
@@ -151,10 +160,12 @@ namespace UniGetUI.PackageEngine.Interfaces
         public Task<string?> GetInstallerFileName();
 
         /// <summary>
-        /// Checks whether a new update of this package is a minor update or not (0.0.x)
+        /// Checks whether a new update of this package is a minor update or not, according to
+        /// <paramref name="level"/> — the 1-based version-number position (2=Minor, 3=Patch, 4=Remainder)
+        /// from which a change is still considered minor.
         /// </summary>
-        /// <returns>False if the update is a major update or the update doesn't exist, true if it's a minor update</returns>
-        public bool IsUpdateMinor();
+        /// <returns>False if the most significant changed component is more significant than <paramref name="level"/> or the update doesn't exist, true otherwise</returns>
+        public bool IsUpdateMinor(int level = InstallOptions.DefaultSkipMinorLevel);
 
         /// <summary>
         /// Gets the applicable install options for this package

@@ -13,6 +13,7 @@ using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
 using UniGetUI.Interface.Telemetry;
 using UniGetUI.PackageEngine;
+using UniGetUI.PackageEngine.Classes.Manager.Classes;
 using UniGetUI.PackageEngine.Classes.Serializable;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
@@ -62,6 +63,7 @@ public class PackageBundlesPage : AbstractPackagesPage
         DisableFilterOnQueryChange = false,
         DisableReload = true,
         NoPackages_BackgroundText = CoreTools.Translate("Add packages or open an existing package bundle"),
+        NoPackages_ImagePath = "avares://UniGetUI/Assets/Images/Empty_inbox.png",
         NoPackages_SourcesText = CoreTools.Translate("Add packages to start"),
         NoPackages_SubtitleText_Base = CoreTools.Translate("The current bundle has no packages. Add some packages to get started"),
         MainSubtitle_StillLoading = CoreTools.Translate("Loading packages"),
@@ -127,10 +129,10 @@ public class PackageBundlesPage : AbstractPackagesPage
     // ─── Context menu ─────────────────────────────────────────────────────────
     protected override ContextMenu? GenerateContextMenu()
     {
-        _menuInstall = new MenuItem { Header = CoreTools.Translate("Install"), Icon = LoadMenuIcon("download") };
+        _menuInstall = new MenuItem { Header = ShortcutHeader(CoreTools.Translate("Install"), MainActionShortcut), Icon = LoadMenuIcon("download") };
         _menuInstall.Click += (_, _) => _ = ImportAndInstallPackage(SelectedItem is { } p ? [p] : []);
 
-        _menuInstallOptions = new MenuItem { Header = CoreTools.Translate("Install options"), Icon = LoadMenuIcon("options") };
+        _menuInstallOptions = new MenuItem { Header = ShortcutHeader(CoreTools.Translate("Install options"), OptionsShortcut), Icon = LoadMenuIcon("options") };
         _menuInstallOptions.Click += (_, _) =>
         {
             if (SelectedItem is ImportedPackage imported)
@@ -163,7 +165,7 @@ public class PackageBundlesPage : AbstractPackagesPage
             }
         };
 
-        _menuDetails = new MenuItem { Header = CoreTools.Translate("Package details"), Icon = LoadMenuIcon("info_round") };
+        _menuDetails = new MenuItem { Header = ShortcutHeader(CoreTools.Translate("Package details"), DetailsShortcut), Icon = LoadMenuIcon("info_round") };
         _menuDetails.Click += (_, _) => _ = ShowDetailsForPackage(SelectedItem);
 
         var menu = new ContextMenu();
@@ -216,7 +218,8 @@ public class PackageBundlesPage : AbstractPackagesPage
         if (package is null || package is InvalidImportedPackage) return;
         if (GetMainWindow() is not { } win) return;
 
-        var dialog = new PackageDetailsWindow(package, OperationType.None);
+        var dialog = new PackageDetailsWindow(
+            package, OperationType.None, TEL_InstallReferral.FROM_BUNDLE);
         await dialog.ShowDialog(win);
 
         if (dialog.ShouldProceedWithOperation)
@@ -271,6 +274,7 @@ public class PackageBundlesPage : AbstractPackagesPage
         {
             var opts = await InstallOptionsFactory.LoadApplicableAsync(
                 pkg, elevated: elevated, interactive: interactive, no_integrity: skiphash);
+            if (PackageOperation.HasPendingOperation(pkg, OperationType.Install)) continue;
             var op = new InstallPackageOperation(pkg, opts);
             op.OperationSucceeded += (_, _) => TelemetryHandler.InstallPackage(pkg, TEL_OP_RESULT.SUCCESS, TEL_InstallReferral.FROM_BUNDLE);
             op.OperationFailed += (_, _) => TelemetryHandler.InstallPackage(pkg, TEL_OP_RESULT.FAILED, TEL_InstallReferral.FROM_BUNDLE);
@@ -430,25 +434,15 @@ public class PackageBundlesPage : AbstractPackagesPage
                 ?? throw new JsonException("Could not parse JSON object")));
 
         var report = new BundleReport { IsEmpty = true };
-        bool allowCLI = SecureSettings.Get(SecureSettings.K.AllowCLIArguments)
-                            && SecureSettings.Get(SecureSettings.K.AllowImportingCLIArguments);
-        bool allowPrePost = SecureSettings.Get(SecureSettings.K.AllowPrePostOpCommand)
-                            && SecureSettings.Get(SecureSettings.K.AllowImportPrePostOpCommands);
+        bool allowCLI = BundleImportFilter.CliArgumentsAllowed();
+        bool allowPrePost = BundleImportFilter.PrePostCommandsAllowed();
 
         var packages = new List<IPackage>();
         foreach (var pkg in deserializedData.packages)
         {
-            var opts = pkg.InstallationOptions;
-            ReportList(ref report, pkg.Id, opts.CustomParameters_Install, "Custom install arguments", allowCLI);
-            ReportList(ref report, pkg.Id, opts.CustomParameters_Update, "Custom update arguments", allowCLI);
-            ReportList(ref report, pkg.Id, opts.CustomParameters_Uninstall, "Custom uninstall arguments", allowCLI);
-            opts.PreInstallCommand = ReportStr(ref report, pkg.Id, opts.PreInstallCommand, "Pre-install command", allowPrePost);
-            opts.PostInstallCommand = ReportStr(ref report, pkg.Id, opts.PostInstallCommand, "Post-install command", allowPrePost);
-            opts.PreUpdateCommand = ReportStr(ref report, pkg.Id, opts.PreUpdateCommand, "Pre-update command", allowPrePost);
-            opts.PostUpdateCommand = ReportStr(ref report, pkg.Id, opts.PostUpdateCommand, "Post-update command", allowPrePost);
-            opts.PreUninstallCommand = ReportStr(ref report, pkg.Id, opts.PreUninstallCommand, "Pre-uninstall command", allowPrePost);
-            opts.PostUninstallCommand = ReportStr(ref report, pkg.Id, opts.PostUninstallCommand, "Post-uninstall command", allowPrePost);
-            pkg.InstallationOptions = opts;
+            pkg.InstallationOptions = BundleImportFilter.Apply(
+                ref report, pkg.Id, pkg.InstallationOptions, allowCLI, allowPrePost,
+                ResolveManagerForImport(pkg.ManagerName)?.CommandLineIsShellInterpreted ?? false);
             packages.Add(DeserializePackage(pkg));
         }
 
@@ -460,15 +454,25 @@ public class PackageBundlesPage : AbstractPackagesPage
         return (deserializedData.export_version, report);
     }
 
+    private static IPackageManager? ResolveManagerForImport(string managerName)
+    {
+        foreach (var manager in PEInterface.Managers)
+        {
+            if (
+                manager.Id == managerName
+                || manager.Name == managerName
+                || manager.DisplayName == managerName
+            )
+                return manager;
+        }
+
+        return null;
+    }
+
     // ─── Deserialization helpers ──────────────────────────────────────────────
     public static IPackage DeserializePackage(SerializablePackage raw)
     {
-        IPackageManager? manager = null;
-        foreach (var m in PEInterface.Managers)
-        {
-            if (m.Id == raw.ManagerName || m.Name == raw.ManagerName || m.DisplayName == raw.ManagerName)
-            { manager = m; break; }
-        }
+        IPackageManager? manager = ResolveManagerForImport(raw.ManagerName);
 
         IManagerSource? source;
         if (manager?.Capabilities.SupportsCustomSources == true)
@@ -488,25 +492,6 @@ public class PackageBundlesPage : AbstractPackagesPage
 
     public static IPackage DeserializeIncompatiblePackage(SerializableIncompatiblePackage raw, IManagerSource source)
         => new InvalidImportedPackage(raw, source);
-
-    // ─── Security report helpers ──────────────────────────────────────────────
-    private static void ReportList(ref BundleReport report, string id, List<string> values, string label, bool allowed)
-    {
-        if (!values.Any(x => x.Any())) return;
-        if (!report.Contents.ContainsKey(id)) report.Contents[id] = [];
-        report.Contents[id].Add(new BundleReportEntry($"{label}: [{string.Join(", ", values)}]", allowed));
-        report.IsEmpty = false;
-        if (!allowed) values.Clear();
-    }
-
-    private static string ReportStr(ref BundleReport report, string id, string value, string label, bool allowed)
-    {
-        if (!value.Any()) return value;
-        if (!report.Contents.ContainsKey(id)) report.Contents[id] = [];
-        report.Contents[id].Add(new BundleReportEntry($"{label}: {value}", allowed));
-        report.IsEmpty = false;
-        return allowed ? value : "";
-    }
 
     // ─── Batch script export ──────────────────────────────────────────────────
     private async Task CreateBatchScriptAsync()
@@ -536,16 +521,42 @@ public class PackageBundlesPage : AbstractPackagesPage
             {
                 if (p is not ImportedPackage pkg) continue;
 
+                // Resolved before anything is appended: a package whose command line is refused
+                // must contribute nothing at all, or its imported pre-install command would still
+                // run from the script even though the install itself was dropped.
+                IReadOnlyList<string> param;
+                try
+                {
+                    var exported = pkg.installation_options.Copy();
+                    exported.CustomInstallLocation = InstallOptionsFactory.ExpandPackagePlaceholders(
+                        exported.CustomInstallLocation, pkg);
+                    param = pkg.Manager.OperationHelper.GetStandaloneParameters(
+                        pkg, exported, OperationType.Install);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Logger.Warn($"Skipping {pkg.Id} in the exported script: {ex.Message}");
+                    continue;
+                }
+
                 packages.Add(pkg.Name + " from " + pkg.Manager.DisplayName);
 
                 foreach (var process in pkg.installation_options.KillBeforeOperation)
+                {
+                    // Refused rather than stripped: dropping a character would silently retarget
+                    // the kill at whatever process the shortened name happens to match.
+                    if (!CoreTools.IsSafeProcessImageName(process))
+                    {
+                        Logger.Warn(
+                            $"Skipping the process \"{process}\" of {pkg.Id} in the exported script: it is not a usable process name.");
+                        continue;
+                    }
                     commands.Add($"taskkill /im \"{process}\"" + (forceKill ? " /f" : ""));
+                }
 
                 if (pkg.installation_options.PreInstallCommand != "")
                     commands.Add(pkg.installation_options.PreInstallCommand);
 
-                var param = pkg.Manager.OperationHelper.GetParameters(
-                    pkg, pkg.installation_options, OperationType.Install);
                 commands.Add($"{pkg.Manager.Properties.ExecutableFriendlyName} {string.Join(' ', param)}");
 
                 if (pkg.installation_options.PostInstallCommand != "")
@@ -601,7 +612,7 @@ public class PackageBundlesPage : AbstractPackagesPage
             if ($args[0] -ne "/DisablePausePrompts") { pause }
             Write-Host ""
             Write-Host "This script will attempt to install the following packages:"
-            {{string.Join('\n', names.Select(x => $"Write-Host \"  - {x}\""))}}
+            {{string.Join('\n', names.Select(x => $"Write-Host {CoreTools.EscapePowerShellSingleQuoted($"  - {x}")}"))}}
             Write-Host ""
             if ($args[0] -ne "/DisablePausePrompts") { pause }
             Clear-Host

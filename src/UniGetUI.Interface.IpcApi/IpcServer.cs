@@ -171,10 +171,42 @@ namespace UniGetUI.Interface
                 IpcHttpRoutes.Path("/desktop-shortcuts/reset-all"),
                 V3_ResetDesktopShortcuts
             );
+            endpoints.MapGet(
+                IpcHttpRoutes.Path("/start-menu-shortcuts"),
+                V3_ListStartMenuShortcuts
+            );
+            endpoints.MapPost(
+                IpcHttpRoutes.Path("/start-menu-shortcuts/set"),
+                V3_SetStartMenuShortcut
+            );
+            endpoints.MapPost(
+                IpcHttpRoutes.Path("/start-menu-shortcuts/reset"),
+                V3_ResetStartMenuShortcut
+            );
+            endpoints.MapPost(
+                IpcHttpRoutes.Path("/start-menu-shortcuts/reset-all"),
+                V3_ResetStartMenuShortcuts
+            );
+            endpoints.MapGet(
+                IpcHttpRoutes.Path("/start-menu-folders"),
+                V3_ListStartMenuFolders
+            );
+            endpoints.MapPost(
+                IpcHttpRoutes.Path("/start-menu-folders/set"),
+                V3_SetStartMenuFolder
+            );
+            endpoints.MapPost(
+                IpcHttpRoutes.Path("/start-menu-folders/remove"),
+                V3_RemoveStartMenuFolder
+            );
             endpoints.MapGet(IpcHttpRoutes.Path("/logs/app"), V3_GetAppLog);
             endpoints.MapGet(
                 IpcHttpRoutes.Path("/logs/history"),
                 V3_GetOperationHistory
+            );
+            endpoints.MapGet(
+                IpcHttpRoutes.Path("/logs/history/detail"),
+                V3_GetOperationHistoryDetail
             );
             endpoints.MapGet(IpcHttpRoutes.Path("/logs/manager"), V3_GetManagerLog);
             endpoints.MapGet(IpcHttpRoutes.Path("/backups/status"), V3_GetBackupStatus);
@@ -1029,6 +1061,163 @@ namespace UniGetUI.Interface
             );
         }
 
+        private async Task V3_ListStartMenuShortcuts(HttpContext context)
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            await context.Response.WriteAsJsonAsync(
+                IpcStartMenuShortcutsApi.ListShortcuts(),
+                IpcJson.Options
+            );
+        }
+
+        private async Task V3_SetStartMenuShortcut(HttpContext context)
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            try
+            {
+                await context.Response.WriteAsJsonAsync(
+                    IpcStartMenuShortcutsApi.SetShortcut(
+                        new IpcStartMenuShortcutRequest
+                        {
+                            Path = GetRequiredQueryValue(context, "path"),
+                            Status = GetOptionalQueryValue(context.Request, "status"),
+                        }
+                    ),
+                    IpcJson.Options
+                );
+            }
+            catch (InvalidOperationException ex)
+            {
+                context.Response.StatusCode = 400;
+                await context.Response.WriteAsync(ex.Message);
+            }
+        }
+
+        private async Task V3_ResetStartMenuShortcut(HttpContext context)
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            try
+            {
+                await context.Response.WriteAsJsonAsync(
+                    IpcStartMenuShortcutsApi.ResetShortcut(
+                        new IpcStartMenuShortcutRequest
+                        {
+                            Path = GetRequiredQueryValue(context, "path"),
+                        }
+                    ),
+                    IpcJson.Options
+                );
+            }
+            catch (InvalidOperationException ex)
+            {
+                context.Response.StatusCode = 400;
+                await context.Response.WriteAsync(ex.Message);
+            }
+        }
+
+        private async Task V3_ResetStartMenuShortcuts(HttpContext context)
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            await context.Response.WriteAsJsonAsync(
+                IpcStartMenuShortcutsApi.ResetAll(),
+                IpcJson.Options
+            );
+        }
+
+        private async Task V3_ListStartMenuFolders(HttpContext context)
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            await context.Response.WriteAsJsonAsync(
+                IpcStartMenuShortcutsApi.ListFolders(),
+                IpcJson.Options
+            );
+        }
+
+        private async Task V3_SetStartMenuFolder(HttpContext context)
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            try
+            {
+                await context.Response.WriteAsJsonAsync(
+                    IpcStartMenuShortcutsApi.SetFolder(
+                        new IpcStartMenuFolderRequest
+                        {
+                            PackageId = GetRequiredQueryValue(context, "package"),
+                            Folder = GetOptionalQueryValue(context.Request, "folder"),
+                            RelocateExisting = string.Equals(
+                                GetOptionalQueryValue(context.Request, "relocate-existing"),
+                                "true",
+                                StringComparison.OrdinalIgnoreCase
+                            ),
+                        }
+                    ),
+                    IpcJson.Options
+                );
+            }
+            catch (InvalidOperationException ex)
+            {
+                context.Response.StatusCode = 400;
+                await context.Response.WriteAsync(ex.Message);
+            }
+        }
+
+        private async Task V3_RemoveStartMenuFolder(HttpContext context)
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            try
+            {
+                await context.Response.WriteAsJsonAsync(
+                    IpcStartMenuShortcutsApi.RemoveFolder(
+                        new IpcStartMenuFolderRequest
+                        {
+                            PackageId = GetRequiredQueryValue(context, "package"),
+                        }
+                    ),
+                    IpcJson.Options
+                );
+            }
+            catch (InvalidOperationException ex)
+            {
+                context.Response.StatusCode = 400;
+                await context.Response.WriteAsync(ex.Message);
+            }
+        }
+
         private async Task V3_GetAppLog(HttpContext context)
         {
             if (!AuthenticateToken(context.Request.Query["token"]))
@@ -1058,6 +1247,26 @@ namespace UniGetUI.Interface
                 IpcLogsApi.ListOperationHistory(),
                 IpcJson.Options
             );
+        }
+
+        private async Task V3_GetOperationHistoryDetail(HttpContext context)
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            string id = context.Request.Query["id"].ToString();
+            var details = IpcLogsApi.GetOperationHistoryEntry(id);
+            if (details is null)
+            {
+                context.Response.StatusCode = 404;
+                await context.Response.WriteAsync($"No history entry with id \"{id}\" was found.");
+                return;
+            }
+
+            await context.Response.WriteAsJsonAsync(details, IpcJson.Options);
         }
 
         private async Task V3_GetManagerLog(HttpContext context)
