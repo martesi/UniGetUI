@@ -9,6 +9,7 @@ using CommunityToolkit.Mvvm.Input;
 using UniGetUI.Avalonia.Infrastructure;
 using UniGetUI.Avalonia.Views;
 using UniGetUI.Avalonia.Views.Pages;
+using UniGetUI.Avalonia.Views.Pages.SettingsPages;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
@@ -17,9 +18,10 @@ using CoreSettings = UniGetUI.Core.SettingsEngine.Settings;
 
 namespace UniGetUI.Avalonia.ViewModels.Pages.SettingsPages;
 
-public partial class BackupViewModel : ViewModelBase
+public partial class BackupViewModel : ViewModelBase, IDisposable
 {
     public event EventHandler? RestartRequired;
+    public event EventHandler<Type>? NavigationRequested;
 
     public IReadOnlyList<string> InfoLines { get; } =
     [
@@ -30,8 +32,22 @@ public partial class BackupViewModel : ViewModelBase
     ];
 
     /* ── Local backup ── */
-    [ObservableProperty] private bool _isLocalBackupEnabled;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(IsBackupRetentionAvailable))] private bool _isLocalBackupEnabled;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(IsBackupRetentionAvailable))] private bool _isBackupTimestampingEnabled;
+    [ObservableProperty] private bool _isCustomBackupCountSelected;
     [ObservableProperty] private string _backupDirectoryLabel = "";
+
+    public bool IsBackupRetentionAvailable => IsLocalBackupEnabled && IsBackupTimestampingEnabled;
+
+    public IReadOnlyList<(string Name, string Value)> MaxBackupCountItems { get; } =
+    [
+        (CoreTools.Translate("Keep all backups"),              "0"),
+        (CoreTools.Translate("Keep the last {0} backups", 5),  "5"),
+        (CoreTools.Translate("Keep the last {0} backups", 10), "10"),
+        (CoreTools.Translate("Keep the last {0} backups", 25), "25"),
+        (CoreTools.Translate("Keep the last {0} backups", 50), "50"),
+        (CoreTools.Translate("Custom..."),                     "custom"),
+    ];
 
     /* ── Cloud backup ── */
     [ObservableProperty] private bool _isLoggedIn;
@@ -43,28 +59,59 @@ public partial class BackupViewModel : ViewModelBase
     [ObservableProperty] private IImage? _gitHubAvatarBitmap;
 
     private readonly GitHubAuthService _authService = new();
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
+    private readonly CancellationToken _lifetimeToken;
     private bool _isLoading;
+    private int _isDisposed;
+    private long _statusGeneration;
 
     public BackupViewModel()
     {
+        _lifetimeToken = _lifetimeCancellation.Token;
         _isLocalBackupEnabled = CoreSettings.Get(CoreSettings.K.EnablePackageBackup_LOCAL);
+        _isBackupTimestampingEnabled = CoreSettings.Get(CoreSettings.K.EnableBackupTimestamping);
         RefreshDirectoryLabel();
 
-        GitHubAuthService.AuthStatusChanged += (_, _) => _ = UpdateGitHubLoginStatus();
+        GitHubAuthService.AuthStatusChanged += OnAuthStatusChanged;
         _ = UpdateGitHubLoginStatus();
+    }
+
+    private bool IsDisposed => Volatile.Read(ref _isDisposed) != 0;
+
+    private bool CanApplyStatus(long generation) =>
+        !IsDisposed
+        && !_lifetimeToken.IsCancellationRequested
+        && generation == Volatile.Read(ref _statusGeneration);
+
+    private void OnAuthStatusChanged(object? sender, EventArgs e)
+    {
+        if (!IsDisposed)
+            _ = UpdateGitHubLoginStatus();
     }
 
     /* ─────────────── Local backup ─────────────── */
 
     [RelayCommand]
+    private void NavigateToScheduler() => NavigationRequested?.Invoke(this, typeof(Scheduler));
+
+    [RelayCommand]
     private void EnableLocalBackupChanged()
     {
+        if (IsDisposed) return;
         IsLocalBackupEnabled = CoreSettings.Get(CoreSettings.K.EnablePackageBackup_LOCAL);
         RestartRequired?.Invoke(this, EventArgs.Empty);
     }
 
+    [RelayCommand]
+    private void EnableBackupTimestampingChanged()
+    {
+        if (IsDisposed) return;
+        IsBackupTimestampingEnabled = CoreSettings.Get(CoreSettings.K.EnableBackupTimestamping);
+    }
+
     private void RefreshDirectoryLabel()
     {
+        if (IsDisposed) return;
         string dir = CoreSettings.GetValue(CoreSettings.K.ChangeBackupOutputDirectory);
         BackupDirectoryLabel = string.IsNullOrEmpty(dir) ? CoreData.UniGetUI_DefaultBackupDirectory : dir;
     }
@@ -72,12 +119,12 @@ public partial class BackupViewModel : ViewModelBase
     [RelayCommand]
     private async Task PickBackupDirectory(Visual? visual)
     {
-        if (visual is null || TopLevel.GetTopLevel(visual) is not { } topLevel) return;
+        if (IsDisposed || visual is null || TopLevel.GetTopLevel(visual) is not { } topLevel) return;
         var folders = await topLevel.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
             AllowMultiple = false,
         });
-        if (folders is not [{ } folder]) return;
+        if (IsDisposed || folders is not [{ } folder]) return;
         var path = folder.TryGetLocalPath();
         if (path is null) return;
         CoreSettings.SetValue(CoreSettings.K.ChangeBackupOutputDirectory, path);
@@ -87,7 +134,7 @@ public partial class BackupViewModel : ViewModelBase
     [RelayCommand]
     private static Task DoLocalBackup(Visual? _) => DoLocalBackupStatic();
 
-    public static async Task DoLocalBackupStatic()
+    public static async Task<bool> DoLocalBackupStatic()
     {
         try
         {
@@ -95,33 +142,16 @@ public partial class BackupViewModel : ViewModelBase
                 ?? [];
             string backupContents = await PackageBundlesPage.CreateBundle(packages);
 
-            string dirName = CoreSettings.GetValue(CoreSettings.K.ChangeBackupOutputDirectory);
-            if (string.IsNullOrEmpty(dirName))
-                dirName = CoreData.UniGetUI_DefaultBackupDirectory;
-
-            if (!Directory.Exists(dirName))
-                Directory.CreateDirectory(dirName);
-
-            string fileName = CoreSettings.GetValue(CoreSettings.K.ChangeBackupFileName);
-            if (string.IsNullOrEmpty(fileName))
-                fileName = CoreTools.Translate(
-                    "{pcName} installed packages",
-                    new Dictionary<string, object?> { { "pcName", Environment.MachineName } }
-                );
-
-            if (CoreSettings.Get(CoreSettings.K.EnableBackupTimestamping))
-                fileName += " " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss");
-
-            fileName += ".ubundle";
-
-            string filePath = Path.Combine(dirName, fileName);
-            await File.WriteAllTextAsync(filePath, backupContents);
+            string filePath = await LocalBackupManager.SaveBackupAsync(backupContents);
             Logger.ImportantInfo("Local backup saved to " + filePath);
+            await Task.Run(LocalBackupManager.ApplyRetentionLimit);
+            return true;
         }
         catch (Exception ex)
         {
             Logger.Error("An error occurred while performing a LOCAL backup:");
             Logger.Error(ex);
+            return false;
         }
     }
 
@@ -129,57 +159,92 @@ public partial class BackupViewModel : ViewModelBase
 
     private async Task UpdateGitHubLoginStatus()
     {
+        if (IsDisposed) return;
+
+        long generation = Interlocked.Increment(ref _statusGeneration);
         if (GitHubAuthService.IsAuthenticated())
         {
-            try { await GenerateLogoutState(); }
+            try { await GenerateLogoutState(generation); }
+            catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+            {
+                return;
+            }
             catch (Exception ex)
             {
-                Logger.Error("An error occurred while attempting to generate settings login UI:");
-                Logger.Error(ex);
-                GenerateLoginState();
+                if (!IsDisposed)
+                {
+                    Logger.Error("An error occurred while attempting to generate settings login UI:");
+                    Logger.Error(ex);
+                }
+                GenerateLoginState(generation);
             }
         }
         else
         {
-            GenerateLoginState();
+            GenerateLoginState(generation);
         }
-        UpdateCloudControlsEnabled();
+
+        if (CanApplyStatus(generation))
+            UpdateCloudControlsEnabled();
     }
 
-    private void GenerateLoginState()
+    private void GenerateLoginState(long generation)
     {
+        if (!CanApplyStatus(generation)) return;
+
         IsLoggedIn = false;
         GitHubUserTitle = CoreTools.Translate("Current status: Not logged in");
         GitHubUserSubtitle = CoreTools.Translate("Log in to enable cloud backup");
-        GitHubAvatarBitmap = null;
+        SetGitHubAvatarBitmap(null);
     }
 
-    private async Task GenerateLogoutState()
+    private async Task GenerateLogoutState(long generation)
     {
-        var client = GitHubAuthService.CreateGitHubClient()
+        using var client = GitHubAuthService.CreateGitHubClient()
             ?? throw new InvalidOperationException("Authenticated but cannot create GitHub client.");
-        var user = await client.User.Current();
+        var user = await client.GetCurrentUserAsync();
+        if (!CanApplyStatus(generation)) return;
 
         IsLoggedIn = true;
-        GitHubUserTitle = CoreTools.Translate("You are logged in as {0} (@{1})", user.Name, user.Login);
+        string displayName = string.IsNullOrWhiteSpace(user.Name) ? user.Login : user.Name;
+        GitHubUserTitle = CoreTools.Translate("You are logged in as {0} (@{1})", displayName, user.Login);
         GitHubUserSubtitle = CoreTools.Translate("Nice! Backups will be uploaded to a private gist on your account");
 
         try
         {
             using var http = new HttpClient(CoreTools.GenericHttpClientParameters);
-            var bytes = await http.GetByteArrayAsync(user.AvatarUrl);
-            using var ms = new MemoryStream(bytes);
-            GitHubAvatarBitmap = new Bitmap(ms);
+            if (!string.IsNullOrWhiteSpace(user.AvatarUrl))
+            {
+                var bytes = await http.GetByteArrayAsync(user.AvatarUrl, _lifetimeToken);
+                if (!CanApplyStatus(generation)) return;
+
+                using var ms = new MemoryStream(bytes);
+                var bitmap = new Bitmap(ms);
+                if (CanApplyStatus(generation))
+                    SetGitHubAvatarBitmap(bitmap);
+                else
+                    bitmap.Dispose();
+            }
+        }
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
-            Logger.Error("Failed to load GitHub avatar:");
-            Logger.Error(ex);
+            if (!IsDisposed)
+            {
+                Logger.Error("Failed to load GitHub avatar:");
+                Logger.Error(ex);
+            }
         }
     }
 
+    private void SetGitHubAvatarBitmap(IImage? bitmap) => GitHubAvatarBitmap = bitmap;
+
     private void UpdateCloudControlsEnabled()
     {
+        if (IsDisposed) return;
+
         IsLoginButtonEnabled = !_isLoading;
         IsCloudControlsEnabled = IsLoggedIn && !_isLoading;
         IsCloudBackupNowEnabled = IsLoggedIn && !_isLoading
@@ -189,6 +254,7 @@ public partial class BackupViewModel : ViewModelBase
     [RelayCommand]
     private void EnableCloudBackupChanged()
     {
+        if (IsDisposed) return;
         RestartRequired?.Invoke(this, EventArgs.Empty);
         UpdateCloudControlsEnabled();
     }
@@ -196,13 +262,15 @@ public partial class BackupViewModel : ViewModelBase
     [RelayCommand]
     private async Task Login()
     {
+        if (IsDisposed) return;
         _isLoading = true;
         UpdateCloudControlsEnabled();
 
         bool success = await _authService.SignInAsync();
-        if (!success)
+        if (!success && !IsDisposed)
             Logger.Error("An error occurred while logging in to GitHub.");
 
+        if (IsDisposed) return;
         _isLoading = false;
         UpdateCloudControlsEnabled();
     }
@@ -210,6 +278,7 @@ public partial class BackupViewModel : ViewModelBase
     [RelayCommand]
     private void Logout()
     {
+        if (IsDisposed) return;
         _isLoading = true;
         UpdateCloudControlsEnabled();
 
@@ -222,6 +291,7 @@ public partial class BackupViewModel : ViewModelBase
     [RelayCommand]
     private async Task DoCloudBackup()
     {
+        if (IsDisposed) return;
         _isLoading = true;
         UpdateCloudControlsEnabled();
         try { await DoCloudBackupStatic(); }
@@ -232,7 +302,7 @@ public partial class BackupViewModel : ViewModelBase
         }
     }
 
-    public static async Task DoCloudBackupStatic()
+    public static async Task<bool> DoCloudBackupStatic()
     {
         try
         {
@@ -240,11 +310,13 @@ public partial class BackupViewModel : ViewModelBase
             string bundle = await PackageBundlesPage.CreateBundle(packages);
             await GitHubCloudBackupService.UploadPackageBundleAsync(bundle);
             Logger.ImportantInfo("Cloud backup completed successfully.");
+            return true;
         }
         catch (Exception ex)
         {
             Logger.Error("An error occurred while performing a CLOUD backup:");
             Logger.Error(ex);
+            return false;
         }
     }
 
@@ -287,13 +359,11 @@ public partial class BackupViewModel : ViewModelBase
             Width = 360,
         };
 
-        var dialog = new Window
+        var dialog = new UniGetUI.Avalonia.Views.DialogPages.ImmersiveDialog
         {
             Title = CoreTools.Translate("Select backup"),
-            Width = 440,
-            Height = 160,
-            CanResize = false,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            MaxWidth = 440,
+            MaxHeight = 160,
             Content = new StackPanel
             {
                 Margin = new Thickness(20),
@@ -333,5 +403,15 @@ public partial class BackupViewModel : ViewModelBase
     private static void MoreDetails()
     {
         CoreTools.Launch("https://devolutions.net/unigetui");
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _isDisposed, 1) != 0) return;
+
+        GitHubAuthService.AuthStatusChanged -= OnAuthStatusChanged;
+        // In-flight HTTP work can still observe this token. Cancelling is sufficient;
+        // disposing the source here could race with that work.
+        _lifetimeCancellation.Cancel();
     }
 }
