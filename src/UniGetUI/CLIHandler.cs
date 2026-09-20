@@ -49,66 +49,66 @@ public static class CLIHandler
 
     public static int ImportSettings()
     {
-        return ImportSettings(Environment.GetCommandLineArgs());
+        return ImportSettings(CoreData.GetProcessArguments());
     }
 
     internal static int ImportSettings(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.ImportSettings(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
     public static int ExportSettings()
     {
-        return ExportSettings(Environment.GetCommandLineArgs());
+        return ExportSettings(CoreData.GetProcessArguments());
     }
 
     internal static int ExportSettings(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.ExportSettings(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
     public static int EnableSetting()
     {
-        return EnableSetting(Environment.GetCommandLineArgs());
+        return EnableSetting(CoreData.GetProcessArguments());
     }
 
     internal static int EnableSetting(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.EnableSetting(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
     public static int DisableSetting()
     {
-        return DisableSetting(Environment.GetCommandLineArgs());
+        return DisableSetting(CoreData.GetProcessArguments());
     }
 
     internal static int DisableSetting(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.DisableSetting(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
     public static int SetSettingsValue()
     {
-        return SetSettingsValue(Environment.GetCommandLineArgs());
+        return SetSettingsValue(CoreData.GetProcessArguments());
     }
 
     internal static int SetSettingsValue(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.SetSettingValue(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
@@ -191,59 +191,59 @@ public static class CLIHandler
 
     public static int EnableSecureSetting()
     {
-        return EnableSecureSetting(Environment.GetCommandLineArgs());
+        return EnableSecureSetting(CoreData.GetProcessArguments());
     }
 
     internal static int EnableSecureSetting(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.EnableSecureSetting(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
     public static int DisableSecureSetting()
     {
-        return DisableSecureSetting(Environment.GetCommandLineArgs());
+        return DisableSecureSetting(CoreData.GetProcessArguments());
     }
 
     internal static int DisableSecureSetting(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.DisableSecureSetting(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
     public static int EnableSecureSettingForUser()
     {
-        return EnableSecureSettingForUser(Environment.GetCommandLineArgs());
+        return EnableSecureSettingForUser(CoreData.GetProcessArguments());
     }
 
     internal static int EnableSecureSettingForUser(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.EnableSecureSettingForUser(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
     public static int DisableSecureSettingForUser()
     {
-        return DisableSecureSettingForUser(Environment.GetCommandLineArgs());
+        return DisableSecureSettingForUser(CoreData.GetProcessArguments());
     }
 
     internal static int DisableSecureSettingForUser(IReadOnlyList<string> args)
     {
         return SharedPreUiCommandDispatcher.DisableSecureSettingForUser(
             args,
-            SharedPreUiCommandDispatcher.WinUiExitCodes
+            SharedPreUiCommandDispatcher.WindowsCliExitCodes
         );
     }
 
     public static int Automation()
     {
-        return Automation(Environment.GetCommandLineArgs());
+        return Automation(CoreData.GetProcessArguments());
     }
 
     internal static int Automation(IReadOnlyList<string> args)

@@ -27,6 +27,7 @@ namespace UniGetUI.Pages.SettingsPages
         public SettingsHomepage()
         {
             this.InitializeComponent();
+            FeatureSettings.Attach(this, Scroller, page => NavigationRequested?.Invoke(this, page));
         }
 
         public void Administrator(object s, RoutedEventArgs e) =>

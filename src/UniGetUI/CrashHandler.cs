@@ -90,7 +90,7 @@ public static class CrashHandler
     {
         Debugger.Break();
 
-        if (!Environment.GetCommandLineArgs().Contains(CLIHandler.NO_CORRUPT_DIALOG))
+        if (!CoreData.GetProcessArguments().Contains(CLIHandler.NO_CORRUPT_DIALOG))
         {
             Exception? fileEx = e;
             while (fileEx is not null)

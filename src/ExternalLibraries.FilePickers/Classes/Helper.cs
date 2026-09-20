@@ -7,6 +7,25 @@ namespace ExternalLibraries.Pickers.Classes;
 
 internal static class Helper
 {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    private static extern int SHCreateItemFromParsingName(string path, IntPtr bindContext, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+
+    private static void SetInitialDirectory(IFileDialog dialog, string? directory)
+    {
+        if (string.IsNullOrWhiteSpace(directory) || !System.IO.Directory.Exists(directory)) return;
+        Guid iid = typeof(IShellItem).GUID;
+        IShellItem? folder = null;
+        try
+        {
+            if (SHCreateItemFromParsingName(directory, IntPtr.Zero, ref iid, out folder) >= 0)
+                dialog.SetFolder(folder);
+        }
+        finally
+        {
+            if (folder is not null) Marshal.ReleaseComObject(folder);
+        }
+    }
+
     /// <summary>
     /// Shows FileOpenDialog.
     /// </summary>
@@ -14,13 +33,14 @@ internal static class Helper
     /// <param name="fos">File open dialog options.</param>
     /// <param name="typeFilters">List of extensions applied on dialog.</param>
     /// <returns>Path to selected file, folder or empty string.</returns>
-    internal static string ShowOpen(nint windowHandle, FOS fos, List<string>? typeFilters = null)
+    internal static string ShowOpen(nint windowHandle, FOS fos, List<string>? typeFilters = null, string? initialDirectory = null)
     {
         FileOpenDialog dialog = new();
         IShellItem item = null!;
         try
         {
             dialog.SetOptions(fos);
+            SetInitialDirectory(dialog, initialDirectory);
 
             if (typeFilters is not null)
             {
@@ -55,7 +75,8 @@ internal static class Helper
         nint windowHandle,
         FOS fos,
         List<string>? typeFilters = null,
-        string name = ""
+        string name = "",
+        string? initialDirectory = null
     )
     {
         FileSaveDialog dialog = new();
@@ -63,6 +84,7 @@ internal static class Helper
         try
         {
             dialog.SetOptions(fos);
+            SetInitialDirectory(dialog, initialDirectory);
 
             if (typeFilters is not null)
             {
@@ -91,7 +113,7 @@ internal static class Helper
             if (fileExtension.Length > 0 && fileExtension[0] == '*')
                 fileExtension = fileExtension.TrimStart('*');
 
-            return path.Contains(fileExtension) ? path : path + fileExtension;
+            return path.EndsWith(fileExtension, StringComparison.OrdinalIgnoreCase) ? path : path + fileExtension;
         }
         finally
         {

@@ -249,21 +249,8 @@ public static partial class DialogHelper
         await ShowDialogAsync(dialog);
     }
 
-    public static async Task ManageDesktopShortcuts(IReadOnlyList<string>? NewShortucts = null)
-    {
-        ContentDialog dialog = DialogFactory.Create_AsWindow(true);
-
-        DesktopShortcutsManager DesktopShortcutsPage = new();
-        DesktopShortcutsPage.LoadShortcuts(
-            NewShortucts ?? DesktopShortcutsDatabase.GetAllShortcuts()
-        );
-        DesktopShortcutsPage.Close += (_, _) => dialog.Hide();
-
-        dialog.Title = CoreTools.Translate("Automatic desktop shortcut remover");
-        dialog.Content = DesktopShortcutsPage;
-
-        await ShowDialogAsync(dialog);
-    }
+    public static Task ManageDesktopShortcuts(IReadOnlyList<string>? NewShortucts = null)
+        => ManageShortcuts(UniGetUI.Models.ShortcutDialogScope.Desktop, NewShortucts);
 
     public static async Task HandleNewDesktopShortcuts()
     {
