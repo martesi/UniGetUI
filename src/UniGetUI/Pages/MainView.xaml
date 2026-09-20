@@ -143,6 +143,7 @@
           <Grid
             Padding="8"
             Background="{x:Bind Background, Mode=OneWay}"
+            Tapped="{x:Bind CardTapped}"
             ColumnSpacing="0"
             RowSpacing="6"
           >

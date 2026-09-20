@@ -17,6 +17,7 @@ internal static class WinUiHeadlessHost
                 Task.Run(PEInterface.LoadManagers),
                 MainApp.LoadGSudoAsync()
             );
+            UniGetUI.Services.MaintenanceScheduler.StartHeadless();
         });
     }
 }
