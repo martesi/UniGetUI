@@ -1,3 +1,4 @@
+using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using CommunityToolkit.WinUI.Helpers;
@@ -385,6 +386,8 @@ namespace UniGetUI
 
                 // Load essential components
                 await Task.WhenAll(iniTasks);
+                AutoUpdatesMigration.RunOnce(PEInterface.Managers);
+                MaintenanceScheduler.Start();
 
                 // Load non-essential components
                 TelemetryHandler.Configure(

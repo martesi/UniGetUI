@@ -79,6 +79,7 @@ namespace UniGetUI.Pages.SettingsPages
 
             BackButton.Visibility = Visibility.Visible;
             SettingsTitle.Text = page.ShortTitle;
+            if (e.Content is Page nativePage) SettingsSearch.Highlight(nativePage);
             page.NavigationRequested += Page_NavigationRequested;
             page.RestartRequired += Page_RestartRequired;
             if (page is PackageManagerPage pmpage)
