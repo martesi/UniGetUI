@@ -99,34 +99,29 @@ start = text.index('                      <widgets:TranslatedTextBlock\n        
 end = text.index('                    </Grid>', start) + len('                    </Grid>')
 text = text[:end] + '''
                     <widgets:TranslatedTextBlock Text="Install, update and uninstall arguments are independent. Copy them explicitly when they should match." TextWrapping="Wrap" />
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                      <Button Tag="update" Click="CopyInstallArguments"><widgets:TranslatedTextBlock Text="Copy install arguments to update" /></Button>
-                      <Button Tag="uninstall" Click="CopyInstallArguments"><widgets:TranslatedTextBlock Text="Copy install arguments to uninstall" /></Button>
-                    </StackPanel>
+                    <HyperlinkButton Click="CopyInstallArguments" Padding="0" HorizontalAlignment="Left">
+                      <widgets:TranslatedTextBlock Text="Copy install arguments to update and uninstall" />
+                    </HyperlinkButton>
 ''' + text[end:]
 anchor = '                Name="CommandBox"'
 start = text.index(anchor)
 end = text.index('          </StackPanel>', start)
-text = text[:end] + '''            <StackPanel Orientation="Horizontal" Spacing="8">
-              <Button Click="CopyCommand"><widgets:TranslatedTextBlock Text="Copy command" /></Button>
-              <Button Click="OpenManualConsole"><widgets:TranslatedTextBlock Text="Open in a terminal" /></Button>
-            </StackPanel>
+text = text[:end] + '''            <Button Click="OpenManualConsole" HorizontalAlignment="Left">
+              <widgets:TranslatedTextBlock Text="Open in a terminal" />
+            </Button>
 ''' + text[end:]
 write(optionsXaml, text)
 options = ui / 'Pages/DialogPages/InstallOptions_Package.xaml.cs'
 replace(options, '        private readonly OperationType Operation;', '''        private void CopyInstallArguments(object sender, RoutedEventArgs args)
         {
-            if ((sender as FrameworkElement)?.Tag as string == "update") CustomParameters2.Text = CustomParameters1.Text;
-            else CustomParameters3.Text = CustomParameters1.Text;
+            CustomParameters2.Text = CustomParameters1.Text;
+            CustomParameters3.Text = CustomParameters1.Text;
         }
-
-        private void CopyCommand(object sender, RoutedEventArgs args)
-            => ExternalLibraries.Clipboard.WindowsClipboard.SetText(CommandBox.Text);
 
         private async void OpenManualConsole(object sender, RoutedEventArgs args)
         {
-            var kind = ProfileComboBox.SelectedIndex switch { 1 => OperationType.Update, 2 => OperationType.Uninstall, _ => OperationType.Install };
-            await UniGetUI.Services.ManualInstallHelper.LaunchManualAsync(Package, kind);
+            if (!string.IsNullOrWhiteSpace(CommandBox.Text))
+                await UniGetUI.Services.ManualInstallHelper.LaunchManualAsync(CommandBox.Text);
         }
 
         private readonly OperationType Operation;''')
