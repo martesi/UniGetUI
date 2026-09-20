@@ -349,19 +349,31 @@ namespace UniGetUI.PackageEngine.PackageClasses
             }
         }
 
-        public virtual bool IsUpdateMinor()
+        private int HighestChangedVersionComponent()
         {
-            if (!IsUpgradable)
-                return false;
             if (
                 NormalizedVersion == CoreTools.Version.Null
                 || NormalizedNewVersion == CoreTools.Version.Null
             )
+                return 0;
+            if (NormalizedVersion.Major != NormalizedNewVersion.Major)
+                return 1;
+            if (NormalizedVersion.Minor != NormalizedNewVersion.Minor)
+                return 2;
+            if (NormalizedVersion.Patch != NormalizedNewVersion.Patch)
+                return 3;
+            if (NormalizedVersion.Remainder != NormalizedNewVersion.Remainder)
+                return 4;
+            return 0;
+        }
+
+        public virtual bool IsUpdateMinor(int level = InstallOptions.DefaultSkipMinorLevel)
+        {
+            if (!IsUpgradable)
                 return false;
 
-            return NormalizedVersion.Major == NormalizedNewVersion.Major
-                && NormalizedVersion.Minor == NormalizedNewVersion.Minor
-                && NormalizedVersion != NormalizedNewVersion;
+            int changed = HighestChangedVersionComponent();
+            return changed >= level;
         }
 
         public virtual Task<InstallOptions> GetInstallOptions() =>
