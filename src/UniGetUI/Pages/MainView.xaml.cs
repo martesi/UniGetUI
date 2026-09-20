@@ -67,6 +67,7 @@ namespace UniGetUI.Interface
         public MainView(AutoSuggestBox mainTextBlock)
         {
             InitializeComponent();
+            UniGetUI.Pages.SettingsPages.FeatureSettings.ApplyNavigationMode(NavView);
             MainTextBlock = mainTextBlock;
             OperationList.ItemContainerTransitions = null;
             OperationList.ItemsSource = MainApp.Operations._operationList;

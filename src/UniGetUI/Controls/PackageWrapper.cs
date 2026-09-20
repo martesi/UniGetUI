@@ -251,6 +251,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
         public void Dispose()
         {
             Package.PropertyChanged -= Package_PropertyChanged;
+            _lifetimeCts.Cancel();
             _installerHostCheckCts?.Cancel();
             _installerHostCheckCts?.Dispose();
             _installerHostCheckCts = null;

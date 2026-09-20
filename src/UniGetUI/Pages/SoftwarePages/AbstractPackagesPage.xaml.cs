@@ -1,3 +1,4 @@
+using UniGetUI.Services;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -438,12 +439,26 @@ namespace UniGetUI.Interface
 
             GenerateToolBar();
             var menu = GenerateContextMenu();
+            if (PAGE_ROLE is OperationType.Install or OperationType.Update or OperationType.Uninstall)
+            {
+                BetterMenuItem manual = new()
+                {
+                    Text = CoreTools.Translate(PAGE_ROLE is OperationType.Install ? "Manual install" : PAGE_ROLE is OperationType.Update ? "Manual update" : "Manual uninstall"),
+                    IconName = IconType.Console,
+                };
+                manual.Click += async (_, _) => await ManualInstallHelper.LaunchManualAsync(SelectedItem, PAGE_ROLE);
+                menu.Items.Add(manual);
+            }
 
             PackageList_List.ContextFlyout = menu;
             PackageList_Grid.ContextFlyout = menu;
             PackageList_Icons.ContextFlyout = menu;
 
             Loaded += (_, _) => ChangeFilteringPaneLayout();
+            int savedSorter = Settings.GetDictionaryItem<string, int>(Settings.K.PackageListSortFieldIndex, PAGE_NAME);
+            if (savedSorter > 0 && Enum.IsDefined(typeof(ObservablePackageCollection.Sorter), savedSorter))
+                FilteredPackages.SetSorter((ObservablePackageCollection.Sorter)savedSorter);
+            FilteredPackages.Descending = Settings.GetDictionaryItem<string, bool>(Settings.K.PackageListSortDescending, PAGE_NAME);
             UpdateSortingMenu();
         }
 
@@ -1157,6 +1172,8 @@ namespace UniGetUI.Interface
                 FilteredPackages.Descending = !FilteredPackages.Descending;
             FilteredPackages.SetSorter(sorter);
             FilteredPackages.Sort();
+            Settings.SetDictionaryItem(Settings.K.PackageListSortFieldIndex, PAGE_NAME, (int)FilteredPackages.CurrentSorter);
+            Settings.SetDictionaryItem(Settings.K.PackageListSortDescending, PAGE_NAME, FilteredPackages.Descending);
             UpdateSortingMenu();
         }
 
@@ -1164,6 +1181,8 @@ namespace UniGetUI.Interface
         {
             FilteredPackages.Descending = !ascendent;
             FilteredPackages.Sort();
+            Settings.SetDictionaryItem(Settings.K.PackageListSortFieldIndex, PAGE_NAME, (int)FilteredPackages.CurrentSorter);
+            Settings.SetDictionaryItem(Settings.K.PackageListSortDescending, PAGE_NAME, FilteredPackages.Descending);
             UpdateSortingMenu();
         }
 
@@ -1468,8 +1487,15 @@ namespace UniGetUI.Interface
             }
         }
 
+        public GridLength InstallerHostWidth => new(Settings.Get(Settings.K.ShowInstallerHostColumn) ? 140 : 0);
+        public GridLength DownloadSizeWidth => new(Settings.Get(Settings.K.ShowDownloadSizeColumn) ? 100 : 0);
+        public string InstallerHostHeaderText => CoreTools.Translate("Installer host");
+        public string DownloadSizeHeaderText => CoreTools.Translate("Download size");
+
         public void OnEnter()
         {
+            Bindings.Update();
+            foreach (var wrapper in FilteredPackages) wrapper.RefreshColumns();
             Visibility = Visibility.Visible;
             IsEnabled = true;
         }

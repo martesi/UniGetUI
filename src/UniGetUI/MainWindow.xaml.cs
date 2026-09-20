@@ -700,6 +700,7 @@ namespace UniGetUI.Interface
         {
             AppWindow.Show();
             Activate();
+            if (!MainApp.Operations.AreThereRunningOperations()) _ = DialogHelper.HandleNewShortcuts();
         }
 
         private void ApplySplashImage()

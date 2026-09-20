@@ -240,6 +240,17 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
                     BorderThickness = new Thickness(1, 0, 1, 1),
                 };
                 ExtraControls.Children.Add(WinGet_DownloadFullManifest);
+                NumberBox stuckThreshold = new() { Minimum = 1, Maximum = 1000, Value = int.TryParse(Settings.GetValue(Settings.K.WinGetStuckUpgradeThreshold), out int threshold) && threshold > 0 ? threshold : 3, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact };
+                stuckThreshold.ValueChanged += (_, _) =>
+                {
+                    if (double.IsFinite(stuckThreshold.Value)) Settings.SetValue(Settings.K.WinGetStuckUpgradeThreshold, ((int)stuckThreshold.Value).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                };
+                ExtraControls.Children.Add(new SettingsCard
+                {
+                    Header = CoreTools.Translate("Stop offering an update that never applies after this many attempts"),
+                    Description = CoreTools.Translate("When WinGet keeps offering an update that reports success without ever changing the installed version, stop offering it after this many attempts, until a newer version is available (default: 3)"),
+                    Content = stuckThreshold,
+                });
 
                 CheckboxCard WinGet_EnableTroubleshooter = new()
                 {
@@ -339,10 +350,15 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
                 {
                     CornerRadius = new CornerRadius(0, 0, 8, 8),
                     BorderThickness = new Thickness(1, 0, 1, 1),
-                    SettingName = Settings.K.EnableScoopCleanup,
-                    Text = "Enable Scoop cleanup on launch",
+                    SettingName = Settings.K.EnableScoopCleanupCache,
+                    Text = "Clear Scoop download cache on launch",
                 };
                 ExtraControls.Children.Add(Scoop_CleanupOnStart);
+                ExtraControls.Children.Add(new CheckboxCard
+                {
+                    SettingName = Settings.K.EnableScoopCleanupApps,
+                    Text = "Clean up older Scoop app versions on launch",
+                });
             }
             // -------------------------------- BUN EXTRA SETTINGS ----------------------------------
 
