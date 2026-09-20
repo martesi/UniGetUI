@@ -1,0 +1,261 @@
+From 54d3f95bd3fc79a2301ecada0679982ff1c9758c Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Sun, 20 Sep 2026 02:18:34 +0000
+Subject: [PATCH] backport: export package lists to CSV
+
+Adapt the upstream CSV export feature to the Classic WinUI file picker and package toolbars.
+
+Upstream-Commit: 74a308272e8a4fb2015f8c7319f055926819206b
+Upstream-PR: Devolutions/UniGetUI#5175
+---
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -845,5 +845,11 @@
+   "Log out failed: ": "Log out failed: ",
+   "Package backup settings": "Package backup settings",
+   "Please wait while {0} is being installed. This may take several minutes.": "Please wait while {0} is being installed. This may take several minutes.",
+-  "The installer finished, but {0} could not be found on your system.": "The installer finished, but {0} could not be found on your system."
++  "The installer finished, but {0} could not be found on your system.": "The installer finished, but {0} could not be found on your system.",
++  "Export to CSV": "Export to CSV",
++  "Nothing to export": "Nothing to export",
++  "There are no packages to export.": "There are no packages to export.",
++  "CSV file": "CSV file",
++  "The file was saved to {0}": "The file was saved to {0}",
++  "The file could not be saved:": "The file could not be saved:"
+ }
+diff --git a/src/UniGetUI.Tests/CsvExportHelpersTests.cs b/src/UniGetUI.Tests/CsvExportHelpersTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/UniGetUI.Tests/CsvExportHelpersTests.cs
+@@ -0,0 +1,17 @@
++using UniGetUI.Interface;
++
++namespace UniGetUI.Tests;
++
++public sealed class CsvExportHelpersTests
++{
++    [Theory]
++    [InlineData("plain", "plain")]
++    [InlineData("a,b", "\"a,b\"")]
++    [InlineData("a\"b", "\"a\"\"b\"")]
++    [InlineData("=1+1", "'=1+1")]
++    [InlineData("+SUM(A1:A2)", "'+SUM(A1:A2)")]
++    public void EscapeField_ProducesSafeCsv(string input, string expected)
++    {
++        Assert.Equal(expected, CsvExportHelpers.EscapeField(input));
++    }
++}
+diff --git a/src/UniGetUI.Tests/UniGetUI.Tests.csproj b/src/UniGetUI.Tests/UniGetUI.Tests.csproj
+--- a/src/UniGetUI.Tests/UniGetUI.Tests.csproj
++++ b/src/UniGetUI.Tests/UniGetUI.Tests.csproj
+@@ -47,6 +47,7 @@
+         <Compile Include="..\Shared\SharedPreUiCommandDispatcher.cs" Link="Shared\SharedPreUiCommandDispatcher.cs" />
+         <Compile Include="..\UniGetUI\AutoUpdater.Helpers.cs" Link="AutoUpdater.Helpers.cs" />
+         <Compile Include="..\UniGetUI\CLIHandler.cs" Link="CLIHandler.cs" />
++        <Compile Include="..\UniGetUI\CsvExportHelpers.cs" Link="CsvExportHelpers.cs" />
+         <Compile Include="..\UniGetUI\ModernAppLauncher.cs" Link="ModernAppLauncher.cs" />
+     </ItemGroup>
+ </Project>
+diff --git a/src/UniGetUI/CsvExportHelpers.cs b/src/UniGetUI/CsvExportHelpers.cs
+new file mode 100644
+--- /dev/null
++++ b/src/UniGetUI/CsvExportHelpers.cs
+@@ -0,0 +1,17 @@
++namespace UniGetUI.Interface;
++
++internal static class CsvExportHelpers
++{
++    internal static string EscapeField(string? field)
++    {
++        field ??= "";
++
++        if (field.Length > 0 && "=+-@\t\r".IndexOf(field[0]) >= 0)
++            field = "'" + field;
++
++        if (field.IndexOfAny(['"', ',', '\n', '\r']) >= 0)
++            return "\"" + field.Replace("\"", "\"\"") + "\"";
++
++        return field;
++    }
++}
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+@@ -2,14 +2,17 @@
+ using System.Collections.ObjectModel;
+ using System.Diagnostics;
+ using System.Globalization;
++using System.Text;
+ using CommunityToolkit.WinUI;
++using ExternalLibraries.Pickers;
+ using Microsoft.UI;
+ using Microsoft.UI.Input;
+ using Microsoft.UI.Xaml;
+ using Microsoft.UI.Xaml.Controls;
+ using Microsoft.UI.Xaml.Controls.Primitives;
+ using Microsoft.UI.Xaml.Input;
+ using Microsoft.UI.Xaml.Media;
++using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.Interface.Enums;
+@@ -1701,6 +1704,69 @@ private void ABSTRACT_PAGE_SizeChanged(object sender, SizeChangedEventArgs e)
+             }
+         }
+ 
++        protected async Task ExportPackagesToCsvAsync()
++        {
++            List<IPackage> packages = FilteredPackages.GetCheckedPackages();
++            if (packages.Count == 0)
++                packages = FilteredPackages.GetPackages();
++
++            if (packages.Count == 0)
++            {
++                DialogHelper.ShowDismissableBalloon(
++                    CoreTools.Translate("Nothing to export"),
++                    CoreTools.Translate("There are no packages to export.")
++                );
++                return;
++            }
++
++            string defaultName = CoreTools.MakeValidFileName(MainTitle.Text) + ".csv";
++            string file = new FileSavePicker(
++                MainApp.Instance.MainWindow.GetWindowHandle()
++            ).Show(["*.csv"], defaultName);
++            if (file == String.Empty)
++                return;
++
++            try
++            {
++                StringBuilder csv = new();
++                List<string> header =
++                [
++                    CoreTools.Translate("Package Name"),
++                    CoreTools.Translate("Package ID"),
++                    CoreTools.Translate("Version"),
++                ];
++                if (RoleIsUpdateLike)
++                    header.Add(CoreTools.Translate("New version"));
++                header.Add(CoreTools.Translate("Source"));
++                csv.AppendLine(string.Join(",", header.Select(CsvExportHelpers.EscapeField)));
++
++                foreach (IPackage package in packages)
++                {
++                    List<string> row = [package.Name, package.Id, package.VersionString];
++                    if (RoleIsUpdateLike)
++                        row.Add(package.NewVersionString);
++                    row.Add(package.Source.AsString_DisplayName);
++                    csv.AppendLine(string.Join(",", row.Select(CsvExportHelpers.EscapeField)));
++                }
++
++                await File.WriteAllTextAsync(file, csv.ToString(), new UTF8Encoding(true));
++                DialogHelper.ShowDismissableBalloon(
++                    CoreTools.Translate("Success!"),
++                    CoreTools.Translate("The file was saved to {0}", file)
++                );
++                await CoreTools.ShowFileOnExplorer(file);
++            }
++            catch (Exception ex)
++            {
++                Logger.Error("An error occurred while exporting packages to CSV");
++                Logger.Error(ex);
++                DialogHelper.ShowDismissableBalloon(
++                    CoreTools.Translate("An error occurred"),
++                    CoreTools.Translate("The file could not be saved:") + " " + ex.Message
++                );
++            }
++        }
++
+         public void SearchBox_TextChanged(object? sender, AutoSuggestBoxTextChangedEventArgs args)
+         {
+             if (InstantSearchCheckbox.IsChecked is true && !DISABLE_FILTER_ON_QUERY_CHANGE)
+diff --git a/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs b/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
+--- a/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
+@@ -206,6 +206,7 @@ public override void GenerateToolBar()
+             AppBarButton IgnoreSelected = new();
+             AppBarButton ManageIgnored = new();
+             AppBarButton ExportSelection = new();
++            AppBarButton ExportCsv = new();
+ 
+             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
+             ToolBar.PrimaryCommands.Add(InstallationSettings);
+@@ -216,6 +217,7 @@ public override void GenerateToolBar()
+             ToolBar.PrimaryCommands.Add(ManageIgnored);
+             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
+             ToolBar.PrimaryCommands.Add(ExportSelection);
++            ToolBar.PrimaryCommands.Add(ExportCsv);
+ 
+             Dictionary<DependencyObject, string> Labels = new()
+             { // Entries with a trailing space are collapsed
+@@ -228,6 +230,7 @@ public override void GenerateToolBar()
+                 { IgnoreSelected, CoreTools.Translate("Ignore selected packages") },
+                 { ManageIgnored, CoreTools.Translate("Manage ignored updates") },
+                 { ExportSelection, CoreTools.Translate("Add selection to bundle") },
++                { ExportCsv, CoreTools.Translate("Export to CSV") },
+             };
+ 
+             Dictionary<DependencyObject, IconType> Icons = new()
+@@ -240,6 +243,7 @@ public override void GenerateToolBar()
+                 { IgnoreSelected, IconType.Pin },
+                 { ManageIgnored, IconType.ClipboardList },
+                 { ExportSelection, IconType.AddTo },
++                { ExportCsv, IconType.SaveAs },
+             };
+ 
+             ApplyTextAndIconsToToolbar(Labels, Icons);
+@@ -248,6 +252,7 @@ public override void GenerateToolBar()
+                 ShowDetailsForPackage(SelectedItem, TEL_InstallReferral.ALREADY_INSTALLED);
+ 
+             ExportSelection.Click += ExportSelection_Click;
++            ExportCsv.Click += (_, _) => _ = ExportPackagesToCsvAsync();
+             InstallationSettings.Click += (_, _) =>
+                 _ = ShowInstallationOptionsForPackage(SelectedItem);
+             ManageIgnored.Click += async (_, _) => await DialogHelper.ManageIgnoredUpdates();
+diff --git a/src/UniGetUI/Pages/SoftwarePages/SoftwareUpdatesPage.cs b/src/UniGetUI/Pages/SoftwarePages/SoftwareUpdatesPage.cs
+--- a/src/UniGetUI/Pages/SoftwarePages/SoftwareUpdatesPage.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/SoftwareUpdatesPage.cs
+@@ -269,6 +269,7 @@ public override void GenerateToolBar()
+ 
+             AppBarButton IgnoreSelected = new();
+             AppBarButton ManageIgnored = new();
++            AppBarButton ExportCsv = new();
+ 
+             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
+             ToolBar.PrimaryCommands.Add(InstallationSettings);
+@@ -277,6 +278,8 @@ public override void GenerateToolBar()
+             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
+             ToolBar.PrimaryCommands.Add(IgnoreSelected);
+             ToolBar.PrimaryCommands.Add(ManageIgnored);
++            ToolBar.PrimaryCommands.Add(new AppBarSeparator());
++            ToolBar.PrimaryCommands.Add(ExportCsv);
+ 
+             Dictionary<DependencyObject, string> Labels = new()
+             { // Entries with a leading space are collapsed
+@@ -290,6 +293,7 @@ public override void GenerateToolBar()
+                 { PackageDetails, " " + CoreTools.Translate("Package details") },
+                 { IgnoreSelected, CoreTools.Translate("Ignore selected packages") },
+                 { ManageIgnored, CoreTools.Translate("Manage ignored updates") },
++                { ExportCsv, CoreTools.Translate("Export to CSV") },
+             };
+ 
+             Dictionary<DependencyObject, IconType> Icons = new()
+@@ -303,6 +307,7 @@ public override void GenerateToolBar()
+                 { PackageDetails, IconType.Info_Round },
+                 { IgnoreSelected, IconType.Pin },
+                 { ManageIgnored, IconType.ClipboardList },
++                { ExportCsv, IconType.SaveAs },
+             };
+ 
+             ApplyTextAndIconsToToolbar(Labels, Icons);
+@@ -312,6 +317,7 @@ public override void GenerateToolBar()
+             InstallationSettings.Click += (_, _) =>
+                 _ = ShowInstallationOptionsForPackage(SelectedItem);
+             ManageIgnored.Click += async (_, _) => await DialogHelper.ManageIgnoredUpdates();
++            ExportCsv.Click += (_, _) => _ = ExportPackagesToCsvAsync();
+             IgnoreSelected.Click += async (_, _) =>
+             {
+                 foreach (IPackage package in FilteredPackages.GetCheckedPackages())
+-- 
+2.50.1
