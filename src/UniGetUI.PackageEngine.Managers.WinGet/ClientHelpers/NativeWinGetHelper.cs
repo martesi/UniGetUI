@@ -195,7 +195,7 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
 
         // Spawn Tasks to find packages on catalogs
         logger.Log("Spawning catalog fetching tasks...");
-        foreach (PackageCatalogReference CatalogReference in AvailableCatalogs.ToArray())
+        foreach (PackageCatalogReference CatalogReference in NativeWinGetCollection.Copy(AvailableCatalogs))
         {
             logger.Log($"Begin search on catalog {CatalogReference.Info.Name}");
             // Connect to catalog
@@ -266,7 +266,9 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                 );
 
                 FindPackagesResult FoundPackages = CatalogTaskPair.Value.Result;
-                foreach (MatchResult matchResult in FoundPackages.Matches.ToArray())
+                foreach (
+                    MatchResult matchResult in NativeWinGetCollection.Copy(FoundPackages.Matches)
+                )
                 {
                     CatalogPackage nativePackage = matchResult.CatalogPackage;
                     // Create the Package item and add it to the list
@@ -347,9 +349,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     nativePackage.DefaultInstallVersion.PackageCatalog.Info.Name
                 );
 
+                string? reportedVersion = nativePackage.InstalledVersion.Version;
                 string version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(
                     nativePackage.Id,
-                    nativePackage.InstalledVersion.Version
+                    reportedVersion
                 );
 
                 var UniGetUIPackage = new Package(
@@ -359,7 +362,12 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     nativePackage.DefaultInstallVersion.Version,
                     source,
                     Manager
-                );
+                )
+                {
+                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
+                        reportedVersion
+                    ),
+                };
 
                 // Suppress an update that repeatedly fails to stick (#5158); the COM path still avoids
                 // the one-shot "already upgraded" cache (#5042).
@@ -401,7 +409,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
             try
             {
                 IManagerSource source;
-                var availableVersions = nativePackage.AvailableVersions?.ToArray() ?? [];
+                var availableVersions =
+                    nativePackage.AvailableVersions is { } versions
+                        ? NativeWinGetCollection.Copy(versions)
+                        : [];
                 if (availableVersions.Length > 0)
                 {
                     var installPackage = nativePackage.GetPackageVersionInfo(availableVersions[0]);
@@ -414,9 +425,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     source = Manager.GetLocalSource(nativePackage.Id);
                 }
 
+                string? reportedVersion = nativePackage.InstalledVersion.Version;
                 string version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(
                     nativePackage.Id,
-                    nativePackage.InstalledVersion.Version
+                    reportedVersion
                 );
 
                 logger.Log(
@@ -428,7 +440,12 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     version,
                     source,
                     Manager
-                );
+                )
+                {
+                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
+                        reportedVersion
+                    ),
+                };
                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
                 packages.Add(UniGetUIPackage);
             }
@@ -596,7 +613,7 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
             }
 
             List<CatalogPackage> foundPackages = [];
-            foreach (var match in TaskResult.Matches.ToArray())
+            foreach (var match in NativeWinGetCollection.Copy(TaskResult.Matches))
             {
                 foundPackages.Add(match.CatalogPackage);
             }
@@ -615,7 +632,7 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
     )
     {
         return SelectReachableCatalogs(
-            WinGetManager.GetPackageCatalogs().ToArray(),
+            NativeWinGetCollection.Copy(WinGetManager.GetPackageCatalogs()),
             static catalogRef => catalogRef.Info.Name,
             catalogRef => TryConnectLocalCatalog(catalogRef, logger),
             catalogName =>
@@ -702,7 +719,11 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
         List<ManagerSource> sources = [];
         INativeTaskLogger logger = Manager.TaskLogger.CreateNew(LoggableTaskType.ListSources);
 
-        foreach (PackageCatalogReference catalog in WinGetManager.GetPackageCatalogs().ToList())
+        foreach (
+            PackageCatalogReference catalog in NativeWinGetCollection.Copy(
+                WinGetManager.GetPackageCatalogs()
+            )
+        )
         {
             try
             {
@@ -742,7 +763,12 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
         if (nativePackage is null)
             return [];
 
-        string[] versions = nativePackage.AvailableVersions.Select(x => x.Version).ToArray();
+        var nativeVersions = NativeWinGetCollection.Copy(nativePackage.AvailableVersions);
+        string[] versions = new string[nativeVersions.Length];
+        for (int index = 0; index < nativeVersions.Length; index++)
+        {
+            versions[index] = nativeVersions[index].Version;
+        }
         foreach (string? version in versions)
         {
             logger.Log(version);
@@ -814,7 +840,7 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
             details.ReleaseNotesUrl = new Uri(NativeDetails.ReleaseNotesUrl);
 
         if (NativeDetails.Tags is not null)
-            details.Tags = NativeDetails.Tags.ToArray();
+            details.Tags = NativeWinGetCollection.Copy(NativeDetails.Tags);
 
         bool metadataLoaded = _pingetPackageDetailsProvider.LoadPackageDetails(details, logger);
 

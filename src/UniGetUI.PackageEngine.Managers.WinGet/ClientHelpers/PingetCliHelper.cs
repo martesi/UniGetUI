@@ -65,7 +65,10 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
                 match.AvailableVersion!,
                 GetSource(match),
                 Manager
-            );
+            )
+            {
+                InstalledVersionIsUnverified = versionUnknown,
+            };
 
             // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
             if (versionUnknown || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
@@ -99,6 +102,11 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
                     GetSource(match),
                     Manager
                 )
+                {
+                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
+                        match.InstalledVersion
+                    ),
+                }
             )
             .ToArray();
     }
@@ -208,7 +216,7 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
 
         if (CoreTools.IsAdministrator())
         {
-            string winGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string winGetTemp = Path.Join(AppPaths.ScratchDirectory, "ElevatedWinGetTemp");
             logger.AddToStdErr(
                 $"[WARN] Redirecting %TEMP% folder to {winGetTemp}, since UniGetUI was run as admin"
             );
