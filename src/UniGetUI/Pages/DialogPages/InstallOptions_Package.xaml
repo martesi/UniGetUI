@@ -263,6 +263,10 @@
                       <CheckBox Name="SkipMinorUpdatesCheckbox">
                         <widgets:TranslatedTextBlock Text="Skip minor updates for this package" />
                       </CheckBox>
+                      <NumberBox Name="SkipMinorUpdatesLevel" Minimum="2" Maximum="4" SmallChange="1"
+                        Value="2" SpinButtonPlacementMode="Compact" Width="110"
+                        IsEnabled="{x:Bind SkipMinorUpdatesCheckbox.IsChecked, Mode=OneWay}"
+                        ToolTipService.ToolTip="Ignore changes from this version component onward (2 = minor, 3 = patch, 4 = revision)" />
                       <CheckBox Name="AutoUpdatePackageCheckbox">
                         <widgets:TranslatedTextBlock Text="Automatically update this package" />
                       </CheckBox>

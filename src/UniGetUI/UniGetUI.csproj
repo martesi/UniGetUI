@@ -456,6 +456,10 @@
         <Content Update="Assets\Utilities\scoop_cleanup.cmd">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </Content>
+        <Content Include="Assets\Utilities\unigetui_ps_operation.ps1">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        </Content>
         <Content Update="Assets\Utilities\uninstall_scoop.cmd">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </Content>
