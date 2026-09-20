@@ -206,6 +206,7 @@ namespace UniGetUI.Interface.SoftwarePages
             AppBarButton IgnoreSelected = new();
             AppBarButton ManageIgnored = new();
             AppBarButton ExportSelection = new();
+            AppBarButton ExportCsv = new();
 
             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
             ToolBar.PrimaryCommands.Add(InstallationSettings);
@@ -216,6 +217,7 @@ namespace UniGetUI.Interface.SoftwarePages
             ToolBar.PrimaryCommands.Add(ManageIgnored);
             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
             ToolBar.PrimaryCommands.Add(ExportSelection);
+            ToolBar.PrimaryCommands.Add(ExportCsv);
 
             Dictionary<DependencyObject, string> Labels = new()
             { // Entries with a trailing space are collapsed
@@ -228,6 +230,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 { IgnoreSelected, CoreTools.Translate("Ignore selected packages") },
                 { ManageIgnored, CoreTools.Translate("Manage ignored updates") },
                 { ExportSelection, CoreTools.Translate("Add selection to bundle") },
+                { ExportCsv, CoreTools.Translate("Export to CSV") },
             };
 
             Dictionary<DependencyObject, IconType> Icons = new()
@@ -240,6 +243,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 { IgnoreSelected, IconType.Pin },
                 { ManageIgnored, IconType.ClipboardList },
                 { ExportSelection, IconType.AddTo },
+                { ExportCsv, IconType.SaveAs },
             };
 
             ApplyTextAndIconsToToolbar(Labels, Icons);
@@ -248,6 +252,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 ShowDetailsForPackage(SelectedItem, TEL_InstallReferral.ALREADY_INSTALLED);
 
             ExportSelection.Click += ExportSelection_Click;
+            ExportCsv.Click += (_, _) => _ = ExportPackagesToCsvAsync();
             InstallationSettings.Click += (_, _) =>
                 _ = ShowInstallationOptionsForPackage(SelectedItem);
             ManageIgnored.Click += async (_, _) => await DialogHelper.ManageIgnoredUpdates();

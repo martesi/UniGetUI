@@ -269,6 +269,7 @@ namespace UniGetUI.Interface.SoftwarePages
 
             AppBarButton IgnoreSelected = new();
             AppBarButton ManageIgnored = new();
+            AppBarButton ExportCsv = new();
 
             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
             ToolBar.PrimaryCommands.Add(InstallationSettings);
@@ -277,6 +278,8 @@ namespace UniGetUI.Interface.SoftwarePages
             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
             ToolBar.PrimaryCommands.Add(IgnoreSelected);
             ToolBar.PrimaryCommands.Add(ManageIgnored);
+            ToolBar.PrimaryCommands.Add(new AppBarSeparator());
+            ToolBar.PrimaryCommands.Add(ExportCsv);
 
             Dictionary<DependencyObject, string> Labels = new()
             { // Entries with a leading space are collapsed
@@ -290,6 +293,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 { PackageDetails, " " + CoreTools.Translate("Package details") },
                 { IgnoreSelected, CoreTools.Translate("Ignore selected packages") },
                 { ManageIgnored, CoreTools.Translate("Manage ignored updates") },
+                { ExportCsv, CoreTools.Translate("Export to CSV") },
             };
 
             Dictionary<DependencyObject, IconType> Icons = new()
@@ -303,6 +307,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 { PackageDetails, IconType.Info_Round },
                 { IgnoreSelected, IconType.Pin },
                 { ManageIgnored, IconType.ClipboardList },
+                { ExportCsv, IconType.SaveAs },
             };
 
             ApplyTextAndIconsToToolbar(Labels, Icons);
@@ -312,6 +317,7 @@ namespace UniGetUI.Interface.SoftwarePages
             InstallationSettings.Click += (_, _) =>
                 _ = ShowInstallationOptionsForPackage(SelectedItem);
             ManageIgnored.Click += async (_, _) => await DialogHelper.ManageIgnoredUpdates();
+            ExportCsv.Click += (_, _) => _ = ExportPackagesToCsvAsync();
             IgnoreSelected.Click += async (_, _) =>
             {
                 foreach (IPackage package in FilteredPackages.GetCheckedPackages())

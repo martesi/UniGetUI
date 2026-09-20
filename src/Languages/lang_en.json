@@ -845,5 +845,11 @@
   "Log out failed: ": "Log out failed: ",
   "Package backup settings": "Package backup settings",
   "Please wait while {0} is being installed. This may take several minutes.": "Please wait while {0} is being installed. This may take several minutes.",
-  "The installer finished, but {0} could not be found on your system.": "The installer finished, but {0} could not be found on your system."
+  "The installer finished, but {0} could not be found on your system.": "The installer finished, but {0} could not be found on your system.",
+  "Export to CSV": "Export to CSV",
+  "Nothing to export": "Nothing to export",
+  "There are no packages to export.": "There are no packages to export.",
+  "CSV file": "CSV file",
+  "The file was saved to {0}": "The file was saved to {0}",
+  "The file could not be saved:": "The file could not be saved:"
 }
