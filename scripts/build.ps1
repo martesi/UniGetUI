@@ -41,7 +41,7 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $SrcDir = Join-Path $RepoRoot "src"
 $WindowsSolution = Join-Path $SrcDir "UniGetUI.Windows.slnx"
-$PublishProject = Join-Path $SrcDir "UniGetUI.Avalonia" "UniGetUI.Avalonia.csproj"
+$PublishProject = Join-Path $SrcDir "UniGetUI" "UniGetUI.csproj"
 $BinDir = Join-Path $RepoRoot "unigetui_bin"
 $BuildPropsPath = Join-Path $SrcDir "Directory.Build.props"
 [xml] $BuildProps = Get-Content $BuildPropsPath
@@ -53,7 +53,7 @@ if ([string]::IsNullOrWhiteSpace($PortableTargetFramework) -or [string]::IsNullO
 }
 
 $TargetFramework = "$PortableTargetFramework-windows$WindowsTargetPlatformVersion"
-$PublishDir = Join-Path $SrcDir "UniGetUI.Avalonia" "bin" $Platform $Configuration $TargetFramework "win-$Platform" "publish"
+$PublishDir = Join-Path $SrcDir "UniGetUI" "bin" $Platform $Configuration $TargetFramework "win-$Platform" "publish"
 
 # --- Version stamping ---
 if ($Version) {
@@ -82,7 +82,7 @@ dotnet clean $WindowsSolution -v m --nologo /p:Platform=$Platform
 
 dotnet publish $PublishProject /noLogo /p:Configuration=$Configuration /p:Platform=$Platform -p:RuntimeIdentifier=win-$Platform --ignore-failed-sources -v m
 if ($LASTEXITCODE -ne 0) {
-    throw "dotnet publish Avalonia failed with exit code $LASTEXITCODE"
+    throw "dotnet publish Classic WinUI failed with exit code $LASTEXITCODE"
 }
 
 # --- Stage binaries ---
@@ -113,7 +113,7 @@ if ($PdbsToRemove.Count -gt 0) {
 if (Test-Path $OutputPath) { Remove-Item $OutputPath -Recurse -Force }
 New-Item $OutputPath -ItemType Directory | Out-Null
 
-$ZipPath = Join-Path $OutputPath "UniGetUI.$Platform.zip"
+$ZipPath = Join-Path $OutputPath "UniGetUI.Classic.$Platform.zip"
 Write-Host "`n=== Refreshing integrity tree before zip packaging ===" -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot "refresh-integrity-tree.ps1") -Path $BinDir -FailOnUnexpectedFiles
 
@@ -134,7 +134,7 @@ if (-not $SkipInstaller) {
 
     if ($IsccPath) {
         Write-Host "`n=== Building installer ===" -ForegroundColor Cyan
-        $InstallerBaseName = "UniGetUI.Installer.$Platform"
+        $InstallerBaseName = "UniGetUI.Classic.Installer.$Platform"
         $IssPath = Join-Path $RepoRoot "UniGetUI.iss"
         $IssContent = Get-Content $IssPath -Raw
 

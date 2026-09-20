@@ -1,3 +1,4 @@
+using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using CommunityToolkit.WinUI.Helpers;
@@ -85,6 +86,7 @@ namespace UniGetUI
                 Instance = this;
                 Dispatcher = DispatcherQueue.GetForCurrentThread();
                 InitializeComponent();
+                UniGetUI.Services.UiFontPolicy.Apply();
                 ApplyThemeToApp();
                 _ = LoadComponentsAsync();
             }
@@ -177,7 +179,7 @@ namespace UniGetUI
                     Logger.Error(" -");
                     Logger.Error(" -");
                     if (
-                        Environment.GetCommandLineArgs().Contains("--report-all-errors")
+                        CoreData.GetProcessArguments().Contains("--report-all-errors")
                         || RaiseExceptionAsFatal
                         || MainWindow is null
                     )
@@ -385,6 +387,8 @@ namespace UniGetUI
 
                 // Load essential components
                 await Task.WhenAll(iniTasks);
+                AutoUpdatesMigration.RunOnce(PEInterface.Managers);
+                MaintenanceScheduler.Start();
 
                 // Load non-essential components
                 TelemetryHandler.Configure(

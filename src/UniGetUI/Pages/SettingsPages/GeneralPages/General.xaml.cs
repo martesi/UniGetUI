@@ -130,8 +130,9 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             }
         }
 
-        private void ResetWingetUI(object sender, EventArgs e)
+        private async void ResetWingetUI(object sender, EventArgs e)
         {
+            if (!await UniGetUI.Services.ConfirmationDialog.ShowAsync(CoreTools.Translate("Reset all UniGetUI settings? This cannot be undone."))) return;
             try
             {
                 Settings.ResetSettings();
