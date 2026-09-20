@@ -72,6 +72,9 @@ namespace UniGetUI.PackageEngine.PackageClasses
         public string AutomationName { get; }
         public string Id { get; }
         public virtual string VersionString { get; }
+
+        public virtual bool HasConcreteVersion => true;
+        public bool InstalledVersionIsUnverified { get; init; }
         public CoreTools.Version NormalizedVersion { get; }
         public CoreTools.Version NormalizedNewVersion { get; }
         public bool IsPopulated { get; set; }
@@ -204,11 +207,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
                     Manager.DetailsHelper.GetIcon,
                     this
                 );
-                string? path = IconCacheEngine.GetCacheOrDownloadIcon(
-                    icon,
-                    Manager.Name,
-                    CoreTools.MakeValidFileName(Id)
-                );
+                string? path = IconCacheEngine.GetCacheOrDownloadIcon(icon, Manager.Name, Id);
                 return path is null ? null : new Uri((path.StartsWith('/') ? "file://" : "file:///") + path);
             }
             catch (Exception ex)
@@ -319,12 +318,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
         {
             foreach (var p in GetInstalledPackages())
             {
-                if (p.NormalizedVersion == CoreTools.Version.Null || this.NormalizedNewVersion == CoreTools.Version.Null)
+                if (Manager.CompareVersions(p.VersionString, this.NewVersionString) is not { } comparison)
                 {
                     continue;
                 }
 
-                if (p.NormalizedVersion >= this.NormalizedNewVersion)
+                if (comparison >= 0)
                 {
                     return true;
                 }
@@ -333,11 +332,40 @@ namespace UniGetUI.PackageEngine.PackageClasses
             return false;
         }
 
+        private string ResolveInstallerVersion()
+        {
+            if (Manager.InstallerUrlFollowsPackageVersion)
+                return VersionString;
+
+            if (IsUpgradable)
+                return NewVersionString;
+
+            if (GetUpgradablePackage() is { } upgradable)
+                return upgradable.NewVersionString;
+
+            if (GetAvailablePackage() is { } available)
+                return available.VersionString;
+
+            return VersionString;
+        }
+
         public async Task<string?> GetInstallerFileName()
         {
+            var scheme = InstallerFileNaming.ResolveScheme();
+            string version = scheme is InstallerNameScheme.PublisherName
+                ? ""
+                : ResolveInstallerVersion();
+
             if (Manager.Name.StartsWith("PowerShell") || Manager.Name.StartsWith(".NET"))
             {
-                return CoreTools.MakeValidFileName($"{Id}.nupkg");
+                return InstallerFileNaming.Build(
+                    $"{Id}.nupkg",
+                    Name,
+                    Id,
+                    version,
+                    "nupkg",
+                    scheme
+                );
             }
             else
             {
@@ -345,23 +373,33 @@ namespace UniGetUI.PackageEngine.PackageClasses
                     await Details.Load();
                 if (Details.InstallerUrl is null)
                     return null;
-                return await CoreTools.GetFileNameAsync(Details.InstallerUrl);
+                return InstallerFileNaming.Build(
+                    await CoreTools.GetFileNameAsync(Details.InstallerUrl),
+                    Name,
+                    Id,
+                    version,
+                    Details.InstallerType,
+                    scheme
+                );
             }
         }
 
-        public virtual bool IsUpdateMinor()
+        // 1-based position of the most significant version component that changed
+        // (1=Major, 2=Minor, 3=Patch, 4=Remainder), or 0 if identical/unparseable.
+        private int HighestChangedVersionComponent()
+        {
+            if (NormalizedVersion == CoreTools.Version.Null || NormalizedNewVersion == CoreTools.Version.Null)
+                return 0;
+            return NormalizedVersion.FirstDifferingComponent(NormalizedNewVersion);
+        }
+
+        public virtual bool IsUpdateMinor(int level = InstallOptions.DefaultSkipMinorLevel)
         {
             if (!IsUpgradable)
                 return false;
-            if (
-                NormalizedVersion == CoreTools.Version.Null
-                || NormalizedNewVersion == CoreTools.Version.Null
-            )
-                return false;
 
-            return NormalizedVersion.Major == NormalizedNewVersion.Major
-                && NormalizedVersion.Minor == NormalizedNewVersion.Minor
-                && NormalizedVersion != NormalizedNewVersion;
+            int changed = HighestChangedVersionComponent();
+            return changed >= level;
         }
 
         public virtual Task<InstallOptions> GetInstallOptions() =>
