@@ -97,22 +97,41 @@ optionsXaml = ui / 'Pages/DialogPages/InstallOptions_Package.xaml'
 text = optionsXaml.read_text()
 start = text.index('                      <widgets:TranslatedTextBlock\n                        x:Name="CustomParametersLabel1"')
 end = text.index('                    </Grid>', start) + len('                    </Grid>')
-text = text[:end] + '''
-                    <widgets:TranslatedTextBlock Text="Install, update and uninstall arguments are independent. Copy them explicitly when they should match." TextWrapping="Wrap" />
-                    <HyperlinkButton Click="CopyInstallArguments" Padding="0" HorizontalAlignment="Left">
-                      <widgets:TranslatedTextBlock Text="Copy install arguments to update and uninstall" />
-                    </HyperlinkButton>
-''' + text[end:]
-anchor = '                Name="CommandBox"'
-start = text.index(anchor)
-end = text.index('          </StackPanel>', start)
-text = text[:end] + '''            <Button Click="OpenManualConsole" HorizontalAlignment="Left">
-              <widgets:TranslatedTextBlock Text="Open in a terminal" />
-            </Button>
-''' + text[end:]
 write(optionsXaml, text)
 options = ui / 'Pages/DialogPages/InstallOptions_Package.xaml.cs'
-replace(options, '        private readonly OperationType Operation;', '''        private void CopyInstallArguments(object sender, RoutedEventArgs args)
+replace(options, '        private readonly OperationType Operation;', '''        private void AddCommandActions()
+        {
+            if (CustomParameters3.Parent is Grid argumentsGrid && argumentsGrid.Parent is StackPanel argumentsPanel)
+            {
+                argumentsPanel.Children.Add(new TextBlock
+                {
+                    Text = CoreTools.Translate("These fields are independent: an argument set for Install won't apply to Update or Uninstall, and vice versa."),
+                    TextWrapping = TextWrapping.Wrap,
+                    Opacity = 0.7,
+                });
+                var copyArguments = new HyperlinkButton
+                {
+                    Content = CoreTools.Translate("Copy install arguments to update and uninstall"),
+                    Padding = new Thickness(0),
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                };
+                copyArguments.Click += CopyInstallArguments;
+                argumentsPanel.Children.Add(copyArguments);
+            }
+
+            if (CommandBox.Parent is Border commandBorder && commandBorder.Parent is StackPanel commandPanel)
+            {
+                var manualAction = new Button
+                {
+                    Content = CoreTools.Translate("Open in a terminal"),
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                };
+                manualAction.Click += OpenManualConsole;
+                commandPanel.Children.Add(manualAction);
+            }
+        }
+
+        private void CopyInstallArguments(object sender, RoutedEventArgs args)
         {
             CustomParameters2.Text = CustomParameters1.Text;
             CustomParameters3.Text = CustomParameters1.Text;
@@ -125,3 +144,4 @@ replace(options, '        private readonly OperationType Operation;', '''       
         }
 
         private readonly OperationType Operation;''')
+replace(options, '            Package = package;\n            InitializeComponent();', '            Package = package;\n            InitializeComponent();\n            AddCommandActions();')
