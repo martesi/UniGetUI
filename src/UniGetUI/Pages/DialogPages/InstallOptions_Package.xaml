@@ -260,9 +260,13 @@
                       <CheckBox Name="IgnoreUpdatesCheckbox">
                         <widgets:TranslatedTextBlock Text="Ignore future updates for this package" />
                       </CheckBox>
-                      <CheckBox Name="SkipMinorUpdatesCheckbox">
+                      <CheckBox Name="SkipMinorUpdatesCheckbox" Checked="SkipMinorUpdatesCheckbox_Changed" Unchecked="SkipMinorUpdatesCheckbox_Changed">
                         <widgets:TranslatedTextBlock Text="Skip minor updates for this package" />
                       </CheckBox>
+                      <NumberBox Name="SkipMinorUpdatesLevel" Minimum="2" Maximum="4" SmallChange="1"
+                        Value="2" SpinButtonPlacementMode="Compact" Width="110"
+                        IsEnabled="False"
+                        ToolTipService.ToolTip="Ignore changes from this version component onward (2 = minor, 3 = patch, 4 = revision)" />
                       <CheckBox Name="AutoUpdatePackageCheckbox">
                         <widgets:TranslatedTextBlock Text="Automatically update this package" />
                       </CheckBox>
@@ -480,6 +484,12 @@
                         TextWrapping="Wrap"
                       />
                     </Grid>
+                    <widgets:TranslatedTextBlock Text="Install, update and uninstall arguments are independent. Copy them explicitly when they should match." TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                      <Button Tag="update" Click="CopyInstallArguments"><widgets:TranslatedTextBlock Text="Copy install arguments to update" /></Button>
+                      <Button Tag="uninstall" Click="CopyInstallArguments"><widgets:TranslatedTextBlock Text="Copy install arguments to uninstall" /></Button>
+                    </StackPanel>
+
                   </StackPanel>
                 </controls:Case>
 
@@ -721,6 +731,10 @@
                 TextWrapping="Wrap"
               />
             </Border>
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Click="CopyCommand"><widgets:TranslatedTextBlock Text="Copy command" /></Button>
+              <Button Click="OpenManualConsole"><widgets:TranslatedTextBlock Text="Open in a terminal" /></Button>
+            </StackPanel>
           </StackPanel>
         </Border>
       </Grid>
