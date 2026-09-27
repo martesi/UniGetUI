@@ -153,13 +153,32 @@ try {
     Select-LastComboBoxItem $backupCountSelector
     [void](Find-ElementByAutomationId $window 'MaxLocalBackupCountCustom')
 
-    $navigationProcess = Start-Process `
+    Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+    $appProcess = Start-Process `
         -FilePath $executable `
         -WorkingDirectory (Split-Path $executable) `
         -ArgumentList 'unigetui://showInstalledPage' `
         -PassThru
-    $navigationProcess.WaitForExit()
-    Start-Sleep -Seconds 2
+
+    $windowCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+        $appProcess.Id
+    )
+    $deadline = (Get-Date).AddSeconds(45)
+    do {
+        $window = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst(
+            [System.Windows.Automation.TreeScope]::Children,
+            $windowCondition
+        )
+        if ($window) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if (-not $window) {
+        throw 'UniGetUI installed-page window was not found.'
+    }
+
     [void](Find-ElementByAutomationId $window 'ExportPackagesToCsv')
 
     Write-Host 'WinUI UI E2E passed: settings parity controls and CSV toolbar are reachable.'

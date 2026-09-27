@@ -6,7 +6,7 @@ internal static class CsvExportHelpers
     {
         field ??= "";
 
-        if (field.Length > 0 && "=+-@\t\r".IndexOf(field[0]) >= 0)
+        if (field.Length > 0 && "=+-@\t\r".Contains(field[0]))
             field = "'" + field;
 
         if (field.IndexOfAny(['"', ',', '\n', '\r']) >= 0)
