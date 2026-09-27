@@ -153,7 +153,13 @@ try {
     Select-LastComboBoxItem $backupCountSelector
     [void](Find-ElementByAutomationId $window 'MaxLocalBackupCountCustom')
 
-    Invoke-Element (Find-ElementByAutomationId $window 'InstalledNavigationButton')
+    $navigationProcess = Start-Process `
+        -FilePath $executable `
+        -WorkingDirectory (Split-Path $executable) `
+        -ArgumentList 'unigetui://showInstalledPage' `
+        -PassThru
+    $navigationProcess.WaitForExit()
+    Start-Sleep -Seconds 2
     [void](Find-ElementByAutomationId $window 'ExportPackagesToCsv')
 
     Write-Host 'WinUI UI E2E passed: settings parity controls and CSV toolbar are reachable.'
