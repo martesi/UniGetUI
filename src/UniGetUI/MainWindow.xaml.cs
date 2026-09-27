@@ -339,6 +339,10 @@ namespace UniGetUI.Interface
             {
                 NavigationPage.NavigateTo(PageType.Installed);
             }
+            else if (baseUrl.StartsWith("showSettingsPage"))
+            {
+                NavigationPage.NavigateTo(PageType.Settings);
+            }
             else
             {
                 Logger.Error(new UriFormatException($"Malformed URL {link}"));

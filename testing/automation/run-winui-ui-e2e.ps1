@@ -65,6 +65,7 @@ try {
     $appProcess = Start-Process `
         -FilePath $executable `
         -WorkingDirectory (Split-Path $executable) `
+        -ArgumentList 'unigetui://showSettingsPage' `
         -PassThru
 
     $windowCondition = [System.Windows.Automation.PropertyCondition]::new(
@@ -86,7 +87,6 @@ try {
         throw 'UniGetUI main window was not found.'
     }
 
-    Invoke-Element (Find-ElementByAutomationId $window 'SettingsNavigationButton')
     Invoke-Element (Find-ElementByAutomationId $window 'OperationsSettingsEntry')
     [void](Find-ElementByAutomationId $window 'InstallerFileNameScheme')
     [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
