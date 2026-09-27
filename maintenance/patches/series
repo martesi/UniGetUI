@@ -19,3 +19,4 @@ classic/1060-classic-winui-startup.patch
 classic/1070-classic-remove-frontend-switch.patch
 security/9000-sqlitepclraw-hardening.patch
 classic/9990-classic-guard.patch
+classic/1100-winui-feature-parity.patch

@@ -1,0 +1,44 @@
+name: WinUI UI E2E
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'src/**/*.cs'
+      - 'src/**/*.xaml'
+      - 'src/**/*.csproj'
+      - 'src/**/*.props'
+      - 'src/**/*.targets'
+      - 'src/**/*.sln'
+      - 'src/**/*.slnx'
+      - 'testing/automation/run-winui-ui-e2e.ps1'
+      - '.github/workflows/winui-ui-e2e.yml'
+      - 'global.json'
+  workflow_dispatch:
+
+jobs:
+  winui-ui-e2e:
+    runs-on: windows-latest
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Restore Windows solution
+        working-directory: src
+        run: dotnet restore UniGetUI.Windows.slnx
+
+      - name: Build WinUI application
+        working-directory: src
+        run: dotnet build UniGetUI/UniGetUI.csproj --no-restore --configuration Release /p:Platform=x64
+
+      - name: Run WinUI UI E2E
+        shell: pwsh
+        run: ./testing/automation/run-winui-ui-e2e.ps1

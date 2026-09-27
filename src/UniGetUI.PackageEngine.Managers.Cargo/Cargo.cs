@@ -73,6 +73,8 @@ public partial class Cargo : PackageManager
         }
     }
 
+    public override bool InstallerUrlFollowsPackageVersion => true;
+
     public Cargo()
     {
         string cargoCommand = OperatingSystem.IsWindows() ? "cargo.exe" : "cargo";
@@ -150,6 +152,7 @@ public partial class Cargo : PackageManager
         using Process p = GetProcess(Status.ExecutablePath, "search -q --color=never " + query);
         IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.FindPackages, p);
         p.Start();
+        RegisterListingProcess(p);
 
         string? line;
         List<Package> Packages = [];
@@ -287,6 +290,7 @@ public partial class Cargo : PackageManager
         IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.OtherTask, p);
         logger.AddToStdOut("Other task: Call the install-update command");
         p.Start();
+        RegisterListingProcess(p);
 
         string? line;
         while ((line = p.StandardOutput.ReadLine()) is not null)
@@ -316,6 +320,7 @@ public partial class Cargo : PackageManager
             "Falling back to `cargo install --list` (cargo-update reported no packages)"
         );
         fallback.Start();
+        RegisterListingProcess(fallback);
         while ((line = fallback.StandardOutput.ReadLine()) is not null)
         {
             fallbackLogger.AddToStdOut(line);

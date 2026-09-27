@@ -63,6 +63,7 @@
       <UserControl Height="16" />
 
       <widgets:SettingsPageButton
+        AutomationProperties.AutomationId="OperationsSettingsEntry"
         x:Name="UpdatesOptionsExpander"
         Click="Operations"
         CornerRadius="8,8,0,0"
@@ -84,6 +85,7 @@
       <UserControl Height="16" />
 
       <widgets:SettingsPageButton
+        AutomationProperties.AutomationId="BackupSettingsEntry"
         x:Name="BackupOptionsExpander"
         Click="Backup"
         CornerRadius="8"

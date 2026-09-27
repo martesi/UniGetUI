@@ -23,6 +23,10 @@ namespace UniGetUI.Interface.Widgets
             set
             {
                 setting_name = value;
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
+                    _checkbox,
+                    value.ToString()
+                );
                 IS_INVERTED = Settings.ResolveKey(value).StartsWith("Disable");
                 _checkbox.IsOn = Settings.Get(setting_name) ^ IS_INVERTED ^ ForceInversion;
                 _textblock.Opacity = _checkbox.IsOn ? 1 : 0.7;

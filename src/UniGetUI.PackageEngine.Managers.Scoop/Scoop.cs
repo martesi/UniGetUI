@@ -468,6 +468,7 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                 p
             );
             p.Start();
+            RegisterListingProcess(p);
 
             return ParseInstalledPackages(ScoopProcess.ReadLines(p, logger));
         }
