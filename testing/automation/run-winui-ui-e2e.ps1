@@ -179,7 +179,7 @@ try {
         throw 'UniGetUI installed-page window was not found.'
     }
 
-    [void](Find-ElementByAutomationId $window 'ExportPackagesToCsv')
+    [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
 
     Write-Host 'WinUI UI E2E passed: settings parity controls and CSV toolbar are reachable.'
 }
