@@ -260,9 +260,32 @@
                       <CheckBox Name="IgnoreUpdatesCheckbox">
                         <widgets:TranslatedTextBlock Text="Ignore future updates for this package" />
                       </CheckBox>
-                      <CheckBox Name="SkipMinorUpdatesCheckbox">
-                        <widgets:TranslatedTextBlock Text="Skip minor updates for this package" />
-                      </CheckBox>
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <CheckBox
+                          Name="SkipMinorUpdatesCheckbox"
+                          Checked="SkipMinorUpdatesCheckbox_Changed"
+                          Unchecked="SkipMinorUpdatesCheckbox_Changed"
+                        >
+                          <widgets:TranslatedTextBlock Text="Skip minor updates for this package" />
+                        </CheckBox>
+                        <widgets:TranslatedTextBlock
+                          VerticalAlignment="Center"
+                          Text="Ignore changes after the first"
+                        />
+                        <ComboBox
+                          Name="SkipMinorLevelComboBox"
+                          MinWidth="64"
+                          VerticalAlignment="Center"
+                        >
+                          <ComboBoxItem Content="1" />
+                          <ComboBoxItem Content="2" />
+                          <ComboBoxItem Content="3" />
+                        </ComboBox>
+                        <widgets:TranslatedTextBlock
+                          VerticalAlignment="Center"
+                          Text="version numbers"
+                        />
+                      </StackPanel>
                       <CheckBox Name="AutoUpdatePackageCheckbox">
                         <widgets:TranslatedTextBlock Text="Automatically update this package" />
                       </CheckBox>
@@ -327,6 +350,8 @@
                       <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                       </Grid.RowDefinitions>
                       <widgets:TranslatedTextBlock
                         Grid.Column="0"
@@ -358,6 +383,15 @@
                         FontFamily="Consolas"
                         Opacity="0.6"
                         TextWrapping="Wrap"
+                      />
+                      <widgets:TranslatedTextBlock
+                        Grid.Row="3"
+                        Grid.ColumnSpan="3"
+                        Margin="0,4,0,0"
+                        FontSize="12"
+                        Opacity="0.7"
+                        Text="%PACKAGE% is replaced with the package ID, and %NAME% with the package name."
+                        WrappingMode="Wrap"
                       />
                     </Grid>
                   </StackPanel>

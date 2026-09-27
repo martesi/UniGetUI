@@ -132,7 +132,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
                     )
                 )
                 {
-                    parameters.AddRange(["--location", $"\"{options.CustomInstallLocation}\""]);
+                    parameters.AddRange(["--location", CoreTools.EscapeCommandLineArgument(options.CustomInstallLocation)]);
                 }
             }
         }
@@ -288,9 +288,9 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         // non-zero with "No applicable installer found" in its output (#4998).
         bool pingetReportedNotApplicable =
             ((WinGet)Manager).SelectedCliToolKind is WinGetCliToolKind.BundledPinget
-            && returnCode != 0
             && processOutput.Any(line =>
                 line.Contains("No applicable installer found", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("No applicable upgrade found", StringComparison.OrdinalIgnoreCase)
             );
 
         if (uintCode is 0x8A15002B || pingetReportedNotApplicable)

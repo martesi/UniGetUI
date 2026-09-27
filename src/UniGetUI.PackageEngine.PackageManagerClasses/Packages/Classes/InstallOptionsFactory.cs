@@ -15,6 +15,9 @@ namespace UniGetUI.PackageEngine.PackageClasses
     /// </summary>
     public static class InstallOptionsFactory
     {
+        public const string PackageIdPlaceholder = "%PACKAGE%";
+        public const string PackageNamePlaceholder = "%NAME%";
+
         private static class StoragePath
         {
             public static string Get(IPackageManager manager) =>
@@ -85,13 +88,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
                 );
                 instance = LoadForManager(package.Manager);
 
-                var legalizedId = CoreTools.MakeValidFileName(package.Id);
-                instance.CustomInstallLocation = instance.CustomInstallLocation.Replace(
-                    "%PACKAGE%",
-                    legalizedId
-                );
             }
 
+            instance.CustomInstallLocation = ExpandPackagePlaceholders(
+                instance.CustomInstallLocation,
+                package
+            );
             instance.CustomInstallLocationIsExplicit = locationIsExplicit;
 
             if (elevated is not null)
@@ -220,42 +222,13 @@ namespace UniGetUI.PackageEngine.PackageClasses
 
         private static InstallOptions EnsureSecureOptions(InstallOptions options)
         {
+            options.CustomInstallLocation = _expandEnvironmentVariables(options.CustomInstallLocation);
+
             if (SecureSettings.Get(SecureSettings.K.AllowCLIArguments))
             {
-                // If CLI arguments are allowed, sanitize them
-                for (int i = 0; i < options.CustomParameters_Install.Count; i++)
-                {
-                    options.CustomParameters_Install[i] = options
-                        .CustomParameters_Install[i]
-                        .Replace("&", "")
-                        .Replace("|", "")
-                        .Replace(";", "")
-                        .Replace("<", "")
-                        .Replace(">", "")
-                        .Replace("\n", "");
-                }
-                for (int i = 0; i < options.CustomParameters_Update.Count; i++)
-                {
-                    options.CustomParameters_Update[i] = options
-                        .CustomParameters_Update[i]
-                        .Replace("&", "")
-                        .Replace("|", "")
-                        .Replace(";", "")
-                        .Replace("<", "")
-                        .Replace(">", "")
-                        .Replace("\n", "");
-                }
-                for (int i = 0; i < options.CustomParameters_Uninstall.Count; i++)
-                {
-                    options.CustomParameters_Uninstall[i] = options
-                        .CustomParameters_Uninstall[i]
-                        .Replace("&", "")
-                        .Replace("|", "")
-                        .Replace(";", "")
-                        .Replace("<", "")
-                        .Replace(">", "")
-                        .Replace("\n", "");
-                }
+                _expandAndSanitizeCliArguments(options.CustomParameters_Install);
+                _expandAndSanitizeCliArguments(options.CustomParameters_Update);
+                _expandAndSanitizeCliArguments(options.CustomParameters_Uninstall);
             }
             else
             {
@@ -313,5 +286,54 @@ namespace UniGetUI.PackageEngine.PackageClasses
 
             return options;
         }
+        private static void _expandAndSanitizeCliArguments(List<string> parameters)
+        {
+            for (int i = 0; i < parameters.Count; i++)
+            {
+                parameters[i] = _expandEnvironmentVariables(parameters[i])
+                    .Replace("&", "")
+                    .Replace("|", "")
+                    .Replace(";", "")
+                    .Replace("<", "")
+                    .Replace(">", "")
+                    .Replace("\n", "");
+            }
+        }
+
+        public static string ExpandPackagePlaceholders(string location, IPackage package)
+        {
+            if (!location.Contains('%'))
+                return location;
+
+            string legalizedId = _legalizeFolderName(package.Id);
+            string legalizedName = _legalizeFolderName(package.Name);
+            if (legalizedName.Length == 0)
+                legalizedName = legalizedId;
+
+            return location
+                .Replace(PackageIdPlaceholder, legalizedId, StringComparison.OrdinalIgnoreCase)
+                .Replace(PackageNamePlaceholder, legalizedName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string _legalizeFolderName(string value) =>
+            CoreTools.MakeValidFileName(value.Replace("%", ""));
+
+        private static string _expandEnvironmentVariables(string value)
+        {
+            if (string.IsNullOrEmpty(value) || !value.Contains('%'))
+                return value;
+
+            try
+            {
+                return Environment.ExpandEnvironmentVariables(value);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not expand environment variables in \"{value}\"");
+                Logger.Warn(ex);
+                return value;
+            }
+        }
+
     }
 }

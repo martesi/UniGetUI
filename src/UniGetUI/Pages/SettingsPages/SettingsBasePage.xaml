@@ -43,6 +43,7 @@
         <ColumnDefinition Width="*" />
       </Grid.ColumnDefinitions>
       <Button
+        AutomationProperties.AutomationId="SettingsBackButton"
         Name="BackButton"
         AutomationProperties.Name="Back"
         Width="36"

@@ -67,6 +67,43 @@ public sealed class UpgradablePackagesLoaderTests : IDisposable
     }
 
     [Fact]
+    public async Task EvaluatePackageAsync_RespectsSkipMinorLevel()
+    {
+        var manager = new PackageManagerBuilder().Build();
+        _ = new InstalledPackagesLoader([manager]);
+        _ = new DiscoverablePackagesLoader([manager]);
+        var loader = new TestUpgradablePackagesLoader([manager]);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.FourPart")
+            .WithVersion("3.4.5.6")
+            .WithNewVersion("3.4.6.6")
+            .Build();
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions
+            {
+                OverridesNextLevelOpts = true,
+                SkipMinorUpdates = true,
+                SkipMinorUpdatesLevel = 4,
+            },
+            package
+        );
+        Assert.True(await loader.EvaluatePackageAsync(package));
+
+        InstallOptionsFactory.SaveForPackage(
+            new InstallOptions
+            {
+                OverridesNextLevelOpts = true,
+                SkipMinorUpdates = true,
+                SkipMinorUpdatesLevel = InstallOptions.DefaultSkipMinorLevel,
+            },
+            package
+        );
+        Assert.False(await loader.EvaluatePackageAsync(package));
+    }
+
+    [Fact]
     public async Task EvaluatePackageAsync_SkipsIgnoredAndSupersededPackages()
     {
         var manager = new PackageManagerBuilder().Build();
@@ -98,6 +135,35 @@ public sealed class UpgradablePackagesLoaderTests : IDisposable
         Assert.False(await loader.EvaluatePackageAsync(ignoredPackage));
         Assert.Contains("Contoso.Ignored", loader.IgnoredPackages.Keys);
         Assert.False(await loader.EvaluatePackageAsync(supersededPackage));
+    }
+
+    // Regression test for issue #5293: the installed version carried a Homebrew build revision
+    // ("18.4_1"), which the version parser read as 18.41. That compared as greater than the
+    // available 18.6, so the loader discarded the update and it never reached the UI.
+    [Fact]
+    public async Task EvaluatePackageAsync_KeepsUpdateWhenInstalledVersionHasBuildRevision()
+    {
+        var manager = new PackageManagerBuilder().Build();
+        var installedLoader = new InstalledPackagesLoader([manager]);
+        _ = new DiscoverablePackagesLoader([manager]);
+        var loader = new TestUpgradablePackagesLoader([manager]);
+
+        await installedLoader.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("postgresql@18")
+                .WithVersion("18.4_1")
+                .Build()
+        );
+
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("postgresql@18")
+            .WithVersion("18.4_1")
+            .WithNewVersion("18.6")
+            .Build();
+
+        Assert.True(await loader.EvaluatePackageAsync(package));
     }
 
     [Fact]

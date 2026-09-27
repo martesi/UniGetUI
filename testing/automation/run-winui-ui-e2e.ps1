@@ -1,0 +1,108 @@
+param(
+    [string] $ExecutablePath
+)
+
+$ErrorActionPreference = 'Stop'
+
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+function Find-Executable {
+    if ($ExecutablePath) {
+        return (Resolve-Path $ExecutablePath).Path
+    }
+
+    $candidate = Get-ChildItem -Path (Join-Path $PSScriptRoot '../../src/UniGetUI/bin') `
+        -Filter 'UniGetUI.exe' -File -Recurse |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if (-not $candidate) {
+        throw 'UniGetUI.exe was not found under src/UniGetUI/bin.'
+    }
+    return $candidate.FullName
+}
+
+function Find-ElementByAutomationId {
+    param(
+        [System.Windows.Automation.AutomationElement] $Root,
+        [string] $AutomationId,
+        [int] $TimeoutSeconds = 30
+    )
+
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        $AutomationId
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $element = $Root.FindFirst(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            $condition
+        )
+        if ($element) {
+            return $element
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    throw "UI element '$AutomationId' was not found."
+}
+
+function Invoke-Element {
+    param([System.Windows.Automation.AutomationElement] $Element)
+
+    $pattern = $Element.GetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern
+    )
+    ([System.Windows.Automation.InvokePattern] $pattern).Invoke()
+}
+
+$appProcess = $null
+try {
+    Get-Process -Name UniGetUI -ErrorAction SilentlyContinue | Stop-Process -Force
+
+    $executable = Find-Executable
+    $appProcess = Start-Process `
+        -FilePath $executable `
+        -WorkingDirectory (Split-Path $executable) `
+        -PassThru
+
+    $windowCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+        $appProcess.Id
+    )
+    $deadline = (Get-Date).AddSeconds(45)
+    do {
+        $window = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst(
+            [System.Windows.Automation.TreeScope]::Children,
+            $windowCondition
+        )
+        if ($window) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if (-not $window) {
+        throw 'UniGetUI main window was not found.'
+    }
+
+    Invoke-Element (Find-ElementByAutomationId $window 'SettingsNavigationButton')
+    Invoke-Element (Find-ElementByAutomationId $window 'OperationsSettingsEntry')
+    [void](Find-ElementByAutomationId $window 'InstallerFileNameScheme')
+    [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
+
+    Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
+    Invoke-Element (Find-ElementByAutomationId $window 'BackupSettingsEntry')
+    [void](Find-ElementByAutomationId $window 'MaxLocalBackupCount')
+    [void](Find-ElementByAutomationId $window 'MaxLocalBackupCountCustom')
+
+    Invoke-Element (Find-ElementByAutomationId $window 'InstalledNavigationButton')
+    [void](Find-ElementByAutomationId $window 'ExportPackagesToCsv')
+
+    Write-Host 'WinUI UI E2E passed: settings parity controls and CSV toolbar are reachable.'
+}
+finally {
+    if ($appProcess -and -not $appProcess.HasExited) {
+        Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+}

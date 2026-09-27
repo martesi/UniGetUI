@@ -37,12 +37,21 @@ namespace UniGetUI.PackageEngine.PackageLoader
                 return false;
 
             if (package.NewerVersionIsInstalled())
-                return false;
-
-            if (package.IsUpdateMinor() && (await package.GetInstallOptions()).SkipMinorUpdates)
             {
                 Logger.Info(
-                    $"Ignoring package {package.Id} because it is a minor update ({package.VersionString} -> {package.NewVersionString}) and SkipMinorUpdates is set to true."
+                    $"Ignoring package {package.Id} because a newer or equal version than {package.NewVersionString} is already installed."
+                );
+                return false;
+            }
+
+            var installOptions = await package.GetInstallOptions();
+            if (
+                installOptions.SkipMinorUpdates
+                && package.IsUpdateMinor(installOptions.SkipMinorUpdatesLevel)
+            )
+            {
+                Logger.Info(
+                    $"Ignoring package {package.Id} because it is a minor update ({package.VersionString} -> {package.NewVersionString}) below skip level {installOptions.SkipMinorUpdatesLevel} and SkipMinorUpdates is set to true."
                 );
                 return false;
             }

@@ -44,6 +44,7 @@ namespace UniGetUI.PackageEngine.Classes.Manager
         public IPackageDetailsHelper DetailsHelper { get; }
         public IPackageOperationHelper OperationHelper { get; }
         public IReadOnlyList<ManagerDependency> Dependencies { get; }
+        public bool InstallerUrlFollowsPackageVersion => false;
 
         public NullPackageManager()
         {

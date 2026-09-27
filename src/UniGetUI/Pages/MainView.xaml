@@ -289,6 +289,7 @@
 
     <NavigationView.MenuItems>
       <controls1:CustomNavViewItem
+        AutomationProperties.AutomationId="DiscoverNavigationButton"
         x:Name="DiscoverNavBtn"
         FontSize="14"
         FontWeight="SemiBold"
@@ -298,6 +299,7 @@
       />
 
       <controls1:CustomNavViewItem
+        AutomationProperties.AutomationId="UpdatesNavigationButton"
         x:Name="UpdatesNavBtn"
         FontSize="14"
         FontWeight="SemiBold"
@@ -310,6 +312,7 @@
         </controls1:CustomNavViewItem.InfoBadge>
       </controls1:CustomNavViewItem>
       <controls1:CustomNavViewItem
+        AutomationProperties.AutomationId="InstalledNavigationButton"
         x:Name="InstalledNavBtn"
         FontSize="14"
         FontWeight="SemiBold"
@@ -318,6 +321,7 @@
         Text="Installed Packages"
       />
       <controls1:CustomNavViewItem
+        AutomationProperties.AutomationId="BundlesNavigationButton"
         x:Name="BundlesNavBtn"
         FontSize="14"
         FontWeight="SemiBold"
@@ -342,6 +346,7 @@
     </NavigationView.MenuItems>
     <NavigationView.FooterMenuItems>
       <controls1:CustomNavViewItem
+        AutomationProperties.AutomationId="SettingsNavigationButton"
         x:Name="SettingsNavBtn"
         IconSize="20"
         Tag="Settings"
@@ -359,6 +364,7 @@
         </controls1:CustomNavViewItem.Icon>
       </controls1:CustomNavViewItem>
       <controls1:CustomNavViewItem
+        AutomationProperties.AutomationId="ManagersNavigationButton"
         x:Name="ManagersNavBtn"
         GlyphIcon="&#xE835;"
         IconSize="20"

@@ -2,7 +2,9 @@ using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 using CommunityToolkit.WinUI;
+using ExternalLibraries.Pickers;
 using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
@@ -10,6 +12,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
@@ -911,6 +914,7 @@ namespace UniGetUI.Interface
                         toolButton.LabelPosition = CommandBarLabelPosition.Collapsed;
                     }
                     toolButton.Label = text;
+                    Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toolButton, text);
                 }
                 else if (item is BetterMenuItem menuItem)
                 {
@@ -1663,6 +1667,7 @@ namespace UniGetUI.Interface
 
         private bool? _pageIsWide;
         private bool? _titleHidden;
+        private bool? _toolbarLabelsHidden;
 
         private void ABSTRACT_PAGE_SizeChanged(object sender, SizeChangedEventArgs e)
         {
@@ -1698,6 +1703,83 @@ namespace UniGetUI.Interface
                     MainTitle.FontSize = 24;
                     _pageIsWide = true;
                 }
+            }
+
+            if (ActualWidth < 900)
+            {
+                if (_toolbarLabelsHidden != true)
+                {
+                    _toolbarLabelsHidden = true;
+                    ToolBar.DefaultLabelPosition = CommandBarDefaultLabelPosition.Collapsed;
+                }
+            }
+            else if (_toolbarLabelsHidden != false)
+            {
+                _toolbarLabelsHidden = false;
+                ToolBar.DefaultLabelPosition = CommandBarDefaultLabelPosition.Right;
+            }
+        }
+
+        protected async Task ExportPackagesToCsvAsync()
+        {
+            List<IPackage> packages = FilteredPackages.GetCheckedPackages();
+            if (packages.Count == 0)
+                packages = FilteredPackages.GetPackages();
+
+            if (packages.Count == 0)
+            {
+                DialogHelper.ShowDismissableBalloon(
+                    CoreTools.Translate("Nothing to export"),
+                    CoreTools.Translate("There are no packages to export.")
+                );
+                return;
+            }
+
+            try
+            {
+                string defaultName = CoreTools.MakeValidFileName(MainTitle.Text) + ".csv";
+                string file = new FileSavePicker(
+                    MainApp.Instance.MainWindow.GetWindowHandle()
+                ).Show(["*.csv"], defaultName);
+                if (file == String.Empty)
+                    return;
+
+                StringBuilder csv = new();
+                List<string> header =
+                [
+                    CoreTools.Translate("Package Name"),
+                    CoreTools.Translate("Package ID"),
+                    CoreTools.Translate("Version"),
+                ];
+                if (RoleIsUpdateLike)
+                    header.Add(CoreTools.Translate("New version"));
+                header.Add(CoreTools.Translate("Source"));
+                csv.AppendLine(string.Join(",", header.Select(CsvExportHelpers.EscapeField)));
+
+                foreach (IPackage package in packages)
+                {
+                    List<string> row = [package.Name, package.Id, package.VersionString];
+                    if (RoleIsUpdateLike)
+                        row.Add(package.NewVersionString);
+                    row.Add(package.Source.AsString_DisplayName);
+                    csv.AppendLine(string.Join(",", row.Select(CsvExportHelpers.EscapeField)));
+                }
+
+                await File.WriteAllTextAsync(file, csv.ToString(), new UTF8Encoding(true));
+                DialogHelper.ShowDismissableBalloon(
+                    CoreTools.Translate("Success!"),
+                    CoreTools.Translate("The file was saved to {0}", file)
+                );
+                await CoreTools.ShowFileOnExplorer(file);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("An error occurred while exporting packages to CSV");
+                Logger.Error(ex);
+                DialogHelper.ShowDismissableBalloon(
+                    CoreTools.Translate("An error occurred"),
+                    CoreTools.Translate("The file could not be saved:") + " " + ex.Message
+                );
             }
         }
 

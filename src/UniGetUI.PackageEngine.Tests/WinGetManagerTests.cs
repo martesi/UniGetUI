@@ -1119,6 +1119,29 @@ public sealed class WinGetManagerTests : IDisposable
     }
 
     [Fact]
+    public void WinGetUpdateNotApplicableViaPingetWithZeroExitCodeFails()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            ["No applicable upgrade found."],
+            0
+        );
+
+        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+        Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+    }
+
+    [Fact]
     public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
     {
         var manager = new WinGet();

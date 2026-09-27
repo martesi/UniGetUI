@@ -41,6 +41,19 @@ public sealed class NewerVersionIsInstalledTests : IDisposable
     [InlineData("2.0.0", "8b640eef", false)]
     [InlineData("", "2.0.0", false)]
     [InlineData("1.0.0;3.0.0", "2.0.0", true)]
+    // Issue #5293: a Homebrew build revision ("18.4_1") used to parse as 18.41 and shadow the
+    // newer upstream release, silently hiding the update.
+    [InlineData("18.4_1", "18.6", false)]
+    [InlineData("18.6_1", "18.6", true)]
+    // Same bug on a four-part upstream version, where the revision used to be folded into the
+    // fourth component (1.2.3.4_1 -> 1.2.3.41) because the parser only kept four segments.
+    [InlineData("1.2.3.4_1", "1.2.3.5", false)]
+    [InlineData("1.2.3.4_1", "1.2.3.4_2", false)]
+    [InlineData("1.2.3.4_2", "1.2.3.4_1", true)]
+    // An underscore before a pre-release tag stays unparseable, so upgrading off a pre-release
+    // onto the final release must remain visible rather than being read as 2.0.0.1 >= 2.0.0.
+    [InlineData("2.0.0_rc1", "2.0.0", false)]
+    [InlineData("2.0.0_beta2", "2.0.0", false)]
     public async Task NewerVersionIsInstalled_ReturnsExpectedResult(string installedVersions, string newVersion, bool expected)
     {
         var manager = new PackageManagerBuilder().Build();

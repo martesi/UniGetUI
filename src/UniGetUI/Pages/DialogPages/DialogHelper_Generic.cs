@@ -15,6 +15,7 @@ using UniGetUI.Interface;
 using UniGetUI.Interface.Dialogs;
 using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine;
+using UniGetUI.PackageEngine.Classes.Manager.Classes;
 using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using UniGetUI.PackageEngine.PackageLoader;
 using Windows.UI;
@@ -24,14 +25,14 @@ namespace UniGetUI.Pages.DialogPages;
 public static partial class DialogHelper
 {
     public static async Task ShowMissingDependency(
-        string dep_name,
-        string exe_name,
-        string exe_args,
-        string fancy_command,
+        ManagerDependency dependency,
         int current,
         int total
     )
     {
+        string dep_name = dependency.Name;
+        string fancy_command = dependency.FancyInstallCommand;
+
         if (
             Settings.GetDictionaryItem<string, string>(Settings.K.DependencyManagement, dep_name)
             == "skipped"
@@ -138,9 +139,10 @@ public static partial class DialogHelper
                     dialog.SecondaryButtonText = "";
                     dialog.PrimaryButtonText = CoreTools.Translate("Please wait");
                     infotext.Text = CoreTools.Translate(
-                        "Please wait while {0} is being installed. A black window may show up. Please wait until it closes.",
+                        "Please wait while {0} is being installed. This may take several minutes.",
                         dep_name
                     );
+                    var (exe_name, exe_args) = dependency.GetInstallCommand();
                     Process install_dep_p = new()
                     {
                         StartInfo = new ProcessStartInfo
@@ -151,6 +153,18 @@ public static partial class DialogHelper
                     };
                     install_dep_p.Start();
                     await install_dep_p.WaitForExitAsync();
+
+                    if (!await dependency.IsInstalled())
+                    {
+                        throw new InvalidOperationException(
+                            CoreTools.Translate(
+                                "The installer finished, but {0} could not be found on your system.",
+                                dep_name
+                            )
+                        );
+                    }
+
+                    has_installed = true;
                     dialog.IsPrimaryButtonEnabled = true;
                     dialog.IsSecondaryButtonEnabled = true;
                     if (current < total)
@@ -183,6 +197,8 @@ public static partial class DialogHelper
                     Logger.Error(ex);
                     dialog.IsPrimaryButtonEnabled = true;
                     dialog.IsSecondaryButtonEnabled = true;
+                    block_closing = false;
+                    has_installed = false;
                     infotext.Text =
                         CoreTools.Translate("An error occurred:")
                         + " "
@@ -194,9 +210,10 @@ public static partial class DialogHelper
                         (current < total)
                             ? CoreTools.Translate("Continue")
                             : CoreTools.Translate("Close");
+                    dialog.SecondaryButtonText = CoreTools.Translate("Not right now");
+                    dialog.PrimaryButtonText = CoreTools.Translate("Retry");
                 }
 
-                has_installed = true;
                 progress.Opacity = .0F;
                 progress.IsIndeterminate = false;
             }

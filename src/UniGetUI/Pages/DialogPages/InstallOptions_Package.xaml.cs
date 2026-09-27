@@ -160,6 +160,8 @@ namespace UniGetUI.Interface.Dialogs
             }
 
             SkipMinorUpdatesCheckbox.IsChecked = Options.SkipMinorUpdates;
+            SkipMinorLevelComboBox.SelectedIndex = Options.SkipMinorUpdatesLevel - 2;
+            SkipMinorLevelComboBox.IsEnabled = Options.SkipMinorUpdates;
 
             if (Package.Manager.Capabilities.SupportsCustomVersions)
             {
@@ -422,6 +424,10 @@ namespace UniGetUI.Interface.Dialogs
                 options.Version = "";
             }
             options.SkipMinorUpdates = SkipMinorUpdatesCheckbox?.IsChecked ?? false;
+            options.SkipMinorUpdatesLevel =
+                SkipMinorLevelComboBox.SelectedIndex >= 0
+                    ? SkipMinorLevelComboBox.SelectedIndex + 2
+                    : InstallOptions.DefaultSkipMinorLevel;
 
             if (updateDetachedOptions)
             {
@@ -462,6 +468,12 @@ namespace UniGetUI.Interface.Dialogs
         {
             CustomInstallLocation.Text = packageInstallLocation;
             _ = GenerateCommand();
+        }
+
+        private void SkipMinorUpdatesCheckbox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (SkipMinorLevelComboBox is not null)
+                SkipMinorLevelComboBox.IsEnabled = SkipMinorUpdatesCheckbox.IsChecked ?? false;
         }
 
         private void CloseButton_Click(object sender, RoutedEventArgs e)
