@@ -242,6 +242,10 @@ namespace UniGetUI.Interface.SoftwarePages
             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
             ToolBar.PrimaryCommands.Add(ExportSelection);
             ToolBar.PrimaryCommands.Add(ExportCsv);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
+                ToolBar,
+                "ExportPackagesToCsv"
+            );
 
             Dictionary<DependencyObject, string> Labels = new()
             { // Entries with a trailing space are collapsed
