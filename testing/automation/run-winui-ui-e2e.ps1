@@ -86,6 +86,31 @@ function Invoke-Element {
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
 }
 
+function Ensure-ToggleOn {
+    param([System.Windows.Automation.AutomationElement] $Element)
+
+    try {
+        $pattern = $Element.GetCurrentPattern(
+            [System.Windows.Automation.TogglePattern]::Pattern
+        )
+        if ($pattern.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
+            ([System.Windows.Automation.TogglePattern] $pattern).Toggle()
+        }
+        return
+    }
+    catch {
+        Invoke-Element $Element
+    }
+}
+
+function Select-LastComboBoxItem {
+    param([System.Windows.Automation.AutomationElement] $Element)
+
+    $Element.SetFocus()
+    [System.Windows.Forms.SendKeys]::SendWait('{END}')
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+}
+
 $appProcess = $null
 try {
     Get-Process -Name UniGetUI -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -122,7 +147,10 @@ try {
 
     Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
     Invoke-Element (Find-ElementByAutomationId $window 'BackupSettingsEntry')
-    [void](Find-ElementByAutomationId $window 'MaxLocalBackupCount')
+    Ensure-ToggleOn (Find-ElementByAutomationId $window 'EnablePackageBackup_LOCAL')
+    Ensure-ToggleOn (Find-ElementByAutomationId $window 'EnableBackupTimestamping')
+    $backupCountSelector = Find-ElementByAutomationId $window 'MaxLocalBackupCount'
+    Select-LastComboBoxItem $backupCountSelector
     [void](Find-ElementByAutomationId $window 'MaxLocalBackupCountCustom')
 
     Invoke-Element (Find-ElementByAutomationId $window 'InstalledNavigationButton')
