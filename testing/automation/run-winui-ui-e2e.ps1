@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
 
 function Find-Executable {
     if ($ExecutablePath) {
@@ -51,10 +52,38 @@ function Find-ElementByAutomationId {
 function Invoke-Element {
     param([System.Windows.Automation.AutomationElement] $Element)
 
-    $pattern = $Element.GetCurrentPattern(
-        [System.Windows.Automation.InvokePattern]::Pattern
-    )
-    ([System.Windows.Automation.InvokePattern] $pattern).Invoke()
+    try {
+        $pattern = $Element.GetCurrentPattern(
+            [System.Windows.Automation.InvokePattern]::Pattern
+        )
+        ([System.Windows.Automation.InvokePattern] $pattern).Invoke()
+        return
+    }
+    catch {
+    }
+
+    try {
+        $pattern = $Element.GetCurrentPattern(
+            [System.Windows.Automation.SelectionItemPattern]::Pattern
+        )
+        ([System.Windows.Automation.SelectionItemPattern] $pattern).Select()
+        return
+    }
+    catch {
+    }
+
+    try {
+        $pattern = $Element.GetCurrentPattern(
+            [System.Windows.Automation.LegacyIAccessiblePattern]::Pattern
+        )
+        ([System.Windows.Automation.LegacyIAccessiblePattern] $pattern).DoDefaultAction()
+        return
+    }
+    catch {
+    }
+
+    $Element.SetFocus()
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
 }
 
 $appProcess = $null
