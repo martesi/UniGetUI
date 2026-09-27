@@ -472,8 +472,7 @@ namespace UniGetUI.Interface.Dialogs
 
         private void SkipMinorUpdatesCheckbox_Changed(object sender, RoutedEventArgs e)
         {
-            if (SkipMinorLevelComboBox is not null)
-                SkipMinorLevelComboBox.IsEnabled = SkipMinorUpdatesCheckbox.IsChecked ?? false;
+            SkipMinorLevelComboBox?.IsEnabled = SkipMinorUpdatesCheckbox.IsChecked ?? false;
         }
 
         private void CloseButton_Click(object sender, RoutedEventArgs e)
