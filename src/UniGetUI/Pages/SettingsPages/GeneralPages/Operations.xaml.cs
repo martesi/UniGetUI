@@ -30,6 +30,28 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             ParallelOperationCount.AddItem("75", "75", false);
             ParallelOperationCount.AddItem("100", "100", false);
             ParallelOperationCount.ShowAddedItems();
+
+            InstallerNameSchemeCard.AddItem(
+                CoreTools.Translate("Name given by the publisher"),
+                InstallerFileNaming.PublisherNameValue,
+                false
+            );
+            InstallerNameSchemeCard.AddItem(
+                CoreTools.Translate("Package name and version"),
+                InstallerFileNaming.NameAndVersionValue,
+                false
+            );
+            InstallerNameSchemeCard.AddItem(
+                CoreTools.Translate("Package identifier and version"),
+                InstallerFileNaming.IdAndVersionValue,
+                false
+            );
+            InstallerNameSchemeCard.AddItem(
+                CoreTools.Translate("Name given by the publisher, followed by the version"),
+                InstallerFileNaming.PublisherNameAndVersionValue,
+                false
+            );
+            InstallerNameSchemeCard.ShowAddedItems();
         }
 
         public void ShowRestartBanner(object sender, EventArgs e) =>

@@ -14,6 +14,10 @@ The target tree for this snapshot is recorded in
 the replayed Git tree with that commit, so the check covers the complete current
 Classic source/build tree rather than only a selected file list.
 
+The final `classic/1100-winui-feature-parity.patch` replay restores the current
+Classic WinUI source, tests, and UI smoke harness, including the feature-parity
+changes carried forward from the temporary backport branch.
+
 ## Commands
 
 From the repository root:

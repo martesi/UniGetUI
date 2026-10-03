@@ -33,6 +33,8 @@ namespace UniGetUI.Interface.SoftwarePages
         private BetterMenuItem? MenuPackageDetails;
         private BetterMenuItem? MenuOpenInstallLocation;
         private BetterMenuItem? MenuDownloadInstaller;
+        private BetterMenuItem? MenuUpdate;
+        private BetterMenuItem? MenuUpdateAsAdmin;
 
         public InstalledPackagesPage()
             : base(
@@ -126,6 +128,24 @@ namespace UniGetUI.Interface.SoftwarePages
 
             menu.Items.Add(new MenuFlyoutSeparator());
 
+            MenuUpdate = new()
+            {
+                Text = CoreTools.AutoTranslated("Update"),
+                IconName = IconType.Update,
+            };
+            MenuUpdate.Click += (_, _) => LaunchUpdate(SelectedItem);
+            menu.Items.Add(MenuUpdate);
+
+            MenuUpdateAsAdmin = new()
+            {
+                Text = CoreTools.AutoTranslated("Update as administrator"),
+                IconName = IconType.UAC,
+            };
+            MenuUpdateAsAdmin.Click += (_, _) => LaunchUpdate(SelectedItem, elevated: true);
+            menu.Items.Add(MenuUpdateAsAdmin);
+
+            menu.Items.Add(new MenuFlyoutSeparator());
+
             MenuDownloadInstaller = new BetterMenuItem
             {
                 Text = CoreTools.AutoTranslated("Download installer"),
@@ -206,6 +226,11 @@ namespace UniGetUI.Interface.SoftwarePages
             AppBarButton IgnoreSelected = new();
             AppBarButton ManageIgnored = new();
             AppBarButton ExportSelection = new();
+            AppBarButton ExportCsv = new();
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
+                ExportCsv,
+                "ExportPackagesToCsv"
+            );
 
             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
             ToolBar.PrimaryCommands.Add(InstallationSettings);
@@ -216,6 +241,11 @@ namespace UniGetUI.Interface.SoftwarePages
             ToolBar.PrimaryCommands.Add(ManageIgnored);
             ToolBar.PrimaryCommands.Add(new AppBarSeparator());
             ToolBar.PrimaryCommands.Add(ExportSelection);
+            ToolBar.PrimaryCommands.Add(ExportCsv);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
+                ToolBar,
+                "ExportPackagesToCsv"
+            );
 
             Dictionary<DependencyObject, string> Labels = new()
             { // Entries with a trailing space are collapsed
@@ -228,6 +258,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 { IgnoreSelected, CoreTools.Translate("Ignore selected packages") },
                 { ManageIgnored, CoreTools.Translate("Manage ignored updates") },
                 { ExportSelection, CoreTools.Translate("Add selection to bundle") },
+                { ExportCsv, CoreTools.Translate("Export to CSV") },
             };
 
             Dictionary<DependencyObject, IconType> Icons = new()
@@ -240,6 +271,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 { IgnoreSelected, IconType.Pin },
                 { ManageIgnored, IconType.ClipboardList },
                 { ExportSelection, IconType.AddTo },
+                { ExportCsv, IconType.SaveAs },
             };
 
             ApplyTextAndIconsToToolbar(Labels, Icons);
@@ -248,6 +280,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 ShowDetailsForPackage(SelectedItem, TEL_InstallReferral.ALREADY_INSTALLED);
 
             ExportSelection.Click += ExportSelection_Click;
+            ExportCsv.Click += (_, _) => _ = ExportPackagesToCsvAsync();
             InstallationSettings.Click += (_, _) =>
                 _ = ShowInstallationOptionsForPackage(SelectedItem);
             ManageIgnored.Click += async (_, _) => await DialogHelper.ManageIgnoredUpdates();
@@ -340,6 +373,8 @@ namespace UniGetUI.Interface.SoftwarePages
                 || MenuPackageDetails is null
                 || MenuOpenInstallLocation is null
                 || MenuDownloadInstaller is null
+                || MenuUpdate is null
+                || MenuUpdateAsAdmin is null
             )
             {
                 Logger.Error("Menu items are null on InstalledPackagesTab");
@@ -349,6 +384,15 @@ namespace UniGetUI.Interface.SoftwarePages
             MenuAsAdmin.IsEnabled = package.Manager.Capabilities.CanRunAsAdmin;
             MenuInteractive.IsEnabled = package.Manager.Capabilities.CanRunInteractively;
             MenuRemoveData.IsEnabled = package.Manager.Capabilities.CanRemoveDataOnUninstall;
+
+            IPackage? upgradable = package.GetUpgradablePackage();
+            bool canUpdate = upgradable is not null;
+            MenuUpdate.IsEnabled = canUpdate;
+            MenuUpdate.Text = upgradable is null
+                ? CoreTools.Translate("Update")
+                : CoreTools.Translate("Update to version {0}", upgradable.NewVersionString);
+            MenuUpdateAsAdmin.IsEnabled =
+                canUpdate && package.Manager.Capabilities.CanRunAsAdmin;
 
             bool IS_LOCAL = package.Source.IsVirtualManager;
 
@@ -429,35 +473,8 @@ namespace UniGetUI.Interface.SoftwarePages
             try
             {
                 string backupContents = await GenerateBackupContents();
-                string dirName = Settings.GetValue(Settings.K.ChangeBackupOutputDirectory);
-                if (dirName == "")
-                {
-                    dirName = CoreData.UniGetUI_DefaultBackupDirectory;
-                }
-
-                if (!Directory.Exists(dirName))
-                {
-                    Directory.CreateDirectory(dirName);
-                }
-
-                string fileName = Settings.GetValue(Settings.K.ChangeBackupFileName);
-                if (fileName == "")
-                {
-                    fileName = CoreTools.Translate(
-                        "{pcName} installed packages",
-                        new Dictionary<string, object?> { { "pcName", Environment.MachineName } }
-                    );
-                }
-
-                if (Settings.Get(Settings.K.EnableBackupTimestamping))
-                {
-                    fileName += " " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss");
-                }
-
-                fileName += ".ubundle";
-
-                string filePath = Path.Combine(dirName, fileName);
-                await File.WriteAllTextAsync(filePath, backupContents);
+                string filePath = await LocalBackupManager.SaveBackupAsync(backupContents);
+                await Task.Run(LocalBackupManager.ApplyRetentionLimit);
                 HasDoneBackup = true;
                 Logger.ImportantInfo("Backup saved to " + filePath);
             }
@@ -466,6 +483,13 @@ namespace UniGetUI.Interface.SoftwarePages
                 Logger.Error("An error occurred while performing a LOCAL backup");
                 Logger.Error(ex);
             }
+        }
+
+        private static void LaunchUpdate(IPackage? package, bool? elevated = null)
+        {
+            IPackage? upgradable = package?.GetUpgradablePackage();
+            if (upgradable is not null)
+                _ = MainApp.Operations.Update(upgradable, elevated: elevated);
         }
 
         private void MenuUninstall_Invoked(object sender, RoutedEventArgs args) =>

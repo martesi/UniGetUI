@@ -132,7 +132,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
                     )
                 )
                 {
-                    parameters.AddRange(["--location", $"\"{options.CustomInstallLocation}\""]);
+                    parameters.AddRange(["--location", CoreTools.EscapeCommandLineArgument(options.CustomInstallLocation)]);
                 }
             }
         }

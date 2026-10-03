@@ -20,6 +20,10 @@ namespace UniGetUI.Interface.Widgets
             set
             {
                 setting_name = value;
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
+                    _textbox,
+                    value.ToString()
+                );
                 _textbox.Text = Settings.GetValue(setting_name);
                 _textbox.TextChanged += (_, _) => SaveValue();
             }

@@ -47,6 +47,7 @@
         <Compile Include="..\Shared\SharedPreUiCommandDispatcher.cs" Link="Shared\SharedPreUiCommandDispatcher.cs" />
         <Compile Include="..\UniGetUI\AutoUpdater.Helpers.cs" Link="AutoUpdater.Helpers.cs" />
         <Compile Include="..\UniGetUI\CLIHandler.cs" Link="CLIHandler.cs" />
+        <Compile Include="..\UniGetUI\CsvExportHelpers.cs" Link="CsvExportHelpers.cs" />
         <Compile Include="..\UniGetUI\ModernAppLauncher.cs" Link="ModernAppLauncher.cs" />
     </ItemGroup>
 </Project>

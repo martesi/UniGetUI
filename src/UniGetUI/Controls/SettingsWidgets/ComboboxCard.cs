@@ -21,7 +21,14 @@ namespace UniGetUI.Interface.Widgets
         private Settings.K settings_name = Settings.K.Unset;
         public Settings.K SettingName
         {
-            set { settings_name = value; }
+            set
+            {
+                settings_name = value;
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
+                    _combobox,
+                    value.ToString()
+                );
+            }
         }
 
         public string Text

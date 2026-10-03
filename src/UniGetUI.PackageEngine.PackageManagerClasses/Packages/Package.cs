@@ -333,35 +333,73 @@ namespace UniGetUI.PackageEngine.PackageClasses
             return false;
         }
 
-        public async Task<string?> GetInstallerFileName()
+        private string ResolveInstallerVersion()
         {
-            if (Manager.Name.StartsWith("PowerShell") || Manager.Name.StartsWith(".NET"))
-            {
-                return CoreTools.MakeValidFileName($"{Id}.nupkg");
-            }
-            else
-            {
-                if (!Details.IsPopulated)
-                    await Details.Load();
-                if (Details.InstallerUrl is null)
-                    return null;
-                return await CoreTools.GetFileNameAsync(Details.InstallerUrl);
-            }
+            if (Manager.InstallerUrlFollowsPackageVersion)
+                return VersionString;
+
+            if (IsUpgradable)
+                return NewVersionString;
+
+            if (GetUpgradablePackage() is { } upgradable)
+                return upgradable.NewVersionString;
+
+            if (GetAvailablePackage() is { } available)
+                return available.VersionString;
+
+            return VersionString;
         }
 
-        public virtual bool IsUpdateMinor()
+        public async Task<string?> GetInstallerFileName()
         {
-            if (!IsUpgradable)
-                return false;
+            var scheme = InstallerFileNaming.ResolveScheme();
+            string version = scheme is InstallerNameScheme.PublisherName
+                ? ""
+                : ResolveInstallerVersion();
+
+            if (Manager.Name.StartsWith("PowerShell") || Manager.Name.StartsWith(".NET"))
+            {
+                return InstallerFileNaming.Build(
+                    $"{Id}.nupkg",
+                    Name,
+                    Id,
+                    version,
+                    "nupkg",
+                    scheme
+                );
+            }
+
+            if (!Details.IsPopulated)
+                await Details.Load();
+            if (Details.InstallerUrl is null)
+                return null;
+            return InstallerFileNaming.Build(
+                await CoreTools.GetFileNameAsync(Details.InstallerUrl),
+                Name,
+                Id,
+                version,
+                Details.InstallerType,
+                scheme
+            );
+        }
+
+        private int HighestChangedVersionComponent()
+        {
             if (
                 NormalizedVersion == CoreTools.Version.Null
                 || NormalizedNewVersion == CoreTools.Version.Null
             )
+                return 0;
+            return NormalizedVersion.FirstDifferingComponent(NormalizedNewVersion);
+        }
+
+        public virtual bool IsUpdateMinor(int level = InstallOptions.DefaultSkipMinorLevel)
+        {
+            if (!IsUpgradable)
                 return false;
 
-            return NormalizedVersion.Major == NormalizedNewVersion.Major
-                && NormalizedVersion.Minor == NormalizedNewVersion.Minor
-                && NormalizedVersion != NormalizedNewVersion;
+            int changed = HighestChangedVersionComponent();
+            return changed >= level;
         }
 
         public virtual Task<InstallOptions> GetInstallOptions() =>
