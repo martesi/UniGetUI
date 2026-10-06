@@ -1,12 +1,27 @@
-# UniGetUI - Copilot Instructions
+# UniGetUI Classic - Agent Instructions
 
 ## Project Overview
 
-UniGetUI is a WinUI 3 desktop app (C#/.NET 10, Windows App SDK) providing a GUI for CLI package managers (WinGet, Scoop, Chocolatey, Pip, Npm, .NET Tool, PowerShell Gallery, Cargo, Vcpkg).
+UniGetUI Classic preserves the WinUI 3 frontend from upstream v2026.2.1 and selectively imports backend and security fixes. It is a Windows desktop app (C#/.NET 10, Windows App SDK) providing a GUI for CLI package managers (WinGet, Scoop, Chocolatey, Pip, Npm, .NET Tool, PowerShell Gallery, Cargo, Vcpkg).
 
 Solution entry points:
-- `src/UniGetUI.Windows.slnx` - official Windows solution; builds the WinUI 3 launcher/classic app and the Avalonia app
-- `src/UniGetUI.Avalonia.slnx` - experimental cross-platform Avalonia port
+- `src/UniGetUI.Windows.slnx` - Classic Windows solution; builds WinUI and shared backend projects
+- `src/UniGetUI.Avalonia.slnx` - inherited experimental port; excluded from Classic releases
+
+## Classic maintenance
+
+- Import upstream fixes selectively. Do not merge the upstream branch into Classic.
+- Review the actual diff and touched paths. Prefer shared Core, PackageEngine, and manager fixes.
+- Split mixed backend/Avalonia changes. Adapt behavior to WinUI only when Classic needs it; skip Avalonia-only changes.
+- Keep compatibility adapters small. Avoid duplicating PackageEngine or manager implementations.
+- Prioritize security, then backend correctness, then UI features. Before a release, review upstream changes since the last reviewed tag and identify security fixes.
+- Preserve imported provenance with `Upstream-Commit:` and `Upstream-PR:` trailers. Downstream patch files need a `Classic-Source-Commit:` trailer.
+- Keep patch files and `maintenance/patches/series` current. Update `classic_source_commit` in `maintenance/patch-stack.json` to the source snapshot; retain that commit on a remote branch.
+- Run patch replay verification from the maintenance checkout before submitting a patch-stack change. Release builds use the replayed source tree.
+- Put new skipped/adapted decisions in `maintenance/PATCH_STACK.md` only when the reason is not clear from the patch. Do not maintain a second applied-change ledger.
+- Preserve the separate Classic installation and update identity described in `CLASSIC.md`. Keep `BundleModernApp=false` in `src/Directory.Build.targets`.
+
+See `maintenance/PATCH_STACK.md` for replay commands and the patch update process.
 
 ## Architecture
 
@@ -39,33 +54,25 @@ The constructor sets `Capabilities`, `Properties`, and wires the helpers. See `s
 
 ## Build & Test
 
-```shell
-# Restore & test (from src/)
-dotnet restore
-dotnet test --verbosity q --nologo
+Run from the repository root on Windows with the SDK selected by `global.json`:
 
-# Publish release build
+```powershell
+dotnet restore src/UniGetUI.Windows.slnx
+dotnet build src/UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64
+dotnet test src/UniGetUI.Windows.slnx --no-restore --verbosity q --nologo /p:Platform=x64
 dotnet publish src/UniGetUI/UniGetUI.csproj /p:Configuration=Release /p:Platform=x64
+```
+
+For patch-stack changes, run from the maintenance checkout:
+
+```powershell
+pwsh ./scripts/verify-patch-stack.ps1
 ```
 
 - Target framework: `net10.0-windows10.0.26100.0` (min `10.0.19041`)
 - Build generates secrets via `src/UniGetUI/Services/generate-secrets.ps1` and integrity tree via `scripts/generate-integrity-tree.ps1`
 - Self-contained, publish-trimmed (partial), Windows App SDK self-contained
 - Tests use **xUnit** (`[Fact]`, `Assert.*`)
-
-## Avalonia DevTools (Developer-Only)
-
-Use these rules when changing Avalonia diagnostics/devtools behavior:
-
-- Build-time switch is `EnableAvaloniaDiagnostics` in `src/Directory.Build.props`.
-- Default policy: enabled in `Debug`, disabled in `Release`.
-- `src/UniGetUI.Avalonia/UniGetUI.Avalonia.csproj` must condition `AvaloniaUI.DiagnosticsSupport` on `$(EnableAvaloniaDiagnostics)`.
-- Compile-time diagnostics code in `src/UniGetUI.Avalonia/Program.cs` must be gated by `#if AVALONIA_DIAGNOSTICS_ENABLED` (not `#if DEBUG`).
-- Runtime controls are developer-only and intentionally not listed in `docs/CLI.md`.
-- Runtime precedence in `Program.cs`: CLI flags > `UNIGETUI_AVALONIA_DEVTOOLS` environment variable > `Auto` default.
-- Accepted runtime env/CLI values for mode parsing: `auto`, `enabled`, `disabled`, `on`, `off`, `true`, `false`, `1`, `0`.
-- `Auto` mode must remain WSL-safe (DevTools disabled by default on WSL).
-- If diagnostics were excluded at build time, runtime toggle requests should log a no-op warning.
 
 ## Key Patterns & Conventions
 

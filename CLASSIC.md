@@ -6,20 +6,13 @@ This branch preserves the WinUI frontend that shipped in UniGetUI v2026.2.1 whil
 
 - `upstream`: moving mirror of Devolutions/UniGetUI.
 - `main`: Classic line, rooted at upstream `v2026.2.1` commit `68411409d001b9f34cfb896af1543a1d7067ca5e`.
-- `main` is not intended to merge `upstream` wholesale during the bootstrap phase.
+- Import upstream fixes selectively; do not merge `upstream` wholesale into `main`.
 
 ## Maintenance model
 
-Classic is bootstrapping with selective backports, with the target architecture being a Betterbird/ungoogled-chromium style reproducible downstream patch stack over a newer upstream base.
+Classic releases use an ordered patch stack over the exact upstream base in `maintenance/upstream-base.json`. The release workflow replays `maintenance/patches/series` and verifies that the complete source tree matches `classic_source_commit` in `maintenance/patch-stack.json` before building.
 
-1. Keep the WinUI presentation layer stable.
-2. Track an exact upstream base revision.
-3. Review upstream releases by changed path, not commit title.
-4. Backport package-engine/Core/security fixes selectively while the Classic compatibility boundary is established.
-5. Split mixed UI/backend commits when only the backend portion applies.
-6. Keep permanent downstream changes small, explicit, and documented.
-7. Move toward rebuilding Classic as `current upstream + ordered Classic patch set` once WinUI can be carried cleanly against the current PackageEngine boundary.
-8. Do not carry an old package-management engine merely to preserve the UI.
+Read `AGENTS.md` for maintenance rules and `maintenance/PATCH_STACK.md` for commands, patch updates, and decisions.
 
 ## Compatibility boundary
 
@@ -71,8 +64,8 @@ Classic uses its own GitHub Releases channel:
 
 The release workflow generates `productinfo.json` and `checksums.txt` from the exact installer artifacts before creating the GitHub Release. The inherited Devolutions updater registry namespace is also separated to `HKLM\Software\martesi\UniGetUIClassic`.
 
-Classic versions are numeric four-part versions. During the bootstrap phase the first three components identify the preserved upstream UI/source base and the fourth component is the Classic release revision, for example `2026.2.1.1`.
+Classic versions are numeric four-part versions. The first three components identify the preserved upstream UI/source base and the fourth component is the Classic release revision, for example `2026.2.1.1`.
 
 ## Backports
 
-See `maintenance/backports.yml` for the triage ledger and `maintenance/PATCH_POLICY.md` for the rules used when importing upstream fixes.
+Imported fixes carry upstream commit and PR trailers in Git history and patch files. The ordered patch series defines the changes used for releases. Skipped or adapted backport decisions are recorded in `maintenance/PATCH_STACK.md`.
