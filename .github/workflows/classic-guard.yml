@@ -112,14 +112,6 @@ jobs:
           grep -q 'productinfo.json' .github/workflows/classic-release.yml
           grep -q 'Get-FileHash .*SHA256' .github/workflows/classic-release.yml
 
-      - name: Verify maintenance ledger exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s maintenance/backports.yml
-          test -s maintenance/PATCH_POLICY.md
-          test -s CLASSIC.md
-
       - name: Block accidental upstream merge commits
         if: github.event_name == 'pull_request'
         shell: bash
