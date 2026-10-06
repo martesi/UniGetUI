@@ -20,3 +20,4 @@ classic/1070-classic-remove-frontend-switch.patch
 security/9000-sqlitepclraw-hardening.patch
 classic/9990-classic-guard.patch
 classic/1100-winui-feature-parity.patch
+classic/1110-classic-maintenance-docs.patch
