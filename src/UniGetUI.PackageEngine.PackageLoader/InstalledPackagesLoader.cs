@@ -107,8 +107,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
                     }
                 }
 
-                InvokeFinishedLoadingEvent();
                 IsLoading = false;
+                InvokeFinishedLoadingEvent();
             }
             catch (Exception ex)
             {
