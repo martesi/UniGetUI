@@ -20,12 +20,13 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
         {
             try
             {
+                var identifier = NpmPackageIdentifier.Parse(details.Package.Id);
                 details.InstallerType = "Tarball";
                 details.ManifestUrl = new Uri(
-                    $"https://www.npmjs.com/package/{details.Package.Id}"
+                    $"https://www.npmjs.com/package/{identifier.GetRegistryName()}"
                 );
                 details.ReleaseNotesUrl = new Uri(
-                    $"https://www.npmjs.com/package/{details.Package.Id}?activeTab=versions"
+                    $"https://www.npmjs.com/package/{identifier.GetRegistryName()}?activeTab=versions"
                 );
 
                 using Process p = new();
@@ -173,18 +174,20 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
 
         protected override string? GetInstallLocation_UnSafe(IPackage package)
         {
+            var identifier = NpmPackageIdentifier.Parse(package.Id);
             if (package.OverridenOptions.Scope is PackageScope.Local)
                 return Path.Join(
                     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                     "node_modules",
-                    package.Id
+                    identifier.GetInstallLocationName()
                 );
+            // ApplicationData already resolves to the Roaming folder; npm's default global prefix
+            // is %AppData%\npm, so global modules live under %AppData%\npm\node_modules.
             return Path.Join(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Roaming",
                 "npm",
                 "node_modules",
-                package.Id
+                identifier.GetInstallLocationName()
             );
         }
 

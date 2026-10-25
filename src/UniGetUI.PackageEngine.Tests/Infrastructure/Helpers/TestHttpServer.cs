@@ -13,6 +13,7 @@ internal sealed class TestHttpServer : IDisposable
     private readonly List<string> _requestPaths = [];
     private readonly List<string> _requestMethods = [];
     private readonly Task _backgroundTask;
+    private volatile bool _disposed;
 
     public TestHttpServer(
         Func<HttpListenerRequest, (int StatusCode, string Content, string ContentType)> handler,
@@ -72,6 +73,7 @@ internal sealed class TestHttpServer : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;
         if (_listener.IsListening)
         {
             _listener.Stop();
@@ -115,6 +117,10 @@ internal sealed class TestHttpServer : IDisposable
                 break;
             }
             catch (ObjectDisposedException)
+            {
+                break;
+            }
+            catch (InvalidOperationException) when (_disposed)
             {
                 break;
             }

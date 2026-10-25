@@ -29,7 +29,7 @@ internal sealed class NpmPkgOperationHelper : BasePkgOperationHelper
                 Manager.Properties.UpdateVerb,
                 ResolveInstallSpec(package.Id, package.NewVersionString),
             ],
-            OperationType.Uninstall => [Manager.Properties.UninstallVerb, package.Id],
+            OperationType.Uninstall => [Manager.Properties.UninstallVerb, ResolveLocalName(package.Id)],
             _ => throw new InvalidDataException("Invalid package operation"),
         };
 
