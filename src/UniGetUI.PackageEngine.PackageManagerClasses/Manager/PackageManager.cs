@@ -537,7 +537,20 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         /// Returns an array of Package objects that represent the installed reported by the manager.
         /// This method is fail-safe and will return an empty array if an error occurs.
         /// </summary>
-        public IReadOnlyList<IPackage> GetInstalledPackages() => _getInstalledPackages(false);
+        public bool LastInstalledListingFailed { get; private set; }
+
+        private long _installedPackagesGeneration;
+
+        public long InstalledPackagesGeneration => Volatile.Read(ref _installedPackagesGeneration);
+
+        public void InvalidateInstalledPackages() =>
+            Interlocked.Increment(ref _installedPackagesGeneration);
+
+        public IReadOnlyList<IPackage> GetInstalledPackages()
+        {
+            LastInstalledListingFailed = false;
+            return _getInstalledPackages(false);
+        }
 
         private IReadOnlyList<IPackage> _getInstalledPackages(bool SecondAttempt)
         {
