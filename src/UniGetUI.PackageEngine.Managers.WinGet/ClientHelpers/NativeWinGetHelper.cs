@@ -373,6 +373,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     continue;
 
                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
+                NativePackageHandler.AddLocalIdentifier(
+                    UniGetUIPackage,
+                    nativePackage.InstalledVersion?.Id
+                );
                 packages.Add(UniGetUIPackage);
                 logger.Log(
                     $"Found package {nativePackage.Name} {nativePackage.Id} on source {source.Name}, from version {version} to version {nativePackage.DefaultInstallVersion.Version}"
@@ -442,6 +446,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     ),
                 };
                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
+                NativePackageHandler.AddLocalIdentifier(
+                    UniGetUIPackage,
+                    nativePackage.InstalledVersion?.Id
+                );
                 packages.Add(UniGetUIPackage);
             }
             catch (Exception ex)
