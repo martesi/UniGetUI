@@ -1,0 +1,2028 @@
+From f05e0b8b5fe8f1253286d9179509dcc39ae5fd01 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:29:40 +0800
+Subject: [PATCH] backport: Parse the WinGet CLI table without relying on
+ English headers (#5358)
+
+Upstream-Commit: 9967607b8d03eba460bfbe7d232fef9308cd38d0
+Upstream-PR: Devolutions/UniGetUI#5358
+Classic-Source-Commit: f05e0b8b5fe8f1253286d9179509dcc39ae5fd01
+
+---
+ .../ClientHelpers/WinGetCliHelper.cs          | 335 +++-----
+ .../ClientHelpers/WinGetTableLayout.cs        | 468 +++++++++++
+ .../WinGetCliParsingTests.cs                  | 790 ++++++++++++++++++
+ .../WinGetLocalizedTableMatrixTests.cs        | 314 +++++++
+ 4 files changed, 1703 insertions(+), 204 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetTableLayout.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/WinGetLocalizedTableMatrixTests.cs
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+index 46512b4ef5ef8ab92aa6db55a2397cdc339e89f1..a13f67d0ec6ec27968cb4eb7bc7c9e92b3c313d7 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+@@ -73,83 +73,78 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+         p.Start();
+ 
+-        string OldLine = "";
+-        int IdIndex = -1;
+-        int VersionIndex = -1;
+-        int NewVersionIndex = -1;
+-        int SourceIndex = -1;
+-        bool DashesPassed = false;
++        Packages.AddRange(ParseAvailableUpdates(Manager, ReadOutputLines(p, logger)));
++
++        logger.AddToStdErr(p.StandardError.ReadToEnd());
++        p.WaitForExit();
++        logger.Close(p.ExitCode);
++
++        return Packages;
++    }
++
++    private static IEnumerable<string> ReadOutputLines(Process p, IProcessTaskLogger logger)
++    {
+         string? line;
+         while ((line = p.StandardOutput.ReadLine()) is not null)
+         {
+             logger.AddToStdOut(line);
++            yield return line;
++        }
++    }
++
++    internal static IReadOnlyList<Package> ParseAvailableUpdates(
++        WinGet manager,
++        IEnumerable<string> outputLines
++    )
++    {
++        List<Package> packages = [];
+ 
+-            if (line.Contains("have pins"))
++        foreach (
++            WinGetTable table in WinGetTableLayout.ReadTables(
++                outputLines.Where(line => !line.Contains("have pins"))
++            )
++        )
++        {
++            WinGetTableLayout layout = table.Layout;
++            if (layout.ColumnCount < 4)
+             {
+                 continue;
+             }
+ 
+-            if (!DashesPassed && line.Contains("---"))
++            foreach (string line in table.Rows)
+             {
+-                string HeaderPrefix = OldLine.Contains("SearchId") ? "Search" : "";
+-                string HeaderSuffix = OldLine.Contains("SearchId") ? "Header" : "";
+-                IdIndex = OldLine.IndexOf(HeaderPrefix + "Id", StringComparison.InvariantCulture);
+-                VersionIndex = OldLine.IndexOf(
+-                    HeaderPrefix + "Version",
+-                    StringComparison.InvariantCulture
+-                );
+-                NewVersionIndex = OldLine.IndexOf(
+-                    "Available" + HeaderSuffix,
+-                    StringComparison.InvariantCulture
+-                );
+-                SourceIndex = OldLine.IndexOf(
+-                    HeaderPrefix + "Source",
+-                    StringComparison.InvariantCulture
+-                );
+-                DashesPassed = true;
+-            }
+-            else if (line.Trim() == "")
+-            {
+-                DashesPassed = false;
+-            }
+-            else if (
+-                DashesPassed
+-                && IdIndex > 0
+-                && VersionIndex > 0
+-                && NewVersionIndex > 0
+-                && IdIndex < VersionIndex
+-                && VersionIndex < NewVersionIndex
+-                && NewVersionIndex < line.Length
+-            )
+-            {
+-                int offset = 0; // Account for non-unicode character length
+-                while (line[IdIndex - offset - 1] != ' ' || offset > (IdIndex - 5))
++                if (!layout.IsRowReaching(line, WinGetTableLayout.AvailableColumn))
+                 {
+-                    offset++;
++                    continue;
+                 }
+ 
+-                string name = line[..(IdIndex - offset)].Trim();
+-                string id = line[(IdIndex - offset)..].Trim().Split(' ')[0];
+-                string version = line[(VersionIndex - offset)..(NewVersionIndex - offset)].Trim();
+-                string newVersion;
+-                if (SourceIndex != -1)
+-                {
+-                    newVersion = line[(NewVersionIndex - offset)..(SourceIndex - offset)].Trim();
+-                }
+-                else
+-                {
+-                    newVersion = line[(NewVersionIndex - offset)..].Trim().Split(' ')[0];
+-                }
++                string name = layout.GetCell(line, WinGetTableLayout.NameColumn);
++                string id = layout.GetCell(line, WinGetTableLayout.IdColumn);
++                string version = layout.GetCell(line, WinGetTableLayout.VersionColumn);
+ 
++                string newVersion;
+                 IManagerSource source;
+-                if (SourceIndex == -1 || SourceIndex >= line.Length)
++                if (layout.HasSourceColumn)
+                 {
+-                    source = Manager.DefaultSource;
++                    newVersion = layout.GetCell(
++                        line,
++                        WinGetTableLayout.AvailableColumn,
++                        layout.LastColumn
++                    );
++                    string sourceName = layout.GetCell(line, layout.LastColumn);
++                    source =
++                        sourceName.Length == 0
++                            ? manager.DefaultSource
++                            : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+                 }
+                 else
+                 {
+-                    string sourceName = line[(SourceIndex - offset)..].Trim().Split(' ')[0];
+-                    source = Manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
++                    newVersion = layout.GetCell(
++                        line,
++                        WinGetTableLayout.AvailableColumn,
++                        layout.ColumnCount
++                    );
++                    source = manager.DefaultSource;
+                 }
+ 
+                 // Restore the version we last upgraded to when WinGet reports it as unknown (#5158).
+@@ -157,11 +152,14 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+                 if (versionUnknown)
+                     version = WinGetPkgOperationHelper.GetLastInstalledVersion(id);
+ 
+-                var package = new Package(name, id, version, newVersion, source, Manager);
++                var package = new Package(name, id, version, newVersion, source, manager);
+                 // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
+-                if (versionUnknown || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
++                if (
++                    versionUnknown
++                    || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package)
++                )
+                 {
+-                    Packages.Add(package);
++                    packages.Add(package);
+                 }
+                 else
+                 {
+@@ -170,14 +168,9 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+                     );
+                 }
+             }
+-            OldLine = line;
+         }
+ 
+-        logger.AddToStdErr(p.StandardError.ReadToEnd());
+-        p.WaitForExit();
+-        logger.Close(p.ExitCode);
+-
+-        return Packages;
++        return packages;
+     }
+ 
+     public IReadOnlyList<Package> GetInstalledPackages_UnSafe()
+@@ -218,100 +211,54 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+         p.Start();
+ 
+-        string OldLine = "";
+-        int IdIndex = -1;
+-        int VersionIndex = -1;
+-        int SourceIndex = -1;
+-        int NewVersionIndex = -1;
+-        bool DashesPassed = false;
+-        string? line;
+-        while ((line = p.StandardOutput.ReadLine()) is not null)
++        Packages.AddRange(ParseInstalledPackages(Manager, ReadOutputLines(p, logger)));
++
++        logger.AddToStdErr(p.StandardError.ReadToEnd());
++        p.WaitForExit();
++        logger.Close(p.ExitCode);
++
++        return Packages;
++    }
++
++    internal static IReadOnlyList<Package> ParseInstalledPackages(
++        WinGet manager,
++        IEnumerable<string> outputLines
++    )
++    {
++        List<Package> packages = [];
++
++        foreach (WinGetTable table in WinGetTableLayout.ReadTables(outputLines))
+         {
+-            try
++            WinGetTableLayout layout = table.Layout;
++            foreach (string line in table.Rows)
+             {
+-                logger.AddToStdOut(line);
+-                if (!DashesPassed && line.Contains("---"))
++                try
+                 {
+-                    string HeaderPrefix = OldLine.Contains("SearchId") ? "Search" : "";
+-                    string HeaderSuffix = OldLine.Contains("SearchId") ? "Header" : "";
+-                    IdIndex = OldLine.IndexOf(
+-                        HeaderPrefix + "Id",
+-                        StringComparison.InvariantCulture
+-                    );
+-                    VersionIndex = OldLine.IndexOf(
+-                        HeaderPrefix + "Version",
+-                        StringComparison.InvariantCulture
+-                    );
+-                    NewVersionIndex = OldLine.IndexOf(
+-                        "Available" + HeaderSuffix,
+-                        StringComparison.InvariantCulture
+-                    );
+-                    SourceIndex = OldLine.IndexOf(
+-                        HeaderPrefix + "Source",
+-                        StringComparison.InvariantCulture
+-                    );
+-                    DashesPassed = true;
+-                }
+-                else if (
+-                    DashesPassed
+-                    && IdIndex > 0
+-                    && VersionIndex > 0
+-                    && IdIndex < VersionIndex
+-                    && VersionIndex < line.Length
+-                )
+-                {
+-                    int offset = 0; // Account for non-unicode character length
+-                    while (
+-                        ((IdIndex - offset) <= line.Length && line[IdIndex - offset - 1] != ' ')
+-                        || offset > (IdIndex - 5)
+-                    )
+-                    {
+-                        offset++;
+-                    }
++                    string name = layout.GetCell(line, WinGetTableLayout.NameColumn);
++                    string id = layout.GetCell(line, WinGetTableLayout.IdColumn);
++                    string version = layout.GetCell(line, WinGetTableLayout.VersionColumn);
+ 
+-                    string name = line[..(IdIndex - offset)].Trim();
+-                    string id = line[(IdIndex - offset)..].Trim().Split(' ')[0];
+-                    if (NewVersionIndex == -1 && SourceIndex != -1)
+-                    {
+-                        NewVersionIndex = SourceIndex;
+-                    }
+-                    else if (NewVersionIndex == -1 && SourceIndex == -1)
+-                    {
+-                        NewVersionIndex = line.Length - 1;
+-                    }
++                    string sourceName =
++                        layout.HasSourceColumn
++                            ? layout.GetCell(line, layout.LastColumn)
++                            : "";
+ 
+-                    string version = line[(VersionIndex - offset)..(NewVersionIndex - offset)]
+-                        .Trim();
++                    IManagerSource source =
++                        sourceName.Length == 0
++                            ? manager.GetLocalSource(id) // Load Winget Local Sources
++                            : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+ 
+-                    IManagerSource source;
+-                    if (SourceIndex == -1 || (SourceIndex - offset) >= line.Length)
+-                    {
+-                        source = Manager.GetLocalSource(id); // Load Winget Local Sources
+-                    }
+-                    else
+-                    {
+-                        string sourceName = line[(SourceIndex - offset)..]
+-                            .Trim()
+-                            .Split(' ')[0]
+-                            .Trim();
+-                        source = Manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+-                    }
+                     version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(id, version);
+-                    Packages.Add(new Package(name, id, version, source, Manager));
++                    packages.Add(new Package(name, id, version, source, manager));
++                }
++                catch (Exception e)
++                {
++                    Logger.Error(e);
+                 }
+-                OldLine = line;
+-            }
+-            catch (Exception e)
+-            {
+-                Logger.Error(e);
+             }
+         }
+ 
+-        logger.AddToStdErr(p.StandardError.ReadToEnd());
+-        p.WaitForExit();
+-        logger.Close(p.ExitCode);
+-
+-        return Packages;
++        return packages;
+     }
+ 
+     public IReadOnlyList<Package> FindPackages_UnSafe(string query)
+@@ -351,60 +298,7 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+         p.Start();
+ 
+-        string OldLine = "";
+-        int IdIndex = -1;
+-        int VersionIndex = -1;
+-        int SourceIndex = -1;
+-        bool DashesPassed = false;
+-        string? line;
+-        while ((line = p.StandardOutput.ReadLine()) is not null)
+-        {
+-            logger.AddToStdOut(line);
+-            if (!DashesPassed && line.Contains("---"))
+-            {
+-                string HeaderPrefix = OldLine.Contains("SearchId") ? "Search" : "";
+-                IdIndex = OldLine.IndexOf(HeaderPrefix + "Id", StringComparison.InvariantCulture);
+-                VersionIndex = OldLine.IndexOf(
+-                    HeaderPrefix + "Version",
+-                    StringComparison.InvariantCulture
+-                );
+-                SourceIndex = OldLine.IndexOf(
+-                    HeaderPrefix + "Source",
+-                    StringComparison.InvariantCulture
+-                );
+-                DashesPassed = true;
+-            }
+-            else if (
+-                DashesPassed
+-                && IdIndex > 0
+-                && VersionIndex > 0
+-                && IdIndex < VersionIndex
+-                && VersionIndex < line.Length
+-            )
+-            {
+-                int offset = 0; // Account for non-unicode character length
+-                while (line[IdIndex - offset - 1] != ' ' || offset > (IdIndex - 5))
+-                {
+-                    offset++;
+-                }
+-
+-                string name = line[..(IdIndex - offset)].Trim();
+-                string id = line[(IdIndex - offset)..].Trim().Split(' ')[0];
+-                string version = line[(VersionIndex - offset)..].Trim().Split(' ')[0];
+-                IManagerSource source;
+-                if (SourceIndex == -1 || SourceIndex >= line.Length)
+-                {
+-                    source = Manager.DefaultSource;
+-                }
+-                else
+-                {
+-                    string sourceName = line[(SourceIndex - offset)..].Trim().Split(' ')[0];
+-                    source = Manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+-                }
+-                Packages.Add(new Package(name, id, version, source, Manager));
+-            }
+-            OldLine = line;
+-        }
++        Packages.AddRange(ParseFoundPackages(Manager, ReadOutputLines(p, logger)));
+ 
+         logger.AddToStdErr(p.StandardError.ReadToEnd());
+         p.WaitForExit();
+@@ -413,6 +307,39 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+         return Packages;
+     }
+ 
++    internal static IReadOnlyList<Package> ParseFoundPackages(
++        WinGet manager,
++        IEnumerable<string> outputLines
++    )
++    {
++        List<Package> packages = [];
++
++        foreach (WinGetTable table in WinGetTableLayout.ReadTables(outputLines))
++        {
++            WinGetTableLayout layout = table.Layout;
++            foreach (string line in table.Rows)
++            {
++                string name = layout.GetCell(line, WinGetTableLayout.NameColumn);
++                string id = layout.GetCell(line, WinGetTableLayout.IdColumn);
++                string version = layout.GetCell(line, WinGetTableLayout.VersionColumn);
++
++                string sourceName =
++                    layout.HasSourceColumn
++                        ? layout.GetCell(line, layout.LastColumn)
++                        : "";
++
++                IManagerSource source =
++                    sourceName.Length == 0
++                        ? manager.DefaultSource
++                        : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
++
++                packages.Add(new Package(name, id, version, source, manager));
++            }
++        }
++
++        return packages;
++    }
++
+     public void GetPackageDetails_UnSafe(IPackageDetails details)
+     {
+         if (details.Package.Source.Name == "winget")
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetTableLayout.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetTableLayout.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..474bf3f2d0512d7498b03039b885f2fe5fd8bf8f
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetTableLayout.cs
+@@ -0,0 +1,468 @@
++using System.Globalization;
++using System.Text;
++
++namespace UniGetUI.PackageEngine.Managers.WingetManager;
++
++internal enum HeaderKind
++{
++    Name,
++    Id,
++    Version,
++    Available,
++    Match,
++    Source,
++}
++
++internal sealed record WinGetTable(WinGetTableLayout Layout, IReadOnlyList<string> Rows);
++
++internal sealed class WinGetTableLayout
++{
++    public const int NameColumn = 0;
++    public const int IdColumn = 1;
++    public const int VersionColumn = 2;
++    public const int AvailableColumn = 3;
++
++    private const int MinimumColumns = 3;
++
++    private static readonly Dictionary<string, HeaderKind> HeaderNames = new(
++        StringComparer.OrdinalIgnoreCase
++    )
++    {
++        { "Name", HeaderKind.Name },
++        { "Nom", HeaderKind.Name },
++        { "Nombre", HeaderKind.Name },
++        { "Nome", HeaderKind.Name },
++        { "SearchName", HeaderKind.Name },
++        { "Имя", HeaderKind.Name },
++        { "名前", HeaderKind.Name },
++        { "名称", HeaderKind.Name },
++        { "名稱", HeaderKind.Name },
++        { "이름", HeaderKind.Name },
++
++        { "ID", HeaderKind.Id },
++        { "SearchId", HeaderKind.Id },
++        { "ИД", HeaderKind.Id },
++        { "識別碼", HeaderKind.Id },
++        { "장치 ID", HeaderKind.Id },
++
++        { "SearchVersion", HeaderKind.Version },
++        { "Version", HeaderKind.Version },
++        { "Versione", HeaderKind.Version },
++        { "Versión", HeaderKind.Version },
++        { "Versão", HeaderKind.Version },
++        { "Версия", HeaderKind.Version },
++        { "バージョン", HeaderKind.Version },
++        { "版本", HeaderKind.Version },
++        { "버전", HeaderKind.Version },
++
++        { "Available", HeaderKind.Available },
++        { "AvailableHeader", HeaderKind.Available },
++        { "Disponibile", HeaderKind.Available },
++        { "Disponible", HeaderKind.Available },
++        { "Disponível", HeaderKind.Available },
++        { "Verfügbar", HeaderKind.Available },
++        { "Доступно", HeaderKind.Available },
++        { "利用可能", HeaderKind.Available },
++        { "可用", HeaderKind.Available },
++        { "사용 가능", HeaderKind.Available },
++
++        { "Coincidencia", HeaderKind.Match },
++        { "Correspondance", HeaderKind.Match },
++        { "Correspondência", HeaderKind.Match },
++        { "Corrispondenza", HeaderKind.Match },
++        { "Match", HeaderKind.Match },
++        { "SearchMatch", HeaderKind.Match },
++        { "Übereinstimmung", HeaderKind.Match },
++        { "Совпадение", HeaderKind.Match },
++        { "一致", HeaderKind.Match },
++        { "匹配", HeaderKind.Match },
++        { "相符", HeaderKind.Match },
++        { "일치", HeaderKind.Match },
++
++        { "Origem", HeaderKind.Source },
++        { "Origen", HeaderKind.Source },
++        { "Origine", HeaderKind.Source },
++        { "Quelle", HeaderKind.Source },
++        { "SearchSource", HeaderKind.Source },
++        { "Source", HeaderKind.Source },
++        { "Источник", HeaderKind.Source },
++        { "ソース", HeaderKind.Source },
++        { "來源", HeaderKind.Source },
++        { "源", HeaderKind.Source },
++        { "원본", HeaderKind.Source },
++    };
++
++    private readonly string _headerLine;
++    private readonly int[] _columnStarts;
++    private readonly int _tableWidth;
++
++    private WinGetTableLayout(string headerLine, int[] columnStarts, int tableWidth)
++    {
++        _headerLine = headerLine;
++        _columnStarts = columnStarts;
++        _tableWidth = tableWidth;
++    }
++
++    public int ColumnCount => _columnStarts.Length;
++
++    public int LastColumn => _columnStarts.Length - 1;
++
++    public bool HasSourceColumn =>
++        ColumnCount >= 5 || (ColumnCount == 4 && !LastHeaderIsAvailableOrMatch());
++
++    public static bool IsSeparatorLine(string line)
++    {
++        int dashes = 0;
++        foreach (char character in line)
++        {
++            if (character == '-')
++            {
++                dashes++;
++            }
++            else if (character != ' ')
++            {
++                return false;
++            }
++        }
++
++        return dashes >= 3;
++    }
++
++    public static IEnumerable<WinGetTable> ReadTables(IEnumerable<string> lines)
++    {
++        string previousLine = "";
++        WinGetTableLayout? layout = null;
++        List<string> rows = [];
++
++        foreach (string line in lines)
++        {
++            if (IsSeparatorLine(line))
++            {
++                if (layout is not null)
++                {
++                    yield return BuildTable(layout, rows);
++                }
++
++                layout = Parse(previousLine, line);
++                rows = [];
++            }
++            else if (string.IsNullOrWhiteSpace(line))
++            {
++                if (layout is not null)
++                {
++                    yield return BuildTable(layout, rows);
++                }
++
++                layout = null;
++                rows = [];
++            }
++            else if (
++                layout is not null
++                && layout.IsRowReaching(line, VersionColumn)
++                && !layout.StraddlesColumn(line, IdColumn)
++            )
++            {
++                rows.Add(line);
++            }
++
++            previousLine = line;
++        }
++
++        if (layout is not null)
++        {
++            yield return BuildTable(layout, rows);
++        }
++    }
++
++    private static WinGetTable BuildTable(WinGetTableLayout layout, List<string> rows) =>
++        new(layout.MergeContinuationColumns(rows), rows);
++
++    public static WinGetTableLayout? Parse(string headerLine, string separatorLine)
++    {
++        List<int> columnStarts = [];
++        bool previousWasSpace = true;
++        int displayColumn = 0;
++        int index = 0;
++
++        while (index < headerLine.Length)
++        {
++            int codePoint = FirstCodePoint(headerLine, index);
++            bool isSpace = codePoint == ' ';
++
++            if (!isSpace && previousWasSpace)
++            {
++                columnStarts.Add(displayColumn);
++            }
++
++            previousWasSpace = isSpace;
++            displayColumn += GetDisplayWidth(codePoint);
++            index += TextElementLength(headerLine, index);
++        }
++
++        return columnStarts.Count >= MinimumColumns
++            ? new WinGetTableLayout(headerLine, [.. columnStarts], separatorLine.TrimEnd().Length)
++            : null;
++    }
++
++    public WinGetTableLayout MergeContinuationColumns(IReadOnlyList<string> rows)
++    {
++        if (_columnStarts.Length <= MinimumColumns)
++        {
++            return this;
++        }
++
++        List<int> kept = [_columnStarts[0]];
++        int remaining = _columnStarts.Length;
++
++        for (int column = 1; column < _columnStarts.Length; column++)
++        {
++            if (remaining - 1 >= MinimumColumns && CompletesAHeaderName(kept[^1], column))
++            {
++                remaining--;
++                continue;
++            }
++
++            int straddled = 0;
++            int startsACell = 0;
++
++            foreach (string row in rows)
++            {
++                if (Straddles(row, _columnStarts[column]))
++                {
++                    straddled++;
++                }
++                else if (StartsACell(row, _columnStarts[column]))
++                {
++                    startsACell++;
++                }
++            }
++
++            if (
++                rows.Count > 0
++                && (startsACell == 0 || straddled > startsACell)
++                && remaining - 1 >= MinimumColumns
++            )
++            {
++                remaining--;
++            }
++            else
++            {
++                kept.Add(_columnStarts[column]);
++            }
++        }
++
++        return kept.Count == _columnStarts.Length
++            ? this
++            : new WinGetTableLayout(_headerLine, [.. kept], _tableWidth);
++    }
++
++    private bool CompletesAHeaderName(int previousStart, int column)
++    {
++        int endColumn =
++            column + 1 < _columnStarts.Length ? _columnStarts[column + 1] : int.MaxValue;
++
++        return HeaderNames.ContainsKey(HeaderTextBetween(previousStart, endColumn));
++    }
++
++    private bool LastHeaderIsAvailableOrMatch()
++    {
++        string text = GetCell(_headerLine, LastColumn);
++        return HeaderNames.TryGetValue(text, out HeaderKind kind)
++            && kind is HeaderKind.Available or HeaderKind.Match;
++    }
++
++    private string HeaderTextBetween(int startDisplayColumn, int endDisplayColumn)
++    {
++        int start = CharIndexOfColumn(_headerLine, startDisplayColumn);
++        if (start >= _headerLine.Length)
++        {
++            return "";
++        }
++
++        int end =
++            endDisplayColumn == int.MaxValue
++                ? _headerLine.Length
++                : CharIndexOfColumn(_headerLine, endDisplayColumn);
++
++        if (end > _headerLine.Length)
++        {
++            end = _headerLine.Length;
++        }
++
++        return end <= start ? "" : _headerLine[start..end].Trim();
++    }
++
++    public bool IsRowReaching(string line, int column)
++    {
++        if (column < 0 || column >= _columnStarts.Length)
++        {
++            return false;
++        }
++
++        if (DisplayWidth(line) > _tableWidth)
++        {
++            return false;
++        }
++
++        return CharIndexOfColumn(line, _columnStarts[column]) < line.Length;
++    }
++
++    public bool StraddlesColumn(string line, int column) =>
++        column > 0
++        && column < _columnStarts.Length
++        && Straddles(line, _columnStarts[column]);
++
++    private static bool Straddles(string line, int displayColumn)
++    {
++        int index = RawCharIndexOfColumn(line, displayColumn);
++        return index > 0 && index < line.Length && line[index] != ' ' && line[index - 1] != ' ';
++    }
++
++    private static bool StartsACell(string line, int displayColumn)
++    {
++        int index = RawCharIndexOfColumn(line, displayColumn);
++        return index < line.Length && line[index] != ' ' && (index == 0 || line[index - 1] == ' ');
++    }
++
++    public string GetCell(string line, int column) => GetCell(line, column, column + 1);
++
++    public string GetCell(string line, int firstColumn, int columnAfterLast)
++    {
++        if (firstColumn < 0 || firstColumn >= _columnStarts.Length)
++        {
++            return "";
++        }
++
++        int start = CharIndexOfColumn(line, _columnStarts[firstColumn]);
++        if (start >= line.Length)
++        {
++            return "";
++        }
++
++        int end =
++            columnAfterLast < _columnStarts.Length
++                ? CharIndexOfColumn(line, _columnStarts[columnAfterLast])
++                : line.Length;
++
++        if (end > line.Length)
++        {
++            end = line.Length;
++        }
++
++        return end <= start ? "" : line[start..end].Trim();
++    }
++
++    private static int DisplayWidth(string line)
++    {
++        if (Ascii.IsValid(line))
++        {
++            return line.Length;
++        }
++
++        int width = 0;
++        int index = 0;
++
++        while (index < line.Length)
++        {
++            width += GetDisplayWidth(FirstCodePoint(line, index));
++            index += TextElementLength(line, index);
++        }
++
++        return width;
++    }
++
++    private static int RawCharIndexOfColumn(string line, int displayColumn)
++    {
++        if (Ascii.IsValid(line))
++        {
++            return Math.Min(displayColumn, line.Length);
++        }
++
++        int index = 0;
++        int width = 0;
++
++        while (index < line.Length && width < displayColumn)
++        {
++            width += GetDisplayWidth(FirstCodePoint(line, index));
++            index += TextElementLength(line, index);
++        }
++
++        return index;
++    }
++
++    private static int CharIndexOfColumn(string line, int displayColumn)
++    {
++        int index = RawCharIndexOfColumn(line, displayColumn);
++
++        while (index > 0 && index < line.Length && line[index] != ' ' && line[index - 1] != ' ')
++        {
++            index--;
++        }
++
++        return index;
++    }
++
++    private static int TextElementLength(string text, int index) =>
++        Math.Max(1, StringInfo.GetNextTextElementLength(text.AsSpan(index)));
++
++    private static int FirstCodePoint(string text, int index) =>
++        char.IsHighSurrogate(text[index])
++        && index + 1 < text.Length
++        && char.IsLowSurrogate(text[index + 1])
++            ? char.ConvertToUtf32(text[index], text[index + 1])
++            : text[index];
++
++    private static int GetDisplayWidth(int codePoint) => IsFullWidth(codePoint) ? 2 : 1;
++
++    private static bool IsFullWidth(int codePoint)
++    {
++        int index = Array.BinarySearch(WideRangeStarts, codePoint);
++        if (index >= 0)
++        {
++            return true;
++        }
++
++        index = ~index - 1;
++        return index >= 0 && codePoint <= WideRangeEnds[index];
++    }
++
++    private static readonly int[] WideRangeStarts =
++    [
++        0x01100, 0x0231A, 0x02329, 0x023E9, 0x023F0, 0x023F3, 0x025FD, 0x02614,
++        0x02630, 0x02648, 0x0267F, 0x0268A, 0x02693, 0x026A1, 0x026AA, 0x026BD,
++        0x026C4, 0x026CE, 0x026D4, 0x026EA, 0x026F2, 0x026F5, 0x026FA, 0x026FD,
++        0x02705, 0x0270A, 0x02728, 0x0274C, 0x0274E, 0x02753, 0x02757, 0x02795,
++        0x027B0, 0x027BF, 0x02B1B, 0x02B50, 0x02B55, 0x02E80, 0x02E9B, 0x02F00,
++        0x02FF0, 0x03041, 0x03099, 0x03105, 0x03131, 0x03190, 0x031EF, 0x03220,
++        0x03250, 0x0A490, 0x0A960, 0x0AC00, 0x0F900, 0x0FE10, 0x0FE30, 0x0FE54,
++        0x0FE68, 0x0FF01, 0x0FFE0, 0x16FE0, 0x16FF0, 0x17000, 0x18800, 0x18CFF,
++        0x1AFF0, 0x1AFF5, 0x1AFFD, 0x1B000, 0x1B132, 0x1B150, 0x1B155, 0x1B164,
++        0x1B170, 0x1D300, 0x1D360, 0x1F004, 0x1F0CF, 0x1F18E, 0x1F191, 0x1F200,
++        0x1F210, 0x1F240, 0x1F250, 0x1F260, 0x1F300, 0x1F32D, 0x1F337, 0x1F37E,
++        0x1F3A0, 0x1F3CF, 0x1F3E0, 0x1F3F4, 0x1F3F8, 0x1F440, 0x1F442, 0x1F4FF,
++        0x1F54B, 0x1F550, 0x1F57A, 0x1F595, 0x1F5A4, 0x1F5FB, 0x1F680, 0x1F6CC,
++        0x1F6D0, 0x1F6D5, 0x1F6DC, 0x1F6EB, 0x1F6F4, 0x1F7E0, 0x1F7F0, 0x1F90C,
++        0x1F93C, 0x1F947, 0x1FA70, 0x1FA80, 0x1FA8F, 0x1FACE, 0x1FADF, 0x1FAF0,
++        0x20000, 0x30000,
++    ];
++
++    private static readonly int[] WideRangeEnds =
++    [
++        0x0115F, 0x0231B, 0x0232A, 0x023EC, 0x023F0, 0x023F3, 0x025FE, 0x02615,
++        0x02637, 0x02653, 0x0267F, 0x0268F, 0x02693, 0x026A1, 0x026AB, 0x026BE,
++        0x026C5, 0x026CE, 0x026D4, 0x026EA, 0x026F3, 0x026F5, 0x026FA, 0x026FD,
++        0x02705, 0x0270B, 0x02728, 0x0274C, 0x0274E, 0x02755, 0x02757, 0x02797,
++        0x027B0, 0x027BF, 0x02B1C, 0x02B50, 0x02B55, 0x02E99, 0x02EF3, 0x02FD5,
++        0x0303E, 0x03096, 0x030FF, 0x0312F, 0x0318E, 0x031E5, 0x0321E, 0x03247,
++        0x0A48C, 0x0A4C6, 0x0A97C, 0x0D7A3, 0x0FAFF, 0x0FE19, 0x0FE52, 0x0FE66,
++        0x0FE6B, 0x0FF60, 0x0FFE6, 0x16FE4, 0x16FF1, 0x187F7, 0x18CD5, 0x18D08,
++        0x1AFF3, 0x1AFFB, 0x1AFFE, 0x1B122, 0x1B132, 0x1B152, 0x1B155, 0x1B167,
++        0x1B2FB, 0x1D356, 0x1D376, 0x1F004, 0x1F0CF, 0x1F18E, 0x1F19A, 0x1F202,
++        0x1F23B, 0x1F248, 0x1F251, 0x1F265, 0x1F320, 0x1F335, 0x1F37C, 0x1F393,
++        0x1F3CA, 0x1F3D3, 0x1F3F0, 0x1F3F4, 0x1F43E, 0x1F440, 0x1F4FC, 0x1F53D,
++        0x1F54E, 0x1F567, 0x1F57A, 0x1F596, 0x1F5A4, 0x1F64F, 0x1F6C5, 0x1F6CC,
++        0x1F6D2, 0x1F6D7, 0x1F6DF, 0x1F6EC, 0x1F6FC, 0x1F7EB, 0x1F7F0, 0x1F93A,
++        0x1F945, 0x1F9FF, 0x1FA7C, 0x1FA89, 0x1FAC6, 0x1FADC, 0x1FAE9, 0x1FAF8,
++        0x2FFFD, 0x3FFFD,
++    ];
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2c3c30be5c584b22e1e473448bcde40d27db0cc
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
+@@ -0,0 +1,790 @@
++#if WINDOWS
++using UniGetUI.Core.Data;
++using UniGetUI.PackageEngine.Managers.WingetManager;
++using UniGetUI.PackageEngine.PackageClasses;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Assertions;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++[Collection(WinGetManagerTestCollection.Name)]
++public sealed class WinGetCliParsingTests : IDisposable
++{
++    private readonly string _testRoot = Path.Combine(
++        AppContext.BaseDirectory,
++        "WinGetCliParsingTests",
++        Guid.NewGuid().ToString("N")
++    );
++
++    public WinGetCliParsingTests()
++    {
++        Directory.CreateDirectory(_testRoot);
++        CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
++    }
++
++    public void Dispose()
++    {
++        CoreData.TEST_DataDirectoryOverride = null;
++        if (Directory.Exists(_testRoot))
++        {
++            Directory.Delete(_testRoot, recursive: true);
++        }
++    }
++
++    private static string[] Lines(string output) =>
++        output.Replace("\r\n", "\n").Split('\n', StringSplitOptions.None);
++
++    [Fact]
++    public void ParseInstalledPackagesReadsJapaneseLocalizedTable()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                名前                   ID                                                                      バージョン     利用可能 ソース
++                -----------------------------------------------------------------------------------------------------------------------------
++                7-Zip 24.09 (x64)      7zip.7zip                                                               24.09          25.00    winget
++                サクラエディタ         SakuraEditor.SakuraEditor                                               2.4.2                   winget
++                Copilot                ARP\Machine\X86\Microsoft Copilot                                       152.0.4191.66
++                Xbox Identity Provider MSIX\Microsoft.XboxIdentityProvider_12.130.16001.0_arm64__8wekyb3d8bbwe 12.130.16001.0
++                利用可能なアップグレードが 1 件あります。
++                """
++            )
++        );
++
++        Assert.Equal(4, packages.Count);
++        PackageAssert.Matches(packages[0], "7-Zip 24.09 (x64)", "7zip.7zip", "24.09");
++        PackageAssert.Matches(
++            packages[1],
++            "サクラエディタ",
++            "SakuraEditor.SakuraEditor",
++            "2.4.2"
++        );
++        PackageAssert.Matches(
++            packages[2],
++            "Copilot",
++            @"ARP\Machine\X86\Microsoft Copilot",
++            "152.0.4191.66"
++        );
++        PackageAssert.Matches(
++            packages[3],
++            "Xbox Identity Provider",
++            @"MSIX\Microsoft.XboxIdentityProvider_12.130.16001.0_arm64__8wekyb3d8bbwe",
++            "12.130.16001.0"
++        );
++
++        Assert.Equal("winget", packages[0].Source.Name);
++        Assert.Same(manager.LocalPcSource, packages[2].Source);
++        Assert.Same(manager.MicrosoftStoreSource, packages[3].Source);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesReadsEnglishTable()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name                   Id                                                                      Version        Available Source
++                ------------------------------------------------------------------------------------------------------------------------------
++                7-Zip 24.09 (x64)      7zip.7zip                                                               24.09          25.00     winget
++                Copilot                ARP\Machine\X86\Microsoft Copilot                                       152.0.4191.66
++                Xbox Identity Provider MSIX\Microsoft.XboxIdentityProvider_12.130.16001.0_arm64__8wekyb3d8bbwe 12.130.16001.0
++                """
++            )
++        );
++
++        Assert.Equal(3, packages.Count);
++        PackageAssert.Matches(packages[0], "7-Zip 24.09 (x64)", "7zip.7zip", "24.09");
++        PackageAssert.Matches(
++            packages[1],
++            "Copilot",
++            @"ARP\Machine\X86\Microsoft Copilot",
++            "152.0.4191.66"
++        );
++        Assert.Same(manager.MicrosoftStoreSource, packages[2].Source);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesReadsUntranslatedResourceKeyHeaders()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                SearchName        SearchId  SearchVersion AvailableHeader SearchSource
++                ----------------------------------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip 24.09         25.00           winget
++                """
++            )
++        );
++
++        PackageAssert.Matches(
++            Assert.Single(packages),
++            "7-Zip 24.09 (x64)",
++            "7zip.7zip",
++            "24.09"
++        );
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesReadsJapaneseLocalizedTable()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                名前              ID                        バージョン 利用可能 ソース
++                ----------------------------------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip                 24.09      25.00    winget
++                サクラエディタ    SakuraEditor.SakuraEditor 2.4.2      2.4.3    winget
++                2 個のアップグレードが利用可能です。
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(packages[0], "7-Zip 24.09 (x64)", "7zip.7zip", "24.09", "25.00");
++        PackageAssert.Matches(
++            packages[1],
++            "サクラエディタ",
++            "SakuraEditor.SakuraEditor",
++            "2.4.2",
++            "2.4.3"
++        );
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesReadsHeadersWhoseColumnNameContainsASpace()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                이름              장치 ID             버전  사용 가능 원본
++                ------------------------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip           24.09 25.00     winget
++                메모장            Notepad++.Notepad++ 8.9.7 8.9.8     winget
++                사용 가능한 업그레이드 2개
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(packages[0], "7-Zip 24.09 (x64)", "7zip.7zip", "24.09", "25.00");
++        PackageAssert.Matches(packages[1], "메모장", "Notepad++.Notepad++", "8.9.7", "8.9.8");
++        Assert.Equal("winget", packages[1].Source.Name);
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesKeepsSingleSpacedColumns()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                Name   Id               Version     Available Source
++                ----------------------------------------------------
++                Claude Anthropic.Claude 1.24012.0.0 1.44121.2 winget
++                1 upgrades available.
++                """
++            )
++        );
++
++        PackageAssert.Matches(
++            Assert.Single(packages),
++            "Claude",
++            "Anthropic.Claude",
++            "1.24012.0.0",
++            "1.44121.2"
++        );
++    }
++
++    [Fact]
++    public void ParseFoundPackagesReadsJapaneseLocalizedTableWithMatchColumn()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseFoundPackages(
++            manager,
++            Lines(
++                """
++                名前                         ID                         バージョン   一致             ソース
++                --------------------------------------------------------------------------------------------
++                Microsoft Visual Studio Code Microsoft.VisualStudioCode 1.136.1      モニカー: vscode winget
++                Codium                       Alex313031.Codium          1.93.1.24277 タグ: vscode     winget
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(
++            packages[0],
++            "Microsoft Visual Studio Code",
++            "Microsoft.VisualStudioCode",
++            "1.136.1"
++        );
++        PackageAssert.Matches(packages[1], "Codium", "Alex313031.Codium", "1.93.1.24277");
++        Assert.Equal("winget", packages[0].Source.Name);
++    }
++
++    [Fact]
++    public void ParseFoundPackagesReadsRowsWithAnEmptyMatchColumn()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseFoundPackages(
++            manager,
++            Lines(
++                """
++                Name             Id                   Version              Match        Source
++                -------------------------------------------------------------------------------
++                VLC              XPDM1ZW6815MQM       Unknown                           msstore
++                VLC UWP          9NBLGGH4VVNH         Unknown                           msstore
++                VLC media player VideoLAN.VLC         3.0.21               Moniker: vlc winget
++                """
++            )
++        );
++
++        Assert.Equal(3, packages.Count);
++        PackageAssert.Matches(packages[0], "VLC", "XPDM1ZW6815MQM", "Unknown");
++        Assert.Equal("msstore", packages[0].Source.Name);
++        PackageAssert.Matches(packages[2], "VLC media player", "VideoLAN.VLC", "3.0.21");
++        Assert.Equal("winget", packages[2].Source.Name);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesReadsCapturedJapaneseWinGetOutput()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                名前                                  ID                                    バージョン
++                ---------------------------------------------------------------------------------------------
++                インテル® グラフィックス・コマンド・… AppUp.IntelGraphicsExperience_8j3eq9… 1.100.3370.0
++                Ubuntu                                CanonicalGroupLimited.UbuntuonWindow… 2004.2021.222.0
++                CrystalDiskMark                       CrystalDewWorld.CrystalDiskMark       8.0.4
++                Docker Desktop                        Docker.DockerDesktop                  3.5.2
++                ELAN Touchpad 12.11.3.2_X64_Beta      Elantech                              12.11.3.2
++                Microsoft Edge                        Microsoft.Edge                        92.0.902.55
++                Microsoft Edge Update                 Microsoft Edge Update                 1.3.145.49
++                """
++            )
++        );
++
++        Assert.Equal(7, packages.Count);
++        PackageAssert.Matches(
++            packages[0],
++            "インテル® グラフィックス・コマンド・…",
++            "AppUp.IntelGraphicsExperience_8j3eq9…",
++            "1.100.3370.0"
++        );
++        PackageAssert.Matches(
++            packages[1],
++            "Ubuntu",
++            "CanonicalGroupLimited.UbuntuonWindow…",
++            "2004.2021.222.0"
++        );
++        PackageAssert.Matches(
++            packages[4],
++            "ELAN Touchpad 12.11.3.2_X64_Beta",
++            "Elantech",
++            "12.11.3.2"
++        );
++        PackageAssert.Matches(
++            packages[6],
++            "Microsoft Edge Update",
++            "Microsoft Edge Update",
++            "1.3.145.49"
++        );
++        Assert.Same(manager.LocalPcSource, packages[6].Source);
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesReadsCapturedJapaneseWinGetOutput()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                名前            ID                              バージョン 利用可能 ソース
++                --------------------------------------------------------------------------
++                CrystalDiskInfo CrystalDewWorld.CrystalDiskInfo 8.6.1      8.12.4   winget
++                CrystalDiskMark CrystalDewWorld.CrystalDiskMark 8.0.2      8.0.4    winget
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(
++            packages[0],
++            "CrystalDiskInfo",
++            "CrystalDewWorld.CrystalDiskInfo",
++            "8.6.1",
++            "8.12.4"
++        );
++        PackageAssert.Matches(
++            packages[1],
++            "CrystalDiskMark",
++            "CrystalDewWorld.CrystalDiskMark",
++            "8.0.2",
++            "8.0.4"
++        );
++        Assert.Equal("winget", packages[0].Source.Name);
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesReadsCjkPackageNamesUnderEnglishHeaders()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                Name                    Id                   Version     Available   Source
++                ---------------------------------------------------------------------------
++                Google 日本語入力       Google.JapaneseIME   2.31.5840.0 2.32.5990.0 winget
++                Zoom Workplace (64-bit) Zoom.Zoom            6.6.19369   6.6.19875   winget
++                Dropbox                 Dropbox.Dropbox      235.4.5905  236.3.5770  winget
++                OBS Studio              OBSProject.OBSStudio 32.0.1      32.0.2      winget
++                4 upgrades available.
++                """
++            )
++        );
++
++        Assert.Equal(4, packages.Count);
++        PackageAssert.Matches(
++            packages[0],
++            "Google 日本語入力",
++            "Google.JapaneseIME",
++            "2.31.5840.0",
++            "2.32.5990.0"
++        );
++        PackageAssert.Matches(
++            packages[3],
++            "OBS Studio",
++            "OBSProject.OBSStudio",
++            "32.0.1",
++            "32.0.2"
++        );
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesReadsTableWithoutAnAvailableColumn()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name              Id                Version Source
++                --------------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip         24.09   winget
++                Contoso Tool      Programs\Contoso  1.0.0
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(packages[0], "7-Zip 24.09 (x64)", "7zip.7zip", "24.09");
++        Assert.Equal("winget", packages[0].Source.Name);
++        PackageAssert.Matches(packages[1], "Contoso Tool", @"Programs\Contoso", "1.0.0");
++        Assert.Same(manager.LocalPcSource, packages[1].Source);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesTreatsAPaddedBlankSourceCellAsLocal()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                "Name              Id                Version Source\n"
++                    + "--------------------------------------------------\n"
++                    + "Contoso Tool      Programs\\Contoso  1.0.0         \n"
++            )
++        );
++
++        Assert.Same(manager.LocalPcSource, Assert.Single(packages).Source);
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesReadsASecondTableWithoutASourceColumn()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                Name              Id        Version Available Source
++                ----------------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip 24.09   25.00     winget
++                1 upgrades available.
++
++                The following packages have an upgrade available, but require explicit targeting for upgrade:
++                Name            Id               Version Available
++                ------------------------------------------------------
++                Fabrikam Widget Fabrikam.Widget  4.1.0   4.2.0
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(packages[0], "7-Zip 24.09 (x64)", "7zip.7zip", "24.09", "25.00");
++        Assert.Equal("winget", packages[0].Source.Name);
++        PackageAssert.Matches(packages[1], "Fabrikam Widget", "Fabrikam.Widget", "4.1.0", "4.2.0");
++        Assert.Same(manager.DefaultSource, packages[1].Source);
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesIgnoresLocalizedTrailingMessages()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                名前            ID                              バージョン 利用可能 ソース
++                --------------------------------------------------------------------------
++                CrystalDiskInfo CrystalDewWorld.CrystalDiskInfo 8.6.1      8.12.4   winget
++                1 個のパッケージにはアップグレードを妨げるピンが設定されています。'winget pin' コマンドを使用してピンを表示および編集してください。'--include-pinned' 引数を使用すると、さらに多くの結果が表示される場合があります。
++                """
++            )
++        );
++
++        PackageAssert.Matches(
++            Assert.Single(packages),
++            "CrystalDiskInfo",
++            "CrystalDewWorld.CrystalDiskInfo",
++            "8.6.1",
++            "8.12.4"
++        );
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesRecoversFromUnderestimatedCharacterWidths()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name    Id           Version
++                ----------------------------
++                🎮 Game Contoso.Game 1.0.0
++                """
++            )
++        );
++
++        PackageAssert.Matches(Assert.Single(packages), "🎮 Game", "Contoso.Game", "1.0.0");
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesMeasuresGraphemeClustersAsOneCell()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name      Id             Version
++                --------------------------------
++                👨‍👩‍👧‍👦 Family Contoso.Family 1.0.0
++                """
++            )
++        );
++
++        PackageAssert.Matches(
++            Assert.Single(packages),
++            "👨‍👩‍👧‍👦 Family",
++            "Contoso.Family",
++            "1.0.0"
++        );
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesHandlesAMultiwordHeaderWithoutASourceColumn()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                이름              장치 ID   버전  사용 가능
++                ---------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip 24.09 2026.2.16.0
++                """
++            )
++        );
++
++        PackageAssert.Matches(
++            Assert.Single(packages),
++            "7-Zip 24.09 (x64)",
++            "7zip.7zip",
++            "24.09",
++            "2026.2.16.0"
++        );
++        Assert.Same(manager.DefaultSource, packages[0].Source);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesHandlesAMultiwordHeaderWithoutASourceColumn()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                이름              장치 ID   버전  사용 가능
++                ---------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip 24.09 2026.2.16.0
++                """
++            )
++        );
++
++        PackageAssert.Matches(Assert.Single(packages), "7-Zip 24.09 (x64)", "7zip.7zip", "24.09");
++        Assert.Same(manager.LocalPcSource, packages[0].Source);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesReadsRealKoreanHeaders()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                이름              장치 ID             버전  사용 가능 원본
++                ------------------------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip           24.09 25.00     winget
++                메모장            Notepad++.Notepad++ 8.9.7 8.9.8     winget
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(packages[0], "7-Zip 24.09 (x64)", "7zip.7zip", "24.09");
++        PackageAssert.Matches(packages[1], "메모장", "Notepad++.Notepad++", "8.9.7");
++        Assert.Equal("winget", packages[1].Source.Name);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesReadsAnAvailableColumnWithoutASourceColumn()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name              Id               Version Available
++                ----------------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip        24.09   25.00
++                Contoso Tool      Programs\Contoso 1.0.0
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(packages[0], "7-Zip 24.09 (x64)", "7zip.7zip", "24.09");
++        PackageAssert.Matches(packages[1], "Contoso Tool", @"Programs\Contoso", "1.0.0");
++        Assert.Same(manager.LocalPcSource, packages[0].Source);
++        Assert.Same(manager.LocalPcSource, packages[1].Source);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesTreatsAmbiguousWidthCharactersAsNarrow()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name       Id             Version
++                ---------------------------------
++                ㉈㉈㉈ Widget Contoso.Widget 1.0.0
++                """
++            )
++        );
++
++        PackageAssert.Matches(
++            Assert.Single(packages),
++            "㉈㉈㉈ Widget",
++            "Contoso.Widget",
++            "1.0.0"
++        );
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesTreatsRepeatedWideEmojiAsTwoColumnsEach()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name        Id           Version
++                --------------------------------
++                🎮🎮🎮 Game Contoso.Game 2.0.0
++                """
++            )
++        );
++
++        PackageAssert.Matches(Assert.Single(packages), "🎮🎮🎮 Game", "Contoso.Game", "2.0.0");
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesMergesKoreanIdHeaderForASingleRowTable()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Lines(
++                """
++                이름              장치 ID   버전  사용 가능 원본
++                --------------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip 24.09 25.00     winget
++                사용 가능한 업그레이드 1개
++                """
++            )
++        );
++
++        PackageAssert.Matches(
++            Assert.Single(packages),
++            "7-Zip 24.09 (x64)",
++            "7zip.7zip",
++            "24.09",
++            "25.00"
++        );
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesIgnoresProseAlignedToTheIdColumn()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name              Id        Version Source
++                ------------------------------------------
++                7-Zip 24.09 (x64) 7zip.7zip 24.09   winget
++                A pinned package: use the 'winget pin' command to view and edit pins
++                """
++            )
++        );
++
++        PackageAssert.Matches(Assert.Single(packages), "7-Zip 24.09 (x64)", "7zip.7zip", "24.09");
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesMergesKoreanIdHeaderWhenEveryIdIsShort()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                이름       장치 ID 버전
++                ------------------------
++                Vim Editor Vim     9.1.0
++                cURL       cURL    8.5.0
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(packages[0], "Vim Editor", "Vim", "9.1.0");
++        PackageAssert.Matches(packages[1], "cURL", "cURL", "8.5.0");
++        Assert.Same(manager.LocalPcSource, packages[0].Source);
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesMergesKoreanIdHeaderWhenAnIdAlignsWithTheContinuation()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                이름               장치 ID                    버전
++                -----------------------------------------------------
++                Dell SupportAssist Dell App                   3.14.1
++                Visual Studio Code Microsoft.VisualStudioCode 1.136.1
++                Git                Git.Git                    2.51.0
++                """
++            )
++        );
++
++        Assert.Equal(3, packages.Count);
++        PackageAssert.Matches(packages[0], "Dell SupportAssist", "Dell App", "3.14.1");
++        PackageAssert.Matches(
++            packages[1],
++            "Visual Studio Code",
++            "Microsoft.VisualStudioCode",
++            "1.136.1"
++        );
++        PackageAssert.Matches(packages[2], "Git", "Git.Git", "2.51.0");
++    }
++
++    [Fact]
++    public void ParseInstalledPackagesIgnoresOutputWithoutATable()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                インストールされたパッケージが見つかりませんでした。
++                """
++            )
++        );
++
++        Assert.Empty(packages);
++    }
++
++    [Theory]
++    [InlineData("-------------------------", true)]
++    [InlineData("   ------   ", true)]
++    [InlineData("--", false)]
++    [InlineData("7-Zip 24.09 (x64) 7zip.7zip 24.09", false)]
++    [InlineData("", false)]
++    public void IsSeparatorLineOnlyAcceptsDashRuns(string line, bool expected)
++    {
++        Assert.Equal(expected, WinGetTableLayout.IsSeparatorLine(line));
++    }
++}
++#endif
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetLocalizedTableMatrixTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetLocalizedTableMatrixTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..604b353b3c967c9d5c4a0bfb5f9b7ac6aa5e1488
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetLocalizedTableMatrixTests.cs
+@@ -0,0 +1,314 @@
++#if WINDOWS
++using System.Text;
++using UniGetUI.Core.Data;
++using UniGetUI.PackageEngine.Managers.WingetManager;
++using UniGetUI.PackageEngine.PackageClasses;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Assertions;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++[Collection(WinGetManagerTestCollection.Name)]
++public sealed class WinGetLocalizedTableMatrixTests : IDisposable
++{
++    private readonly string _testRoot = Path.Combine(
++        AppContext.BaseDirectory,
++        "WinGetLocalizedTableMatrixTests",
++        Guid.NewGuid().ToString("N")
++    );
++
++    public WinGetLocalizedTableMatrixTests()
++    {
++        Directory.CreateDirectory(_testRoot);
++        CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
++    }
++
++    public void Dispose()
++    {
++        CoreData.TEST_DataDirectoryOverride = null;
++        if (Directory.Exists(_testRoot))
++        {
++            Directory.Delete(_testRoot, recursive: true);
++        }
++    }
++
++    private sealed record Locale(
++        string Tag,
++        string Name,
++        string Id,
++        string Version,
++        string Available,
++        string Match,
++        string Source
++    );
++
++    private static readonly Locale[] Locales =
++    [
++        new("en-US", "Name", "Id", "Version", "Available", "Match", "Source"),
++        new("resw", "SearchName", "SearchId", "SearchVersion", "AvailableHeader", "SearchMatch", "SearchSource"),
++        new("de-DE", "Name", "ID", "Version", "Verfügbar", "Übereinstimmung", "Quelle"),
++        new("es-ES", "Nombre", "Id", "Versión", "Disponible", "Coincidencia", "Origen"),
++        new("fr-FR", "Nom", "ID", "Version", "Disponible", "Correspondance", "Source"),
++        new("it-IT", "Nome", "Id", "Versione", "Disponibile", "Corrispondenza", "Origine"),
++        new("ja-JP", "名前", "ID", "バージョン", "利用可能", "一致", "ソース"),
++        new("ko-KR", "이름", "장치 ID", "버전", "사용 가능", "일치", "원본"),
++        new("pt-BR", "Nome", "ID", "Versão", "Disponível", "Correspondência", "Origem"),
++        new("ru-RU", "Имя", "ИД", "Версия", "Доступно", "Совпадение", "Источник"),
++        new("zh-CN", "名称", "ID", "版本", "可用", "匹配", "源"),
++        new("zh-TW", "名稱", "識別碼", "版本", "可用", "相符", "來源"),
++    ];
++
++    private static int Width(string text)
++    {
++        int width = 0;
++        foreach (char c in text)
++        {
++            width +=
++                c is >= 'ᄀ' and <= 'ᅟ'
++                or >= '⺀' and <= '〾'
++                or >= 'ぁ' and <= '㏿'
++                or >= '㐀' and <= '䶿'
++                or >= '一' and <= '鿿'
++                or >= '가' and <= '힣'
++                or >= '豈' and <= '﫿'
++                or >= '！' and <= '｠'
++                    ? 2
++                    : 1;
++        }
++
++        return width;
++    }
++
++    private static string[] Render(IReadOnlyList<string[]> rows)
++    {
++        int columns = rows[0].Length;
++        int[] widths = new int[columns];
++        foreach (string[] row in rows)
++        {
++            for (int i = 0; i < columns; i++)
++            {
++                widths[i] = Math.Max(widths[i], Width(row[i]));
++            }
++        }
++
++        List<string> lines = [];
++        foreach (string[] row in rows)
++        {
++            StringBuilder line = new();
++            for (int i = 0; i < columns; i++)
++            {
++                if (i == columns - 1)
++                {
++                    line.Append(row[i]);
++                    break;
++                }
++
++                bool restEmpty = true;
++                for (int j = i + 1; j < columns; j++)
++                {
++                    restEmpty &= row[j].Length == 0;
++                }
++
++                if (row[i].Length == 0 && restEmpty)
++                {
++                    line.Append(' ', widths[i] - Width(row[i]) + 1);
++                    continue;
++                }
++
++                line.Append(row[i]).Append(' ', widths[i] - Width(row[i]) + 1);
++            }
++
++            lines.Add(line.ToString().TrimEnd());
++            if (lines.Count == 1)
++            {
++                lines.Add(new string('-', widths.Sum() + columns - 1));
++            }
++        }
++
++        return [.. lines];
++    }
++
++    public static TheoryData<string, bool, bool, bool> ListShapes()
++    {
++        TheoryData<string, bool, bool, bool> data = [];
++        foreach (Locale locale in Locales)
++        {
++            foreach (bool available in new[] { false, true })
++            {
++                foreach (bool source in new[] { false, true })
++                {
++                    foreach (bool singleRow in new[] { false, true })
++                    {
++                        data.Add(locale.Tag, available, source, singleRow);
++                    }
++                }
++            }
++        }
++
++        return data;
++    }
++
++    [Theory]
++    [MemberData(nameof(ListShapes))]
++    public void InstalledPackagesParseInEveryLocaleAndColumnShape(
++        string tag,
++        bool withAvailable,
++        bool withSource,
++        bool singleRow
++    )
++    {
++        Locale locale = Locales.First(l => l.Tag == tag);
++        var manager = new WinGet();
++
++        List<string> header = [locale.Name, locale.Id, locale.Version];
++        if (withAvailable)
++            header.Add(locale.Available);
++        if (withSource)
++            header.Add(locale.Source);
++
++        string[] Row(string name, string id, string version, string available, string source)
++        {
++            List<string> cells = [name, id, version];
++            if (withAvailable)
++                cells.Add(available);
++            if (withSource)
++                cells.Add(source);
++            return [.. cells];
++        }
++
++        List<string[]> rows = [[.. header]];
++
++        // A spaced identifier whose second word lands on Korean's "장치 ID" continuation.
++        rows.Add(Row("Dell SupportAssist", "Dell App", "3.14.1", "3.15.0", "winget"));
++        if (!singleRow)
++        {
++            rows.Add(Row("Visual Studio Code", "Microsoft.VisualStudioCode", "1.136.1", "", "winget"));
++            rows.Add(Row("Vim", "Vim", "9.1", "", ""));
++        }
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Render(rows)
++        );
++
++        Assert.Equal(singleRow ? 1 : 3, packages.Count);
++        PackageAssert.Matches(packages[0], "Dell SupportAssist", "Dell App", "3.14.1");
++        if (withSource)
++        {
++            Assert.Equal("winget", packages[0].Source.Name);
++        }
++
++        if (!singleRow)
++        {
++            PackageAssert.Matches(
++                packages[1],
++                "Visual Studio Code",
++                "Microsoft.VisualStudioCode",
++                "1.136.1"
++            );
++            PackageAssert.Matches(packages[2], "Vim", "Vim", "9.1");
++            Assert.Same(manager.LocalPcSource, packages[2].Source);
++        }
++    }
++
++    [Theory]
++    [MemberData(nameof(ListShapes))]
++    public void FoundPackagesParseInEveryLocaleAndColumnShape(
++        string tag,
++        bool withMatch,
++        bool withSource,
++        bool singleRow
++    )
++    {
++        Locale locale = Locales.First(l => l.Tag == tag);
++        var manager = new WinGet();
++
++        List<string> header = [locale.Name, locale.Id, locale.Version];
++        if (withMatch)
++            header.Add(locale.Match);
++        if (withSource)
++            header.Add(locale.Source);
++
++        string[] Row(string name, string id, string version, string match, string source)
++        {
++            List<string> cells = [name, id, version];
++            if (withMatch)
++                cells.Add(match);
++            if (withSource)
++                cells.Add(source);
++            return [.. cells];
++        }
++
++        List<string[]> rows = [[.. header]];
++        rows.Add(Row("Dell SupportAssist", "Dell App", "3.14.1", "Moniker: dell", "winget"));
++        if (!singleRow)
++        {
++            rows.Add(Row("VLC", "XPDM1ZW6815MQM", "Unknown", "", "msstore"));
++        }
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseFoundPackages(
++            manager,
++            Render(rows)
++        );
++
++        Assert.Equal(singleRow ? 1 : 2, packages.Count);
++        PackageAssert.Matches(packages[0], "Dell SupportAssist", "Dell App", "3.14.1");
++        if (withSource)
++        {
++            Assert.Equal("winget", packages[0].Source.Name);
++        }
++
++        if (!singleRow)
++        {
++            PackageAssert.Matches(packages[1], "VLC", "XPDM1ZW6815MQM", "Unknown");
++            if (withSource)
++            {
++                Assert.Equal("msstore", packages[1].Source.Name);
++            }
++        }
++    }
++
++    [Theory]
++    [MemberData(nameof(ListShapes))]
++    public void AvailableUpdatesParseInEveryLocaleAndColumnShape(
++        string tag,
++        bool _,
++        bool withSource,
++        bool singleRow
++    )
++    {
++        Locale locale = Locales.First(l => l.Tag == tag);
++        var manager = new WinGet();
++
++        List<string> header = [locale.Name, locale.Id, locale.Version, locale.Available];
++        if (withSource)
++            header.Add(locale.Source);
++
++        string[] Row(string name, string id, string version, string available, string source)
++        {
++            List<string> cells = [name, id, version, available];
++            if (withSource)
++                cells.Add(source);
++            return [.. cells];
++        }
++
++        List<string[]> rows = [[.. header]];
++        rows.Add(Row("Dell SupportAssist", "Dell App", "3.14.1", "3.15.0", "winget"));
++        if (!singleRow)
++        {
++            rows.Add(Row("Git", "Git.Git", "2.51.0", "2.52.0", "winget"));
++        }
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseAvailableUpdates(
++            manager,
++            Render(rows)
++        );
++
++        Assert.Equal(singleRow ? 1 : 2, packages.Count);
++        PackageAssert.Matches(packages[0], "Dell SupportAssist", "Dell App", "3.14.1", "3.15.0");
++        if (!singleRow)
++        {
++            PackageAssert.Matches(packages[1], "Git", "Git.Git", "2.51.0", "2.52.0");
++        }
++    }
++}
++#endif
+-- 
+2.56.0
+

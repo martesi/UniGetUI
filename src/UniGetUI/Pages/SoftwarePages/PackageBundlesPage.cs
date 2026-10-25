@@ -1,3 +1,4 @@
+using UniGetUI.PackageEngine.Classes.Manager.Classes;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -689,141 +690,12 @@ namespace UniGetUI.Interface.SoftwarePages
 
             foreach (var pkg in DeserializedData.packages)
             {
-                var opts = pkg.InstallationOptions;
-
-                if (opts.CustomParameters_Install.Where(x => x.Any()).Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(
-                            new(
-                                $"Custom install arguments: [{string.Join(", ", opts.CustomParameters_Install)}]",
-                                AllowCLIParameters
-                            )
-                        );
-                    if (!AllowCLIParameters)
-                        opts.CustomParameters_Install.Clear();
-                }
-                if (opts.CustomParameters_Update.Where(x => x.Any()).Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(
-                            new(
-                                $"Custom update arguments: [{string.Join(", ", opts.CustomParameters_Update)}]",
-                                AllowCLIParameters
-                            )
-                        );
-                    if (!AllowCLIParameters)
-                        opts.CustomParameters_Update.Clear();
-                }
-                if (opts.CustomParameters_Uninstall.Where(x => x.Any()).Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(
-                            new(
-                                $"Custom uninstall arguments: [{string.Join(", ", opts.CustomParameters_Uninstall)}]",
-                                AllowCLIParameters
-                            )
-                        );
-                    if (!AllowCLIParameters)
-                        opts.CustomParameters_Uninstall.Clear();
-                }
-
-                if (opts.PreInstallCommand.Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(
-                            new($"Pre-install command: {opts.PreInstallCommand}", AllowPrePostOps)
-                        );
-                    if (!AllowPrePostOps)
-                        opts.PreInstallCommand = "";
-                }
-                if (opts.PostInstallCommand.Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(
-                            new($"Post-install command: {opts.PostInstallCommand}", AllowPrePostOps)
-                        );
-                    if (!AllowPrePostOps)
-                        opts.PostInstallCommand = "";
-                }
-                if (opts.PreUpdateCommand.Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(new($"Pre-update command: {opts.PreUpdateCommand}", AllowPrePostOps));
-                    if (!AllowPrePostOps)
-                        opts.PreUpdateCommand = "";
-                }
-                if (opts.PostUpdateCommand.Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(
-                            new($"Post-update command: {opts.PostUpdateCommand}", AllowPrePostOps)
-                        );
-                    if (!AllowPrePostOps)
-                        opts.PostUpdateCommand = "";
-                }
-                if (opts.PreUninstallCommand.Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(
-                            new(
-                                $"Pre-uninstall command: {opts.PreUninstallCommand}",
-                                AllowPrePostOps
-                            )
-                        );
-                    if (!AllowPrePostOps)
-                        opts.PreUninstallCommand = "";
-                }
-                if (opts.PostUninstallCommand.Any())
-                {
-                    report.IsEmpty = false;
-                    if (!report.Contents.ContainsKey(pkg.Id))
-                        report.Contents[pkg.Id] = new();
-                    report
-                        .Contents[pkg.Id]
-                        .Add(
-                            new(
-                                $"Post-uninstall command: {opts.PostUninstallCommand}",
-                                AllowPrePostOps
-                            )
-                        );
-                    if (!AllowPrePostOps)
-                        opts.PostUninstallCommand = "";
-                }
-
-                pkg.InstallationOptions = opts;
+                IPackageManager? manager = PEInterface.Managers.FirstOrDefault(candidate =>
+                    candidate.Id == pkg.ManagerName || candidate.Name == pkg.ManagerName
+                    || candidate.DisplayName == pkg.ManagerName);
+                pkg.InstallationOptions = BundleImportFilter.Apply(
+                    ref report, pkg.Id, pkg.InstallationOptions, AllowCLIParameters, AllowPrePostOps,
+                    manager?.CommandLineIsShellInterpreted ?? false);
                 packages.Add(DeserializePackage(pkg));
             }
 
@@ -908,12 +780,26 @@ namespace UniGetUI.Interface.SoftwarePages
                     {
                         if (_p is ImportedPackage package)
                         {
+                            IReadOnlyList<string> param;
+                            try
+                            {
+                                param = package.Manager.OperationHelper.GetStandaloneParameters(
+                                    package, package.installation_options, OperationType.Install);
+                            }
+                            catch (InvalidOperationException ex)
+                            {
+                                Logger.Warn($"Skipping {package.Id} in the exported script: {ex.Message}");
+                                continue;
+                            }
+
                             packages.Add(package.Name + " from " + package.Manager.DisplayName);
 
                             foreach (
                                 var process in package.installation_options.KillBeforeOperation
                             )
                             { // Kill required processes, if any. Forcekill if the user has enable said option
+                                if (!CoreTools.IsSafeProcessImageName(process))
+                                    continue;
                                 commands.Add($"taskkill /im \"{process}\"" + (forceKill ? " /f" : ""));
                             }
 
@@ -924,11 +810,6 @@ namespace UniGetUI.Interface.SoftwarePages
 
                             // Add install command
                             var exeName = package.Manager.Properties.ExecutableFriendlyName;
-                            var param = package.Manager.OperationHelper.GetParameters(
-                                package,
-                                package.installation_options,
-                                OperationType.Install
-                            );
                             commands.Add($"{exeName} {string.Join(' ', param)}");
 
                             if (package.installation_options.PostInstallCommand != "")

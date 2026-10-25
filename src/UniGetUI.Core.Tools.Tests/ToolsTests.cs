@@ -283,6 +283,22 @@ namespace UniGetUI.Core.Tools.Tests
             }
         }
 
+        [Fact]
+        public void TestFileSizeLoaderRefusesFileSystemAddresses()
+        {
+            string file = Path.Join(Path.GetTempPath(), $"unigetui-size-{Guid.NewGuid():N}.bin");
+            File.WriteAllBytes(file, new byte[2048]);
+
+            try
+            {
+                Assert.Equal(0, CoreTools.GetFileSizeAsLong(new Uri(file)));
+            }
+            finally
+            {
+                File.Delete(file);
+            }
+        }
+
         [Theory]
         [InlineData("", 0)]
         [InlineData(
@@ -329,6 +345,65 @@ namespace UniGetUI.Core.Tools.Tests
         {
             CoreTools.Version v = CoreTools.VersionStringToStruct("10c8e557");
             Assert.Equal(CoreTools.Version.Null, v);
+        }
+
+        [Theory]
+        [InlineData("37149234619", "38756550835")]
+        [InlineData("1.2147483648", "1.2147483649")]
+        [InlineData("20260101.120000000001", "20260101.120000000002")]
+        [InlineData("99999999999999999999", "100000000000000000000")]
+        [InlineData("1.20260101120000000000001", "1.20260101120000000000002")]
+        public void TestGetVersionStringAsFloat_WithSegmentsBeyondInt32_OrdersCorrectly(
+            string older,
+            string newer
+        )
+        {
+            Assert.True(
+                CoreTools.VersionStringToStruct(older) < CoreTools.VersionStringToStruct(newer)
+            );
+        }
+
+        [Theory]
+        [InlineData("1.0.0+20260101123456", 1, 0, 0)]
+        [InlineData("1.0 (20260101123456)", 1, 0, 0)]
+        [InlineData("2.0.0+42", 2, 0, 42)]
+        [InlineData("1.0.0+2147483647", 1, 0, 2147483647)]
+        [InlineData("1.0.0+2147483648", 1, 0, 0)]
+        public void TestGetVersionStringAsFloat_WithSplicedDigitRuns_KeepsInt32Limit(
+            string version,
+            int major,
+            int minor,
+            int patch
+        )
+        {
+            Assert.Equal(
+                new CoreTools.Version(major, minor, patch),
+                CoreTools.VersionStringToStruct(version)
+            );
+        }
+
+        [Fact]
+        public void TestGetVersionStringAsFloat_WithExtraSegmentBeyondInt32_HashesConsistently()
+        {
+            CoreTools.Version a = CoreTools.VersionStringToStruct("1.2.3.4.37149234619");
+            CoreTools.Version b = CoreTools.VersionStringToStruct("1.2.3.4.37149234619.0");
+
+            Assert.Equal(a, b);
+            Assert.Equal(a.GetHashCode(), b.GetHashCode());
+            Assert.NotEqual(a, CoreTools.VersionStringToStruct("1.2.3.4.38756550835"));
+        }
+
+        [Theory]
+        [InlineData("20250301123456", "2.0.0")]
+        [InlineData("37149234619", "1.0.0")]
+        public void TestGetVersionStringAsFloat_WithLongNumericScheme_RanksAboveDottedVersions(
+            string numericScheme,
+            string dotted
+        )
+        {
+            Assert.True(
+                CoreTools.VersionStringToStruct(numericScheme) > CoreTools.VersionStringToStruct(dotted)
+            );
         }
 
         // An underscore introducing a pre-release tag rather than a numeric revision must keep
@@ -437,8 +512,15 @@ namespace UniGetUI.Core.Tools.Tests
         [InlineData("\"Hello; World\"", "Hello World")]
         [InlineData("'Hello; World'", "Hello World")]
         [InlineData("query\";start cmd.exe", "querystart cmd.exe")]
-        [InlineData("query;start /B program.exe", "querystart B program.exe")]
-        [InlineData(";&|<>%\"e'~?/\\`", "e")]
+        [InlineData("query;start /B program.exe", "querystart /B program.exe")]
+        [InlineData(";&|<>%\"e'~?\\`", "e")]
+        [InlineData("@babel/core", "@babel/core")]
+        [InlineData("query$(calc)", "querycalc")]
+        [InlineData("query${env:PATH}", "queryenv:PATH")]
+        [InlineData("query#comment", "querycomment")]
+        [InlineData("query!PATH!", "queryPATH")]
+        [InlineData("query^calc", "querycalc")]
+        [InlineData("query[char]65", "querychar65")]
         public void TestSafeQueryString(string query, string expected)
         {
             Assert.Equal(CoreTools.EnsureSafeQueryString(query), expected);
@@ -546,5 +628,52 @@ namespace UniGetUI.Core.Tools.Tests
                 );
             }
         }
+        [Theory]
+        [InlineData("..", "_")]
+        [InlineData(".", "_")]
+        [InlineData("...", "_")]
+        [InlineData("", "")]
+        [InlineData("   ", "_")]
+        [InlineData(". . .", "_")]
+        [InlineData(".NET Runtime", ".NET Runtime")]
+        [InlineData("Contoso.Tool", "Contoso.Tool")]
+        [InlineData("Contoso:Tool", "ContosoTool")]
+        [InlineData("CON", "_CON")]
+        [InlineData("con.exe", "_con.exe")]
+        [InlineData("NUL.json", "_NUL.json")]
+        [InlineData("LPT1", "_LPT1")]
+        [InlineData("COM¹.txt", "_COM¹.txt")]
+        [InlineData("LPT²", "_LPT²")]
+        [InlineData("COM³", "_COM³")]
+        [InlineData("icon. ", "icon")]
+        [InlineData("icon...", "icon")]
+        [InlineData("Contoso", "Contoso")]
+        [InlineData("a<b>c|d*e?f", "abcdef")]
+        [InlineData("dir/sub", "dirsub")]
+        [InlineData(@"dir\sub", "dirsub")]
+        public void MakeValidFileName_NeverReturnsATraversalComponent(
+            string input,
+            string expected
+        )
+        {
+            Assert.Equal(expected, CoreTools.MakeValidFileName(input));
+        }
+
+        [Theory]
+        [InlineData(@"..\..\..\evil")]
+        [InlineData("../../evil")]
+        [InlineData("..")]
+        [InlineData(".")]
+        [InlineData("   ")]
+        public void MakeValidFileName_ResultStaysInsideItsParentDirectory(string input)
+        {
+            string parent = Path.Combine(Path.GetTempPath(), "MVFN", Guid.NewGuid().ToString("N"));
+            string resolved = Path.GetFullPath(
+                Path.Join(parent, CoreTools.MakeValidFileName(input))
+            );
+
+            Assert.Equal(Path.GetFullPath(parent), Path.GetDirectoryName(resolved));
+        }
+
     }
 }

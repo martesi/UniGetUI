@@ -177,7 +177,7 @@ namespace UniGetUI
                     Logger.Error(" -");
                     Logger.Error(" -");
                     if (
-                        Environment.GetCommandLineArgs().Contains("--report-all-errors")
+                        UniGetUI.Core.Data.CoreData.GetProcessArguments().Contains("--report-all-errors")
                         || RaiseExceptionAsFatal
                         || MainWindow is null
                     )

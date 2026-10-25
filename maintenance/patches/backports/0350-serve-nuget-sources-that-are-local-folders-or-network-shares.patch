@@ -1,0 +1,2340 @@
+From fefecb9e5db792a6e1a2f5602403177107513ae0 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:36:12 +0800
+Subject: [PATCH] backport: Serve NuGet sources that are local folders or
+ network shares (#5435)
+
+Upstream-Commit: 0f1c2ce788b250ce3686216badadafbbd33d2177
+Upstream-PR: Devolutions/UniGetUI#5435
+Classic-Source-Commit: fefecb9e5db792a6e1a2f5602403177107513ae0
+
+---
+ src/UniGetUI.Core.Tools.Tests/ToolsTests.cs   |  16 +
+ src/UniGetUI.Core.Tools/Tools.cs              |  13 +
+ .../Helpers/ChocolateySourceHelper.cs         |  24 +-
+ .../BaseNuGet.cs                              | 146 ++++
+ .../BaseNuGetDetailsHelper.cs                 | 115 +++
+ .../Internal/NuGetLocalFeed.cs                | 516 +++++++++++++
+ .../Helpers/PowerShellSourceHelper.cs         |  85 ++-
+ .../Helpers/PowerShell7SourceHelper.cs        |  90 +--
+ .../Manager/Classes/ManagerTable.cs           |  50 ++
+ .../ChocolateyManagerTests.cs                 |  88 +++
+ .../Chocolatey/source-list-output.txt         |   3 +
+ .../Builders/LocalNuGetFeedBuilder.cs         | 104 +++
+ .../NuGetLocalFeedTests.cs                    | 690 ++++++++++++++++++
+ .../PowerShell7ManagerTests.cs                |  40 +
+ .../PowerShellManagerTests.cs                 |  40 +
+ 15 files changed, 1934 insertions(+), 86 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Managers.Generic.NuGet/Internal/NuGetLocalFeed.cs
+ create mode 100644 src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/ManagerTable.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/Infrastructure/Builders/LocalNuGetFeedBuilder.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/NuGetLocalFeedTests.cs
+
+diff --git a/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs b/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
+index beee3569ea8ddfe5a1e49d71f4b38103d9d7d4cc..69931c6d983c3e47d4802811bf000ba0935bf7db 100644
+--- a/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
++++ b/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
+@@ -283,6 +283,22 @@ namespace UniGetUI.Core.Tools.Tests
+             }
+         }
+ 
++        [Fact]
++        public void TestFileSizeLoaderRefusesFileSystemAddresses()
++        {
++            string file = Path.Join(Path.GetTempPath(), $"unigetui-size-{Guid.NewGuid():N}.bin");
++            File.WriteAllBytes(file, new byte[2048]);
++
++            try
++            {
++                Assert.Equal(0, CoreTools.GetFileSizeAsLong(new Uri(file)));
++            }
++            finally
++            {
++                File.Delete(file);
++            }
++        }
++
+         [Theory]
+         [InlineData("", 0)]
+         [InlineData(
+diff --git a/src/UniGetUI.Core.Tools/Tools.cs b/src/UniGetUI.Core.Tools/Tools.cs
+index 7a7c85190488f17b1af64e51121657b264b98e1b..d039fadba9fde1867c9482b19f2f744ad89200de 100644
+--- a/src/UniGetUI.Core.Tools/Tools.cs
++++ b/src/UniGetUI.Core.Tools/Tools.cs
+@@ -330,6 +330,16 @@ namespace UniGetUI.Core.Tools
+             if (url is null)
+                 return 0;
+ 
++            if (url.IsFile)
++            {
++                Logger.Warn(
++                    $"Refusing to measure the file system address {url}: this helper answers "
++                        + "for network addresses only, and its callers take the address from "
++                        + "package metadata"
++                );
++                return 0;
++            }
++
+             try
+             {
+                 using HttpClient client = new(CoreTools.GenericHttpClientParameters);
+@@ -351,6 +361,9 @@ namespace UniGetUI.Core.Tools
+         {
+             try
+             {
++                if (url.IsFile)
++                    return Path.GetFileName(url.LocalPath);
++
+                 var handler = CoreTools.GenericHttpClientParameters;
+                 handler.AllowAutoRedirect = false;
+                 using HttpClient client = new(handler);
+diff --git a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Helpers/ChocolateySourceHelper.cs b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Helpers/ChocolateySourceHelper.cs
+index b8d951c64879a8adb8fbfa6ca4c9c44c031da8aa..fb9994a7b94e5e174aa6cd4ae5af7d925f2450e4 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Helpers/ChocolateySourceHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Helpers/ChocolateySourceHelper.cs
+@@ -9,6 +9,8 @@ namespace UniGetUI.PackageEngine.Managers.ChocolateyManager
+ {
+     internal sealed class ChocolateySourceHelper : BaseSourceHelper
+     {
++        private const string AuthenticatedMarker = "(Authenticated)";
++
+         public ChocolateySourceHelper(Chocolatey manager)
+             : base(manager) { }
+ 
+@@ -105,10 +107,11 @@ namespace UniGetUI.PackageEngine.Managers.ChocolateyManager
+ 
+                     if (line.Contains(" - ") && line.Contains("| "))
+                     {
+-                        string[] parts = line.Trim().Split('|')[0].Trim().Split(" - ");
++                        string[] parts = line.Trim().Split('|')[0].Trim().Split(" - ", 2);
++                        string url = ExtractSourceUrl(parts[1]);
+                         if (
+-                            parts[1].Trim() == "https://community.chocolatey.org/api/v2/"
+-                            || parts[1].Trim() == "https://chocolatey.org/api/v2/"
++                            url == "https://community.chocolatey.org/api/v2/"
++                            || url == "https://chocolatey.org/api/v2/"
+                         )
+                         {
+                             sources.Add(
+@@ -122,11 +125,7 @@ namespace UniGetUI.PackageEngine.Managers.ChocolateyManager
+                         else
+                         {
+                             sources.Add(
+-                                new ManagerSource(
+-                                    Manager,
+-                                    parts[0].Trim(),
+-                                    new Uri(parts[1].Split(" ")[0].Trim())
+-                                )
++                                new ManagerSource(Manager, parts[0].Trim(), new Uri(url))
+                             );
+                         }
+                     }
+@@ -139,5 +138,14 @@ namespace UniGetUI.PackageEngine.Managers.ChocolateyManager
+ 
+             return sources;
+         }
++
++        private static string ExtractSourceUrl(string value)
++        {
++            string url = value.Trim();
++            if (url.EndsWith(AuthenticatedMarker, StringComparison.Ordinal))
++                url = url[..^AuthenticatedMarker.Length].TrimEnd();
++
++            return url;
++        }
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+index a0bfd588788674acccbfba854c7d40e6f1403206..08a1e778ea03640f574e33af6b386efc595239e4 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+@@ -116,6 +116,14 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             {
+                 try
+                 {
++                    if (NuGetLocalFeed.TryGetDirectory(source, out string localDirectory))
++                    {
++                        Packages.AddRange(
++                            FindPackagesLocal(source, localDirectory, query, canPrerelease, logger)
++                        );
++                        continue;
++                    }
++
+                     if (NuGetV3ServiceIndex.IsV3Source(source))
+                     {
+                         Packages.AddRange(FindPackagesV3(source, query, canPrerelease, logger));
+@@ -246,6 +254,130 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             return Packages;
+         }
+ 
++        internal IReadOnlyList<Package> FindPackagesLocal(
++            IManagerSource source,
++            string directory,
++            string query,
++            bool canPrerelease,
++            INativeTaskLogger logger
++        )
++        {
++            logger.Log(
++                $"Begin local folder package search for query={query} on source {source.Name} "
++                    + $"at Directory={directory} of manager {Name}"
++            );
++
++            Dictionary<string, LocalNuGetPackage> latest = new(StringComparer.OrdinalIgnoreCase);
++            foreach (LocalNuGetPackage candidate in NuGetLocalFeed.Enumerate(directory))
++            {
++                if (candidate.IsPreRelease && !canPrerelease)
++                    continue;
++
++                if (!NuGetLocalFeed.MatchesQuery(candidate, query, UseSubstringSearch))
++                    continue;
++
++                if (
++                    latest.TryGetValue(candidate.Id, out LocalNuGetPackage? current)
++                    && !IsNewerVersion(candidate.Version, current.Version)
++                )
++                    continue;
++
++                latest[candidate.Id] = candidate;
++            }
++
++            List<Package> packages = [];
++            foreach (LocalNuGetPackage found in latest.Values)
++            {
++                logger.Log(
++                    $"Found package {found.Id} version {found.Version} on source {source.Name}"
++                );
++
++                packages.Add(
++                    new Package(
++                        CoreTools.FormatAsName(found.Id),
++                        found.Id,
++                        found.Version,
++                        source,
++                        this
++                    )
++                );
++            }
++
++            return packages;
++        }
++
++        internal IReadOnlyList<Package> GetAvailableUpdatesLocal(
++            IManagerSource source,
++            string directory,
++            IReadOnlyList<IPackage> installedPackages,
++            bool canPrerelease,
++            INativeTaskLogger logger
++        )
++        {
++            Dictionary<string, List<LocalNuGetPackage>> availableById = new(
++                StringComparer.OrdinalIgnoreCase
++            );
++
++            foreach (LocalNuGetPackage candidate in NuGetLocalFeed.Enumerate(directory))
++            {
++                if (candidate.IsPreRelease && !canPrerelease)
++                    continue;
++
++                if (!availableById.TryGetValue(candidate.Id, out List<LocalNuGetPackage>? entries))
++                    availableById[candidate.Id] = entries = [];
++
++                entries.Add(candidate);
++            }
++
++            var installed = new Dictionary<string, (string Id, string Version)>();
++            foreach (IPackage package in installedPackages)
++                installed[package.Id.ToLower()] = (package.Id, package.VersionString);
++
++            var scopeMap = BuildInstalledScopeMap(installedPackages);
++            List<Package> packages = [];
++
++            foreach ((string id, string installedVersion) in installed.Values)
++            {
++                if (!availableById.TryGetValue(id, out List<LocalNuGetPackage>? entries))
++                    continue;
++
++                string? newest = null;
++                foreach (LocalNuGetPackage candidate in entries)
++                {
++                    if (!IsNewerVersion(candidate.Version, installedVersion))
++                        continue;
++
++                    if (newest is null || IsNewerVersion(candidate.Version, newest))
++                        newest = candidate.Version;
++                }
++
++                if (newest is null)
++                    continue;
++
++                logger.Log($"Found package {id} version {newest} on source {source.Name}");
++
++                packages.Add(
++                    new Package(
++                        CoreTools.FormatAsName(id),
++                        id,
++                        installedVersion,
++                        newest,
++                        source,
++                        this,
++                        new OverridenInstallationOptions(scopeMap.GetValueOrDefault(id.ToLower()))
++                    )
++                );
++            }
++
++            return packages;
++        }
++
++        private bool IsNewerVersion(string candidate, string current) =>
++            CompareVersions(candidate, current) is { } comparison
++                ? comparison > 0
++                : CoreTools.VersionStringToStruct(candidate)
++                    > CoreTools.VersionStringToStruct(current);
++
+         internal IReadOnlyList<Package> FindPackagesV3(
+             IManagerSource source,
+             string query,
+@@ -326,6 +458,20 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             {
+                 try
+                 {
++                    if (NuGetLocalFeed.TryGetDirectory(pair.Key, out string localDirectory))
++                    {
++                        Packages.AddRange(
++                            GetAvailableUpdatesLocal(
++                                pair.Key,
++                                localDirectory,
++                                pair.Value,
++                                canPrerelease,
++                                logger
++                            )
++                        );
++                        continue;
++                    }
++
+                     if (NuGetV3ServiceIndex.IsV3Source(pair.Key))
+                     {
+                         var v3Updates = GetAvailableUpdatesV3(
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGetDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGetDetailsHelper.cs
+index 6ce1b84e3f86997bfef270dbed8d2c0984543df2..9f8c90d8da75e8cafaf91c2bc837b139d63ffd28 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGetDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGetDetailsHelper.cs
+@@ -1,3 +1,4 @@
++using System.Globalization;
+ using System.Text.RegularExpressions;
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.IconEngine;
+@@ -21,6 +22,12 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             var logger = Manager.TaskLogger.CreateNew(LoggableTaskType.LoadPackageDetails);
+             try
+             {
++                if (NuGetLocalFeed.TryGetDirectory(details.Package.Source, out string directory))
++                {
++                    logger.Close(GetDetailsLocal(details, directory, logger) ? 0 : 1);
++                    return;
++                }
++
+                 if (NuGetV3ServiceIndex.IsV3Source(details.Package.Source))
+                 {
+                     logger.Close(GetDetailsV3(details, logger) ? 0 : 1);
+@@ -230,6 +237,72 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             }
+         }
+ 
++        private static bool GetDetailsLocal(
++            IPackageDetails details,
++            string directory,
++            INativeTaskLogger logger
++        )
++        {
++            IPackage package = details.Package;
++            LocalNuGetPackage? local = NuGetLocalFeed.Find(
++                directory,
++                package.Id,
++                package.VersionString
++            );
++
++            if (local is null)
++            {
++                logger.Error(
++                    $"No package file for {package.Id} version {package.VersionString} was found "
++                        + $"on source {package.Source.Name} at Directory={directory}"
++                );
++                return false;
++            }
++
++            Uri packageFile = new(local.FilePath);
++            details.ManifestUrl = packageFile;
++            details.InstallerUrl = packageFile;
++            details.InstallerSize = local.Size;
++            details.InstallerType = CoreTools.Translate("NuPkg (zipped manifest)");
++            details.Description = FirstNonEmpty(local.Description, local.Summary);
++            details.ReleaseNotes = local.ReleaseNotes;
++            details.License = local.License;
++            details.UpdateDate = local.LastWriteTimeUtc.ToString("u", CultureInfo.InvariantCulture);
++            details.Tags =
++                local.Tags?.Split(
++                    [' ', ',', ';', '\t', '\n', '\r'],
++                    StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
++                ) ?? [];
++
++            string? authors = FirstNonEmpty(local.Authors, local.Owners);
++            if (authors is not null)
++            {
++                details.Author = authors;
++                details.Publisher = authors;
++            }
++
++            if (Uri.TryCreate(local.ProjectUrl, UriKind.Absolute, out Uri? projectUrl))
++                details.HomepageUrl = projectUrl;
++
++            if (Uri.TryCreate(local.LicenseUrl, UriKind.Absolute, out Uri? licenseUrl))
++                details.LicenseUrl = licenseUrl;
++
++            details.Dependencies.Clear();
++            foreach (LocalNuGetDependency dependency in local.Dependencies)
++            {
++                details.Dependencies.Add(
++                    new()
++                    {
++                        Name = dependency.Id,
++                        Version = FormatDependencyRange(dependency.Range),
++                        Mandatory = true,
++                    }
++                );
++            }
++
++            return true;
++        }
++
+         private static bool GetDetailsV3(IPackageDetails details, INativeTaskLogger logger)
+         {
+             IPackage package = details.Package;
+@@ -369,6 +442,9 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+ 
+         protected override CacheableIcon? GetIcon_UnSafe(IPackage package)
+         {
++            if (NuGetLocalFeed.TryGetDirectory(package.Source, out string directory))
++                return GetIconLocal(package, directory);
++
+             if (NuGetV3ServiceIndex.IsV3Source(package.Source))
+                 return GetIconV3(package);
+ 
+@@ -399,6 +475,28 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             );
+         }
+ 
++        private CacheableIcon? GetIconLocal(IPackage package, string directory)
++        {
++            LocalNuGetPackage? local = NuGetLocalFeed.Find(
++                directory,
++                package.Id,
++                package.VersionString
++            );
++
++            if (local is null)
++                return null;
++
++            if (Uri.TryCreate(local.IconUrl, UriKind.Absolute, out Uri? iconUrl))
++                return new CacheableIcon(iconUrl, package.VersionString);
++
++            string? extracted = NuGetLocalFeed.ExtractIcon(
++                local,
++                IconCacheEngine.GetIconCacheDirectory(Manager.Name, package.Id)
++            );
++
++            return extracted is null ? null : new CacheableIcon(extracted);
++        }
++
+         private static CacheableIcon? GetIconV3(IPackage package)
+         {
+             long hash = package.GetVersionedHash();
+@@ -447,6 +545,23 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+ 
+         protected override IReadOnlyList<string> GetInstallableVersions_UnSafe(IPackage package)
+         {
++            if (NuGetLocalFeed.TryGetDirectory(package.Source, out string directory))
++            {
++                try
++                {
++                    return NuGetLocalFeed.GetVersionsDescending(directory, package.Id);
++                }
++                catch (Exception e)
++                {
++                    Logger.Warn(
++                        $"Could not list the versions of package {package.Id} on the local "
++                            + $"folder feed at Directory={directory}"
++                    );
++                    Logger.Warn(e);
++                    return [];
++                }
++            }
++
+             if (NuGetV3ServiceIndex.IsV3Source(package.Source))
+             {
+                 NuGetV3ServiceIndex? index = NuGetV3ServiceIndex.Resolve(package.Source);
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/Internal/NuGetLocalFeed.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/Internal/NuGetLocalFeed.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..934b03cf44443fe1c9bb082d0ee93ca3e3dfcbdf
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/Internal/NuGetLocalFeed.cs
+@@ -0,0 +1,516 @@
++using System.Collections.Concurrent;
++using System.Globalization;
++using System.IO.Compression;
++using System.Security.Cryptography;
++using System.Text;
++using System.Xml;
++using System.Xml.Linq;
++using UniGetUI.Core.Logging;
++using UniGetUI.Core.Tools;
++using UniGetUI.PackageEngine.Interfaces;
++
++namespace UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal
++{
++    internal readonly record struct LocalNuGetDependency(string Id, string Range);
++
++    internal sealed class LocalNuGetPackage
++    {
++        public required string Id { get; init; }
++        public required string Version { get; init; }
++        public required string FilePath { get; init; }
++        public required long Size { get; init; }
++        public required DateTime LastWriteTimeUtc { get; init; }
++        public required bool IsPreRelease { get; init; }
++        public string? Title { get; init; }
++        public string? Description { get; init; }
++        public string? Summary { get; init; }
++        public string? Authors { get; init; }
++        public string? Owners { get; init; }
++        public string? ProjectUrl { get; init; }
++        public string? LicenseUrl { get; init; }
++        public string? License { get; init; }
++        public string? IconUrl { get; init; }
++        public string? IconFile { get; init; }
++        public string? ReleaseNotes { get; init; }
++        public string? Tags { get; init; }
++        public IReadOnlyList<LocalNuGetDependency> Dependencies { get; init; } = [];
++    }
++
++    internal static class NuGetLocalFeed
++    {
++        private const int MaxRecursionDepth = 3;
++        private const int MaxNuspecBytes = 4 * 1024 * 1024;
++        private const long MaxIconBytes = 8 * 1024 * 1024;
++
++        private readonly record struct CacheEntry(
++            long Size,
++            DateTime LastWriteTimeUtc,
++            LocalNuGetPackage Package
++        );
++
++        private static readonly ConcurrentDictionary<string, CacheEntry> ParsedPackages =
++            new(
++                OperatingSystem.IsWindows()
++                    ? StringComparer.OrdinalIgnoreCase
++                    : StringComparer.Ordinal
++            );
++
++        public static bool IsLocalSource(IManagerSource? source) => TryGetDirectory(source, out _);
++
++        public static bool TryGetDirectory(IManagerSource? source, out string directory)
++        {
++            directory = string.Empty;
++
++            if (source?.Url is not { IsAbsoluteUri: true, IsFile: true } url)
++                return false;
++
++            directory = url.LocalPath;
++            return directory.Length > 0;
++        }
++
++        internal static void ClearCache() => ParsedPackages.Clear();
++
++        public static IReadOnlyList<LocalNuGetPackage> Enumerate(string directory)
++        {
++            EnumerationOptions options = new()
++            {
++                RecurseSubdirectories = true,
++                MaxRecursionDepth = MaxRecursionDepth,
++                IgnoreInaccessible = true,
++                AttributesToSkip = FileAttributes.Hidden | FileAttributes.System,
++                MatchCasing = MatchCasing.CaseInsensitive,
++            };
++
++            List<LocalNuGetPackage> packages = [];
++            foreach (string file in Directory.EnumerateFiles(directory, "*.nupkg", options))
++            {
++                if (!Path.GetExtension(file).Equals(".nupkg", StringComparison.OrdinalIgnoreCase))
++                    continue;
++
++                if (Load(file) is { } package)
++                    packages.Add(package);
++            }
++
++            return packages;
++        }
++
++        public static LocalNuGetPackage? Find(string directory, string packageId, string version)
++        {
++            LocalNuGetPackage? equivalent = null;
++            SemanticVersion.TryParse(
++                version,
++                SemVerLabels.CaseInsensitive,
++                out SemanticVersion wanted
++            );
++
++            foreach (LocalNuGetPackage package in Enumerate(directory))
++            {
++                if (!package.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase))
++                    continue;
++
++                if (package.Version.Equals(version, StringComparison.OrdinalIgnoreCase))
++                    return package;
++
++                if (
++                    equivalent is null
++                    && wanted.IsValid
++                    && SemanticVersion.TryParse(
++                        package.Version,
++                        SemVerLabels.CaseInsensitive,
++                        out SemanticVersion parsed
++                    )
++                    && parsed == wanted
++                )
++                    equivalent = package;
++            }
++
++            return equivalent;
++        }
++
++        public static IReadOnlyList<string> GetVersionsDescending(
++            string directory,
++            string packageId
++        )
++        {
++            List<(SemanticVersion Parsed, string Raw)> versions = [];
++            HashSet<string> alreadyAdded = new(StringComparer.OrdinalIgnoreCase);
++
++            foreach (LocalNuGetPackage package in Enumerate(directory))
++            {
++                if (!package.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase))
++                    continue;
++
++                if (!alreadyAdded.Add(package.Version))
++                    continue;
++
++                versions.Add(
++                    SemanticVersion.TryParse(
++                        package.Version,
++                        SemVerLabels.CaseInsensitive,
++                        out SemanticVersion parsed
++                    )
++                        ? (parsed, package.Version)
++                        : (SemanticVersion.Invalid(package.Version), package.Version)
++                );
++            }
++
++            versions.Sort((left, right) => right.Parsed.CompareTo(left.Parsed));
++            return versions.Select(entry => entry.Raw).ToArray();
++        }
++
++        public static bool MatchesQuery(LocalNuGetPackage package, string query, bool idOnly)
++        {
++            if (string.IsNullOrWhiteSpace(query))
++                return true;
++
++            string term = query.Trim();
++            if (Contains(package.Id, term))
++                return true;
++
++            if (idOnly)
++                return false;
++
++            return Contains(package.Title, term)
++                || Contains(package.Tags, term)
++                || Contains(package.Summary, term)
++                || Contains(package.Description, term)
++                || Contains(package.Authors, term);
++        }
++
++        private static bool Contains(string? value, string term) =>
++            value is not null && value.Contains(term, StringComparison.OrdinalIgnoreCase);
++
++        private static readonly string[] IconExtensions =
++        [
++            ".png",
++            ".jpg",
++            ".jpeg",
++            ".gif",
++            ".bmp",
++            ".webp",
++            ".ico",
++            ".svg",
++        ];
++
++        private static string SourceIdentity(LocalNuGetPackage package)
++        {
++            byte[] digest = SHA256.HashData(
++                Encoding.UTF8.GetBytes(
++                    string.Join(
++                        '\u0000',
++                        package.FilePath,
++                        package.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture),
++                        package.Size.ToString(CultureInfo.InvariantCulture)
++                    )
++                )
++            );
++
++            return Convert.ToHexString(digest.AsSpan(0, 8)).ToLowerInvariant();
++        }
++
++        public static string? ExtractIcon(LocalNuGetPackage package, string targetDirectory)
++        {
++            if (package.IconFile is not { Length: > 0 } iconFile)
++                return null;
++
++            string extension = Path.GetExtension(iconFile);
++            if (!IconExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
++                extension = ".png";
++
++            string target = Path.Join(
++                targetDirectory,
++                $"localfeed-{CoreTools.MakeValidFileName(package.Version)}"
++                    + $"-{SourceIdentity(package)}{extension}"
++            );
++
++            try
++            {
++                if (File.Exists(target))
++                    return target;
++
++                string wanted = iconFile.Replace('\\', '/').TrimStart('/');
++                using FileStream stream = File.OpenRead(package.FilePath);
++                using ZipArchive archive = new(stream, ZipArchiveMode.Read);
++
++                ZipArchiveEntry? entry = archive.Entries.FirstOrDefault(candidate =>
++                    candidate.FullName.Replace('\\', '/')
++                        .Equals(wanted, StringComparison.OrdinalIgnoreCase)
++                );
++
++                if (entry is null)
++                {
++                    Logger.Warn(
++                        $"The NuGet package at {package.FilePath} declares the icon {iconFile}, "
++                            + "which the archive does not contain"
++                    );
++                    return null;
++                }
++
++                if (entry.Length > MaxIconBytes)
++                {
++                    Logger.Warn(
++                        $"The icon of the NuGet package at {package.FilePath} declares "
++                            + $"{entry.Length} bytes, over the {MaxIconBytes} byte limit"
++                    );
++                    return null;
++                }
++
++                using Stream compressed = entry.Open();
++                using MemoryStream? icon = ReadBounded(compressed, MaxIconBytes);
++
++                if (icon is null)
++                {
++                    Logger.Warn(
++                        $"The icon of the NuGet package at {package.FilePath} expands past "
++                            + $"the {MaxIconBytes} byte limit"
++                    );
++                    return null;
++                }
++
++                Directory.CreateDirectory(targetDirectory);
++                File.WriteAllBytes(target, icon.ToArray());
++                return target;
++            }
++            catch (Exception e)
++            {
++                Logger.Warn($"Could not extract the icon of the NuGet package at {package.FilePath}");
++                Logger.Warn(e);
++                return null;
++            }
++        }
++
++        private static MemoryStream? ReadBounded(Stream source, long limit)
++        {
++            MemoryStream buffer = new();
++            byte[] chunk = new byte[81920];
++            long total = 0;
++            int read;
++
++            while ((read = source.Read(chunk, 0, chunk.Length)) > 0)
++            {
++                total += read;
++                if (total > limit)
++                {
++                    buffer.Dispose();
++                    return null;
++                }
++
++                buffer.Write(chunk, 0, read);
++            }
++
++            buffer.Position = 0;
++            return buffer;
++        }
++
++        private static LocalNuGetPackage? Load(string file)
++        {
++            long size;
++            DateTime lastWriteTimeUtc;
++
++            try
++            {
++                FileInfo info = new(file);
++                size = info.Length;
++                lastWriteTimeUtc = info.LastWriteTimeUtc;
++            }
++            catch (Exception e)
++            {
++                Logger.Warn($"Could not read the NuGet package file at {file}");
++                Logger.Warn(e);
++                return null;
++            }
++
++            if (
++                ParsedPackages.TryGetValue(file, out CacheEntry cached)
++                && cached.Size == size
++                && cached.LastWriteTimeUtc == lastWriteTimeUtc
++            )
++                return cached.Package;
++
++            try
++            {
++                using FileStream stream = File.OpenRead(file);
++                using ZipArchive archive = new(stream, ZipArchiveMode.Read);
++
++                ZipArchiveEntry? nuspec = null;
++                foreach (ZipArchiveEntry entry in archive.Entries)
++                {
++                    if (entry.FullName.Contains('/') || entry.FullName.Contains('\\'))
++                        continue;
++
++                    if (!entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase))
++                        continue;
++
++                    nuspec = entry;
++                    break;
++                }
++
++                if (nuspec is null)
++                {
++                    Logger.Warn($"The NuGet package at {file} carries no .nuspec manifest");
++                    return null;
++                }
++
++                if (nuspec.Length > MaxNuspecBytes)
++                {
++                    Logger.Warn(
++                        $"The .nuspec manifest of the NuGet package at {file} declares "
++                            + $"{nuspec.Length} bytes, over the {MaxNuspecBytes} byte limit"
++                    );
++                    return null;
++                }
++
++                using Stream compressed = nuspec.Open();
++                using MemoryStream? manifest = ReadBounded(compressed, MaxNuspecBytes);
++
++                if (manifest is null)
++                {
++                    Logger.Warn(
++                        $"The .nuspec manifest of the NuGet package at {file} expands past "
++                            + $"the {MaxNuspecBytes} byte limit"
++                    );
++                    return null;
++                }
++
++                LocalNuGetPackage? package = ParseNuspec(manifest, file, size, lastWriteTimeUtc);
++
++                if (package is null)
++                {
++                    Logger.Warn(
++                        $"The .nuspec manifest of the NuGet package at {file} declares no id or version"
++                    );
++                    return null;
++                }
++
++                ParsedPackages[file] = new CacheEntry(size, lastWriteTimeUtc, package);
++                return package;
++            }
++            catch (Exception e)
++            {
++                Logger.Warn($"Could not read the NuGet package at {file}");
++                Logger.Warn(e);
++                return null;
++            }
++        }
++
++        internal static LocalNuGetPackage? ParseNuspec(
++            Stream manifest,
++            string file,
++            long size,
++            DateTime lastWriteTimeUtc
++        )
++        {
++            XmlReaderSettings settings = new()
++            {
++                DtdProcessing = DtdProcessing.Prohibit,
++                XmlResolver = null,
++                MaxCharactersInDocument = MaxNuspecBytes,
++                IgnoreComments = true,
++                IgnoreProcessingInstructions = true,
++                CloseInput = false,
++            };
++
++            using XmlReader reader = XmlReader.Create(manifest, settings);
++            XElement? metadata = XDocument
++                .Load(reader)
++                .Root?.Elements()
++                .FirstOrDefault(element => element.Name.LocalName is "metadata");
++
++            if (metadata is null)
++                return null;
++
++            string? id = Value(metadata, "id");
++            string? version = Value(metadata, "version");
++
++            if (id is null || version is null)
++                return null;
++
++            return new LocalNuGetPackage
++            {
++                Id = id,
++                Version = version,
++                FilePath = file,
++                Size = size,
++                LastWriteTimeUtc = lastWriteTimeUtc,
++                IsPreRelease =
++                    SemanticVersion.TryParse(
++                        version,
++                        SemVerLabels.CaseInsensitive,
++                        out SemanticVersion parsed
++                    ) && parsed.IsPreRelease,
++                Title = Value(metadata, "title"),
++                Description = Value(metadata, "description"),
++                Summary = Value(metadata, "summary"),
++                Authors = Value(metadata, "authors"),
++                Owners = Value(metadata, "owners"),
++                ProjectUrl = Value(metadata, "projectUrl"),
++                LicenseUrl = Value(metadata, "licenseUrl"),
++                License = ReadLicenseExpression(metadata),
++                IconUrl = Value(metadata, "iconUrl"),
++                IconFile = Value(metadata, "icon"),
++                ReleaseNotes = Value(metadata, "releaseNotes"),
++                Tags = Value(metadata, "tags"),
++                Dependencies = ReadDependencies(metadata),
++            };
++        }
++
++        private static string? ReadLicenseExpression(XElement metadata)
++        {
++            XElement? license = metadata
++                .Elements()
++                .FirstOrDefault(element => element.Name.LocalName is "license");
++
++            if (license is null)
++                return null;
++
++            string? type = license.Attribute("type")?.Value;
++            if (type is not null && !type.Equals("expression", StringComparison.OrdinalIgnoreCase))
++                return null;
++
++            string value = license.Value.Trim();
++            return value.Length is 0 ? null : value;
++        }
++
++        private static IReadOnlyList<LocalNuGetDependency> ReadDependencies(XElement metadata)
++        {
++            XElement? dependencies = metadata
++                .Elements()
++                .FirstOrDefault(element => element.Name.LocalName is "dependencies");
++
++            if (dependencies is null)
++                return [];
++
++            List<LocalNuGetDependency> parsed = [];
++            HashSet<string> alreadyAdded = new(StringComparer.OrdinalIgnoreCase);
++
++            foreach (XElement dependency in dependencies.Descendants())
++            {
++                if (dependency.Name.LocalName is not "dependency")
++                    continue;
++
++                string? dependencyId = dependency.Attribute("id")?.Value;
++                if (string.IsNullOrWhiteSpace(dependencyId) || !alreadyAdded.Add(dependencyId))
++                    continue;
++
++                parsed.Add(
++                    new LocalNuGetDependency(
++                        dependencyId,
++                        dependency.Attribute("version")?.Value ?? string.Empty
++                    )
++                );
++            }
++
++            return parsed;
++        }
++
++        private static string? Value(XElement metadata, string name)
++        {
++            string? value = metadata
++                .Elements()
++                .FirstOrDefault(element => element.Name.LocalName == name)
++                ?.Value.Trim();
++
++            return string.IsNullOrEmpty(value) ? null : value;
++        }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellSourceHelper.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellSourceHelper.cs
+index 9a4af9d0a5294ccaeef40bc7edbeaa13657c33c4..f172b800287f40536b5b9909a2e9afb25faa4eee 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellSourceHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellSourceHelper.cs
+@@ -1,5 +1,4 @@
+ using System.Diagnostics;
+-using System.Text.RegularExpressions;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.PackageEngine.Classes.Manager;
+ using UniGetUI.PackageEngine.Classes.Manager.Providers;
+@@ -56,14 +55,16 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+ 
+         protected override IReadOnlyList<IManagerSource> GetSources_UnSafe()
+         {
+-            List<ManagerSource> sources = [];
+-
+             using Process p = new()
+             {
+                 StartInfo = new()
+                 {
+                     FileName = Manager.Status.ExecutablePath,
+-                    Arguments = Manager.Status.ExecutableCallArgs + " Get-PSRepository",
++                    Arguments =
++                        Manager.Status.ExecutableCallArgs
++                        + " \"Get-PSRepository | Format-Table -Property Name,SourceLocation"
++                        + ManagerTable.UntruncatedTableTail
++                        + "\"",
+                     RedirectStandardOutput = true,
+                     RedirectStandardError = true,
+                     RedirectStandardInput = true,
+@@ -80,48 +81,58 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+ 
+             p.Start();
+ 
+-            bool dashesPassed = false;
+             string? line;
++            List<string> lines = [];
+             while ((line = p.StandardOutput.ReadLine()) is not null)
+             {
+                 logger.AddToStdOut(line);
+-                try
++                lines.Add(line);
++            }
++
++            logger.AddToStdErr(p.StandardError.ReadToEnd());
++            p.WaitForExit();
++            logger.Close(p.ExitCode);
++
++            return ParseSources(lines);
++        }
++
++        internal IReadOnlyList<IManagerSource> ParseSources(IEnumerable<string> lines)
++        {
++            List<IManagerSource> sources = [];
++            IReadOnlyList<int>? columns = null;
++
++            foreach (string line in lines)
++            {
++                if (string.IsNullOrWhiteSpace(line))
+                 {
+-                    if (string.IsNullOrEmpty(line))
+-                    {
+-                        continue;
+-                    }
+-
+-                    if (!dashesPassed)
+-                    {
+-                        if (line.Contains("---"))
+-                        {
+-                            dashesPassed = true;
+-                        }
+-                    }
+-                    else
+-                    {
+-                        string[] parts = Regex.Replace(line.Trim(), " {2,}", " ").Split(' ');
+-                        if (parts.Length >= 3)
+-                        {
+-                            sources.Add(
+-                                new ManagerSource(
+-                                    Manager,
+-                                    parts[0].Trim(),
+-                                    new Uri(parts[2].Trim())
+-                                )
+-                            );
+-                        }
+-                    }
++                    continue;
+                 }
+-                catch (Exception e)
++
++                if (columns is null)
++                {
++                    columns = ManagerTable.ReadColumnStarts(line);
++                    continue;
++                }
++
++                string name = ManagerTable.ReadColumn(line, columns, 0);
++                string location = ManagerTable.ReadColumn(line, columns, 1);
++
++                if (name.Length is 0 || location.Length is 0)
++                {
++                    continue;
++                }
++
++                if (!Uri.TryCreate(location, UriKind.Absolute, out Uri? url))
+                 {
+-                    Logger.Warn(e);
++                    Logger.Warn(
++                        $"Could not read the location \"{location}\" of the "
++                            + $"{Manager.Name} repository {name}"
++                    );
++                    continue;
+                 }
++
++                sources.Add(new ManagerSource(Manager, name, url));
+             }
+-            logger.AddToStdErr(p.StandardError.ReadToEnd());
+-            p.WaitForExit();
+-            logger.Close(p.ExitCode);
+ 
+             return sources;
+         }
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7SourceHelper.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7SourceHelper.cs
+index 2777d28b6d67b67544e48798abfde238916548de..e556510c61e20fea1eae90c3fe2048bcaab8527f 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7SourceHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7SourceHelper.cs
+@@ -1,5 +1,4 @@
+ using System.Diagnostics;
+-using System.Text.RegularExpressions;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.PackageEngine.Classes.Manager;
+ using UniGetUI.PackageEngine.Classes.Manager.Providers;
+@@ -56,8 +55,6 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
+ 
+         protected override IReadOnlyList<IManagerSource> GetSources_UnSafe()
+         {
+-            List<IManagerSource> sources = [];
+-
+             using Process p = new()
+             {
+                 StartInfo = new()
+@@ -66,9 +63,12 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
+                     Arguments =
+                         Manager.Status.ExecutableCallArgs
+                         + " \"if (Get-Command Get-PSResourceRepository -ErrorAction SilentlyContinue)"
+-                        + " { Get-PSResourceRepository | Format-Table -Property Name,Uri }"
+-                        + " else { Get-PSRepository | Format-Table -Property"
+-                        + " Name,@{N='SourceLocation';E={If ($_.Uri) {$_.Uri.AbsoluteUri} Else {$_.SourceLocation}}} }\"",
++                        + " { Get-PSResourceRepository | Format-Table -Property Name,Uri"
++                        + ManagerTable.UntruncatedTableTail
++                        + " } else { Get-PSRepository | Format-Table -Property"
++                        + " Name,@{N='SourceLocation';E={If ($_.Uri) {$_.Uri.AbsoluteUri} Else {$_.SourceLocation}}}"
++                        + ManagerTable.UntruncatedTableTail
++                        + " }\"",
+                     RedirectStandardOutput = true,
+                     RedirectStandardError = true,
+                     RedirectStandardInput = true,
+@@ -85,50 +85,58 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
+ 
+             p.Start();
+ 
+-            bool dashesPassed = false;
+             string? line;
++            List<string> lines = [];
+             while ((line = p.StandardOutput.ReadLine()) is not null)
+             {
+                 logger.AddToStdOut(line);
+-                try
++                lines.Add(line);
++            }
++
++            logger.AddToStdErr(p.StandardError.ReadToEnd());
++            p.WaitForExit();
++            logger.Close(p.ExitCode);
++
++            return ParseSources(lines);
++        }
++
++        internal IReadOnlyList<IManagerSource> ParseSources(IEnumerable<string> lines)
++        {
++            List<IManagerSource> sources = [];
++            IReadOnlyList<int>? columns = null;
++
++            foreach (string line in lines)
++            {
++                if (string.IsNullOrWhiteSpace(line))
+                 {
+-                    if (string.IsNullOrEmpty(line))
+-                    {
+-                        continue;
+-                    }
+-
+-                    if (!dashesPassed)
+-                    {
+-                        if (line.Contains("---"))
+-                        {
+-                            dashesPassed = true;
+-                        }
+-                    }
+-                    else
+-                    {
+-                        string[] parts = Regex.Replace(line.Trim(), " {2,}", " ").Split(' ');
+-                        if (parts.Length >= 2)
+-                        {
+-                            string uri = Regex
+-                                .Match(
+-                                    line,
+-                                    "https?:\\/\\/([\\w%-]+\\.)+[\\w%-]+(\\/[\\w%-]+)+\\/?"
+-                                )
+-                                .Value;
+-                            if (uri == "")
+-                                continue;
+-                            sources.Add(new ManagerSource(Manager, parts[0].Trim(), new Uri(uri)));
+-                        }
+-                    }
++                    continue;
+                 }
+-                catch (Exception e)
++
++                if (columns is null)
+                 {
+-                    Logger.Warn(e);
++                    columns = ManagerTable.ReadColumnStarts(line);
++                    continue;
+                 }
++
++                string name = ManagerTable.ReadColumn(line, columns, 0);
++                string location = ManagerTable.ReadColumn(line, columns, 1);
++
++                if (name.Length is 0 || location.Length is 0)
++                {
++                    continue;
++                }
++
++                if (!Uri.TryCreate(location, UriKind.Absolute, out Uri? url))
++                {
++                    Logger.Warn(
++                        $"Could not read the location \"{location}\" of the "
++                            + $"{Manager.Name} repository {name}"
++                    );
++                    continue;
++                }
++
++                sources.Add(new ManagerSource(Manager, name, url));
+             }
+-            logger.AddToStdErr(p.StandardError.ReadToEnd());
+-            p.WaitForExit();
+-            logger.Close(p.ExitCode);
+ 
+             return sources;
+         }
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/ManagerTable.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/ManagerTable.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3fcdb0b0c7ffd02ca0afe8315515256cc0f7efb
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/ManagerTable.cs
+@@ -0,0 +1,50 @@
++namespace UniGetUI.PackageEngine.ManagerClasses.Classes
++{
++    public static class ManagerTable
++    {
++        public const string UntruncatedTableTail = " -AutoSize | Out-String -Width 4096";
++
++        public static IReadOnlyList<int>? ReadColumnStarts(string line)
++        {
++            if (!line.Contains("---"))
++            {
++                return null;
++            }
++
++            List<int> starts = [];
++            for (int i = 0; i < line.Length; i++)
++            {
++                if (line[i] is not '-')
++                {
++                    continue;
++                }
++
++                starts.Add(i);
++                while (i < line.Length && line[i] is '-')
++                {
++                    i++;
++                }
++            }
++
++            return starts;
++        }
++
++        public static string ReadColumn(string line, IReadOnlyList<int> starts, int index)
++        {
++            if (index >= starts.Count)
++            {
++                return "";
++            }
++
++            int start = starts[index];
++            if (start >= line.Length)
++            {
++                return "";
++            }
++
++            int end =
++                index + 1 < starts.Count ? Math.Min(starts[index + 1], line.Length) : line.Length;
++            return line[start..end].Trim();
++        }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/ChocolateyManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/ChocolateyManagerTests.cs
+index 51634291013b590490252ef8c7b21e4967ce1131..e3439fc6a58a010d2ff0037749fdb293fdb978f8 100644
+--- a/src/UniGetUI.PackageEngine.Tests/ChocolateyManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/ChocolateyManagerTests.cs
+@@ -4,6 +4,9 @@ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Managers.Choco;
+ using UniGetUI.PackageEngine.Managers.ChocolateyManager;
++using UniGetUI.PackageEngine.Classes.Manager.Providers;
++using UniGetUI.PackageEngine.Interfaces;
++using UniGetUI.PackageEngine.PackageClasses;
+ using UniGetUI.PackageEngine.Serializable;
+ using UniGetUI.PackageEngine.Structs;
+ using UniGetUI.PackageEngine.Tests.Infrastructure.Assertions;
+@@ -135,6 +138,26 @@ public sealed class ChocolateyManagerTests : IDisposable
+             {
+                 Assert.Equal("internal repo", source.Name);
+                 Assert.Equal(new Uri("https://packages.example.test/api/v2/"), source.Url);
++            },
++            source =>
++            {
++                Assert.Equal("local folder", source.Name);
++                Assert.True(source.Url.IsFile);
++                Assert.Equal(@"C:\Shared Packages", source.Url.LocalPath);
++            },
++            source =>
++            {
++                Assert.Equal("network share", source.Name);
++                Assert.True(source.Url.IsUnc);
++                Assert.Equal(@"\\files\nuget\server", source.Url.LocalPath);
++            },
++            source =>
++            {
++                Assert.Equal("private feed", source.Name);
++                Assert.Equal(
++                    new Uri("https://packages.example.test/private/api/v2/"),
++                    source.Url
++                );
+             }
+         );
+     }
+@@ -541,6 +564,71 @@ public sealed class ChocolateyManagerTests : IDisposable
+         }
+     }
+ 
++    [Fact]
++    public void SearchesALocalFolderSourceReportedByChocoSourceList()
++    {
++        using var feed = new LocalNuGetFeedBuilder();
++        feed.WritePackage("Contoso.Internal", "1.0.0");
++        feed.WritePackage("Contoso.Internal", "2.0.0");
++
++        var helper = Assert.IsType<ChocolateySourceHelper>(new Chocolatey().SourcesHelper);
++        var source = Assert.Single(
++            helper.ParseSources(
++                [
++                    $"internal feed - {feed.Directory} | Priority 0|Bypass Proxy - false|"
++                        + "Self-Service - false|Admin Only - false.",
++                ]
++            )
++        );
++
++        Assert.True(source.Url.IsFile);
++        Assert.Equal(feed.Directory, source.Url.LocalPath);
++
++        var manager = new LocalSourceChocolatey([source]);
++        var found = manager.FindLocalPackages("contoso");
++
++        Assert.Equal("Contoso.Internal", Assert.Single(found).Id);
++        Assert.Equal("2.0.0", found[0].VersionString);
++        Assert.Same(source, found[0].Source);
++    }
++
++    private sealed class LocalSourceChocolatey : Chocolatey
++    {
++        public LocalSourceChocolatey(IReadOnlyList<IManagerSource> sources)
++        {
++            SourcesHelper = new StubSourceHelper(this, sources);
++        }
++
++        public IReadOnlyList<Package> FindLocalPackages(string query) =>
++            FindPackages_UnSafe(query);
++    }
++
++    private sealed class StubSourceHelper(
++        IPackageManager manager,
++        IReadOnlyList<IManagerSource> sources
++    ) : BaseSourceHelper(manager)
++    {
++        public override IReadOnlyList<IManagerSource> GetSources() => sources;
++
++        public override string[] GetAddSourceParameters(IManagerSource source) => [];
++
++        public override string[] GetRemoveSourceParameters(IManagerSource source) => [];
++
++        protected override OperationVeredict _getAddSourceOperationVeredict(
++            IManagerSource source,
++            int ReturnCode,
++            string[] Output
++        ) => OperationVeredict.Success;
++
++        protected override OperationVeredict _getRemoveSourceOperationVeredict(
++            IManagerSource source,
++            int ReturnCode,
++            string[] Output
++        ) => OperationVeredict.Success;
++
++        protected override IReadOnlyList<IManagerSource> GetSources_UnSafe() => sources;
++    }
++
+     private static string[] ReadFixtureLines(string relativePath)
+     {
+         return PackageEngineFixtureFiles.ReadAllText(relativePath).Replace("\r\n", "\n").Split('\n');
+diff --git a/src/UniGetUI.PackageEngine.Tests/Fixtures/Chocolatey/source-list-output.txt b/src/UniGetUI.PackageEngine.Tests/Fixtures/Chocolatey/source-list-output.txt
+index b28ad329d81e868a76cbbb60a7900d44ffdadd38..fd968b335f4f8c5ff353bd9010208ca2f32bd3b2 100644
+--- a/src/UniGetUI.PackageEngine.Tests/Fixtures/Chocolatey/source-list-output.txt
++++ b/src/UniGetUI.PackageEngine.Tests/Fixtures/Chocolatey/source-list-output.txt
+@@ -2,4 +2,7 @@ Chocolatey v2.4.3
+ community - https://community.chocolatey.org/api/v2/ | Priority 0|Bypass Proxy - false|Self-Service - false|Admin Only - false
+ legacy community - https://chocolatey.org/api/v2/ | Priority 0|Bypass Proxy - false|Self-Service - false|Admin Only - false
+ internal repo - https://packages.example.test/api/v2/ | Priority 10|Bypass Proxy - false|Self-Service - false|Admin Only - false
++local folder - C:\Shared Packages | Priority 0|Bypass Proxy - false|Self-Service - false|Admin Only - false.
++network share - \\files\nuget\server | Priority 0|Bypass Proxy - false|Self-Service - false|Admin Only - false.
++private feed - https://packages.example.test/private/api/v2/ (Authenticated)| Priority 0|Bypass Proxy - false|Self-Service - false|Admin Only - false.
+ invalid source line
+diff --git a/src/UniGetUI.PackageEngine.Tests/Infrastructure/Builders/LocalNuGetFeedBuilder.cs b/src/UniGetUI.PackageEngine.Tests/Infrastructure/Builders/LocalNuGetFeedBuilder.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5865dd762b793116994195afa23c2882bb5dceb
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/Infrastructure/Builders/LocalNuGetFeedBuilder.cs
+@@ -0,0 +1,104 @@
++using System.IO.Compression;
++using System.Text;
++using UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal;
++
++namespace UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
++
++public sealed class LocalNuGetFeedBuilder : IDisposable
++{
++    public LocalNuGetFeedBuilder(string? folderName = null)
++    {
++        Directory = Path.Join(Path.GetTempPath(), folderName ?? Path.GetRandomFileName());
++        System.IO.Directory.CreateDirectory(Directory);
++        NuGetLocalFeed.ClearCache();
++    }
++
++    public string Directory { get; }
++
++    public string WritePackage(
++        string id,
++        string version,
++        string? folder = null,
++        string description = "A package",
++        string authors = "Example Ltd",
++        string tags = "tooling",
++        string? iconUrl = null,
++        string? dependencyId = null,
++        string? iconFile = null,
++        byte[]? iconBytes = null
++    )
++    {
++        string target = folder is null ? Directory : Path.Join(Directory, folder);
++        System.IO.Directory.CreateDirectory(target);
++
++        string file = Path.Join(target, $"{id}.{version}.nupkg");
++        string nuspec = $"""
++            <?xml version="1.0" encoding="utf-8"?>
++            <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
++              <metadata>
++                <id>{id}</id>
++                <version>{version}</version>
++                <title>{id}</title>
++                <authors>{authors}</authors>
++                <description>{description}</description>
++                <tags>{tags}</tags>
++                <projectUrl>https://example.test/package</projectUrl>
++                <license type="expression">MIT</license>
++                {(iconUrl is null ? string.Empty : $"<iconUrl>{iconUrl}</iconUrl>")}
++                {(iconFile is null ? string.Empty : $"<icon>{iconFile}</icon>")}
++                {(
++                dependencyId is null
++                    ? string.Empty
++                    : $"""
++                        <dependencies>
++                          <group targetFramework="net10.0">
++                            <dependency id="{dependencyId}" version="[1.2.0, )" />
++                          </group>
++                        </dependencies>
++                        """
++            )}
++              </metadata>
++            </package>
++            """;
++
++        using (FileStream stream = File.Create(file))
++        using (ZipArchive archive = new(stream, ZipArchiveMode.Create))
++        {
++            using (Stream entry = archive.CreateEntry($"{id}.nuspec").Open())
++                entry.Write(Encoding.UTF8.GetBytes(nuspec));
++
++            if (iconFile is not null && iconBytes is not null)
++            {
++                using Stream icon = archive.CreateEntry(iconFile).Open();
++                icon.Write(iconBytes);
++            }
++        }
++
++        NuGetLocalFeed.ClearCache();
++        return file;
++    }
++
++    public string WriteRawPackage(string fileName, string nuspec)
++    {
++        string file = Path.Join(Directory, fileName);
++
++        using (FileStream stream = File.Create(file))
++        using (ZipArchive archive = new(stream, ZipArchiveMode.Create))
++        {
++            using Stream entry = archive.CreateEntry("package.nuspec").Open();
++            entry.Write(Encoding.UTF8.GetBytes(nuspec));
++        }
++
++        NuGetLocalFeed.ClearCache();
++        return file;
++    }
++
++    public void Dispose()
++    {
++        try
++        {
++            System.IO.Directory.Delete(Directory, true);
++        }
++        catch (IOException) { }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/NuGetLocalFeedTests.cs b/src/UniGetUI.PackageEngine.Tests/NuGetLocalFeedTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..30334329ec4ffdc921b7c214fb26eb203dfec6ee
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/NuGetLocalFeedTests.cs
+@@ -0,0 +1,690 @@
++using UniGetUI.Core.Data;
++using UniGetUI.Core.IconEngine;
++using UniGetUI.PackageEngine.Classes.Manager;
++using UniGetUI.PackageEngine.Enums;
++using UniGetUI.PackageEngine.Interfaces;
++using UniGetUI.PackageEngine.ManagerClasses.Classes;
++using UniGetUI.PackageEngine.ManagerClasses.Manager;
++using UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal;
++using UniGetUI.PackageEngine.Managers.PowerShellManager;
++using UniGetUI.PackageEngine.PackageClasses;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++public sealed class NuGetLocalFeedTests : IDisposable
++{
++    private readonly string _testRoot = Path.Combine(
++        AppContext.BaseDirectory,
++        nameof(NuGetLocalFeedTests),
++        Guid.NewGuid().ToString("N")
++    );
++
++    public NuGetLocalFeedTests()
++    {
++        Directory.CreateDirectory(_testRoot);
++        CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
++    }
++
++    public void Dispose()
++    {
++        CoreData.TEST_DataDirectoryOverride = null;
++        if (Directory.Exists(_testRoot))
++            Directory.Delete(_testRoot, recursive: true);
++    }
++
++    [Theory]
++    [InlineData("https://community.chocolatey.org/api/v2/", false)]
++    [InlineData("https://packages.example.test/api/v3/index.json", false)]
++    [InlineData("file://Data/nuget/server/", true)]
++    [InlineData("file:///C:/packages", true)]
++    public void TryGetDirectoryOnlyAcceptsFileSystemSources(string url, bool expected)
++    {
++        var manager = new PackageManagerBuilder().Build();
++        var source = new ManagerSource(manager, "test", new Uri(url));
++
++        Assert.Equal(expected, NuGetLocalFeed.TryGetDirectory(source, out _));
++        Assert.Equal(expected, NuGetLocalFeed.IsLocalSource(source));
++    }
++
++    [Fact]
++    public void TryGetDirectoryReturnsTheFolderBehindTheSourceUrl()
++    {
++        using var feed = new LocalFeed();
++        var manager = feed.CreateManager();
++
++        Assert.True(
++            NuGetLocalFeed.TryGetDirectory(manager.Properties.DefaultSource, out string directory)
++        );
++        Assert.Equal(feed.Directory, directory.TrimEnd(Path.DirectorySeparatorChar));
++    }
++
++    [Fact]
++    public void FindPackagesKeepsTheLatestStableVersionOfEachPackage()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "1.0.0");
++        feed.WritePackage("Contoso.Tool", "2.0.0");
++        feed.WritePackage("Contoso.Tool", "2.1.0-beta.1");
++        feed.WritePackage("Fabrikam.Tool", "1.0.0");
++
++        var manager = feed.CreateManager();
++        var packages = feed.Find(manager, "contoso", canPrerelease: false);
++
++        Assert.Single(packages);
++        Assert.Equal("Contoso.Tool", packages[0].Id);
++        Assert.Equal("2.0.0", packages[0].VersionString);
++        Assert.Same(manager.Properties.DefaultSource, packages[0].Source);
++        Assert.Same(manager, packages[0].Manager);
++    }
++
++    [Fact]
++    public void FindPackagesOffersPreReleasesOnlyWhenTheyAreAllowed()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "2.0.0");
++        feed.WritePackage("Contoso.Tool", "2.1.0-beta.1");
++
++        var manager = feed.CreateManager();
++
++        Assert.Equal("2.0.0", feed.Find(manager, "contoso", false)[0].VersionString);
++        Assert.Equal("2.1.0-beta.1", feed.Find(manager, "contoso", true)[0].VersionString);
++    }
++
++    [Fact]
++    public void FindPackagesReadsTheVersionFolderLayout()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "1.5.0", folder: Path.Join("contoso.tool", "1.5.0"));
++
++        var manager = feed.CreateManager();
++        var packages = feed.Find(manager, "contoso", canPrerelease: false);
++
++        Assert.Single(packages);
++        Assert.Equal("1.5.0", packages[0].VersionString);
++    }
++
++    [Fact]
++    public void FindPackagesMatchesMetadataUnlessTheManagerSearchesIdsOnly()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "1.0.0", description: "A deployment helper");
++
++        Assert.Single(feed.Find(feed.CreateManager(), "deployment", false));
++        Assert.Empty(feed.Find(feed.CreateManager(idOnlySearch: true), "deployment", false));
++        Assert.Single(feed.Find(feed.CreateManager(idOnlySearch: true), "contoso", false));
++    }
++
++    [Fact]
++    public void FindPackagesIgnoresFilesThatAreNotReadableNuGetPackages()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "1.0.0");
++        File.WriteAllText(Path.Join(feed.Directory, "broken.nupkg"), "not a zip archive");
++        File.WriteAllText(Path.Join(feed.Directory, "notes.txt"), "ignored");
++
++        var packages = feed.Find(feed.CreateManager(), "", canPrerelease: false);
++
++        Assert.Single(packages);
++        Assert.Equal("Contoso.Tool", packages[0].Id);
++    }
++
++    [Fact]
++    public void FindPackagesPicksUpAPackageFileThatWasReplaced()
++    {
++        using var feed = new LocalFeed();
++        string file = feed.WritePackage("Contoso.Tool", "1.0.0");
++
++        var manager = feed.CreateManager();
++        Assert.Equal("1.0.0", feed.Find(manager, "contoso", false)[0].VersionString);
++
++        File.Delete(file);
++        feed.WritePackage("Contoso.Tool", "1.0.0", description: "A much longer description");
++
++        Assert.Equal("1.0.0", feed.Find(manager, "much longer", false)[0].VersionString);
++    }
++
++    [Fact]
++    public void GetAvailableUpdatesOnlyOffersNewerVersions()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "1.0.0");
++        feed.WritePackage("Contoso.Tool", "2.0.0");
++        feed.WritePackage("Fabrikam.Tool", "1.0.0");
++
++        var manager = feed.CreateManager();
++        var source = manager.Properties.DefaultSource;
++        IPackage outdated = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(source)
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++        IPackage current = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(source)
++            .WithId("Fabrikam.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++
++        var updates = manager.GetAvailableUpdatesLocal(
++            source,
++            feed.Directory,
++            [outdated, current],
++            canPrerelease: false,
++            Logger(manager)
++        );
++
++        Assert.Single(updates);
++        Assert.Equal("Contoso.Tool", updates[0].Id);
++        Assert.Equal("1.0.0", updates[0].VersionString);
++        Assert.Equal("2.0.0", updates[0].NewVersionString);
++    }
++
++    [Fact]
++    public void GetAvailableUpdatesOffersOneUpdatePerIdWhenAPackageIsInstalledTwice()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "2.0.0");
++
++        var manager = feed.CreateManager();
++        var source = manager.Properties.DefaultSource;
++        IPackage currentUser = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(source)
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++        IPackage allUsers = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(source)
++            .WithId("contoso.tool")
++            .WithVersion("1.0.0")
++            .Build();
++
++        var updates = manager.GetAvailableUpdatesLocal(
++            source,
++            feed.Directory,
++            [currentUser, allUsers],
++            canPrerelease: false,
++            Logger(manager)
++        );
++
++        Assert.Equal("2.0.0", Assert.Single(updates).NewVersionString);
++    }
++
++    [Fact]
++    public void GetAvailableUpdatesSkipsPreReleasesUnlessTheyAreAllowed()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "2.0.0-beta.1");
++
++        var manager = feed.CreateManager();
++        var source = manager.Properties.DefaultSource;
++        IPackage installed = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(source)
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++
++        Assert.Empty(
++            manager.GetAvailableUpdatesLocal(
++                source,
++                feed.Directory,
++                [installed],
++                false,
++                Logger(manager)
++            )
++        );
++        Assert.Single(
++            manager.GetAvailableUpdatesLocal(
++                source,
++                feed.Directory,
++                [installed],
++                true,
++                Logger(manager)
++            )
++        );
++    }
++
++    [Fact]
++    public void GetDetailsReadsTheEmbeddedNuspec()
++    {
++        using var feed = new LocalFeed();
++        string file = feed.WritePackage(
++            "Contoso.Tool",
++            "2.0.0",
++            description: "A deployment helper",
++            authors: "Contoso Ltd",
++            tags: "deployment tooling",
++            dependencyId: "Fabrikam.Core"
++        );
++
++        var manager = feed.CreateManager();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(manager.Properties.DefaultSource)
++            .WithId("Contoso.Tool")
++            .WithVersion("2.0.0")
++            .Build();
++        var details = new PackageDetailsBuilder().Build(package);
++
++        manager.ExposedDetailsHelper.LoadDetails(details);
++
++        Assert.Equal("A deployment helper", details.Description);
++        Assert.Equal("Contoso Ltd", details.Author);
++        Assert.Equal("Contoso Ltd", details.Publisher);
++        Assert.Equal("MIT", details.License);
++        Assert.Equal("https://example.test/package", details.HomepageUrl?.AbsoluteUri);
++        Assert.Equal(new Uri(file), details.InstallerUrl);
++        Assert.Equal(new Uri(file), details.ManifestUrl);
++        Assert.Equal(new FileInfo(file).Length, details.InstallerSize);
++        Assert.Equal(["deployment", "tooling"], details.Tags);
++        Assert.Equal("Fabrikam.Core", Assert.Single(details.Dependencies).Name);
++        Assert.Equal("1.2.0", details.Dependencies[0].Version);
++    }
++
++    [Fact]
++    public void GetDetailsReportsAPackageFileThatIsNotOnTheFeedAnymore()
++    {
++        using var feed = new LocalFeed();
++        var manager = feed.CreateManager();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(manager.Properties.DefaultSource)
++            .WithId("Contoso.Tool")
++            .WithVersion("2.0.0")
++            .Build();
++        var details = new PackageDetailsBuilder().Build(package);
++
++        manager.ExposedDetailsHelper.LoadDetails(details);
++
++        Assert.Null(details.Description);
++        Assert.Null(details.InstallerUrl);
++    }
++
++    [Fact]
++    public void GetIconUsesTheIconUrlOfTheNuspec()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "2.0.0", iconUrl: "https://example.test/icon.png");
++        feed.WritePackage("Fabrikam.Tool", "2.0.0");
++
++        var manager = feed.CreateManager();
++        CacheableIcon? icon = manager.ExposedDetailsHelper.LoadIcon(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithSource(manager.Properties.DefaultSource)
++                .WithId("Contoso.Tool")
++                .WithVersion("2.0.0")
++                .Build()
++        );
++
++        Assert.Equal("https://example.test/icon.png", icon?.Url?.AbsoluteUri);
++        Assert.Null(
++            manager.ExposedDetailsHelper.LoadIcon(
++                new PackageBuilder()
++                    .WithManager(manager)
++                    .WithSource(manager.Properties.DefaultSource)
++                    .WithId("Fabrikam.Tool")
++                    .WithVersion("2.0.0")
++                    .Build()
++            )
++        );
++    }
++
++    [Fact]
++    public void FindPackagesSkipsAManifestThatExpandsPastTheSizeLimit()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "1.0.0");
++        feed.WriteRawPackage(
++            "bomb.1.0.0.nupkg",
++            $"""
++            <?xml version="1.0" encoding="utf-8"?>
++            <package>
++              <metadata>
++                <id>Contoso.Bomb</id>
++                <version>1.0.0</version>
++                <description>{new string('A', 5 * 1024 * 1024)}</description>
++              </metadata>
++            </package>
++            """
++        );
++
++        var packages = feed.Find(feed.CreateManager(), "contoso", canPrerelease: false);
++
++        Assert.Equal("Contoso.Tool", Assert.Single(packages).Id);
++    }
++
++    [Fact]
++    public void FindPackagesRejectsAManifestThatDeclaresADocumentTypeDefinition()
++    {
++        using var feed = new LocalFeed();
++        feed.WriteRawPackage(
++            "entities.1.0.0.nupkg",
++            """
++            <?xml version="1.0" encoding="utf-8"?>
++            <!DOCTYPE package [
++              <!ENTITY lol "lol">
++              <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
++            ]>
++            <package>
++              <metadata>
++                <id>Contoso.Entities</id>
++                <version>1.0.0</version>
++                <description>&lol2;</description>
++              </metadata>
++            </package>
++            """
++        );
++
++        Assert.Empty(feed.Find(feed.CreateManager(), "contoso", canPrerelease: false));
++    }
++
++    [Fact]
++    public void GetIconExtractsAnIconEmbeddedInThePackage()
++    {
++        byte[] iconBytes = [137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4];
++
++        using var feed = new LocalFeed();
++        feed.WritePackage(
++            "Contoso.Tool",
++            "2.0.0",
++            iconFile: "images/icon.png",
++            iconBytes: iconBytes
++        );
++
++        var manager = feed.CreateManager();
++        CacheableIcon? icon = manager.ExposedDetailsHelper.LoadIcon(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithSource(manager.Properties.DefaultSource)
++                .WithId("Contoso.Tool")
++                .WithVersion("2.0.0")
++                .Build()
++        );
++
++        Assert.NotNull(icon);
++        Assert.True(icon.Value.IsLocalPath);
++        Assert.Equal(iconBytes, File.ReadAllBytes(icon.Value.LocalPath));
++        Assert.Equal(".png", Path.GetExtension(icon.Value.LocalPath));
++    }
++
++    [Fact]
++    public void GetIconPrefersTheIconUrlOverAnEmbeddedIcon()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage(
++            "Contoso.Tool",
++            "2.0.0",
++            iconUrl: "https://example.test/icon.png",
++            iconFile: "images/icon.png",
++            iconBytes: [1, 2, 3]
++        );
++
++        var manager = feed.CreateManager();
++        CacheableIcon? icon = manager.ExposedDetailsHelper.LoadIcon(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithSource(manager.Properties.DefaultSource)
++                .WithId("Contoso.Tool")
++                .WithVersion("2.0.0")
++                .Build()
++        );
++
++        Assert.False(icon?.IsLocalPath);
++        Assert.Equal("https://example.test/icon.png", icon?.Url.AbsoluteUri);
++    }
++
++    [Fact]
++    public void GetIconIgnoresAnEmbeddedIconThatIsNotInTheArchive()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "2.0.0", iconFile: "images/missing.png");
++
++        var manager = feed.CreateManager();
++
++        Assert.Null(
++            manager.ExposedDetailsHelper.LoadIcon(
++                new PackageBuilder()
++                    .WithManager(manager)
++                    .WithSource(manager.Properties.DefaultSource)
++                    .WithId("Contoso.Tool")
++                    .WithVersion("2.0.0")
++                    .Build()
++            )
++        );
++    }
++
++    [Fact]
++    public void GetIconKeepsTheIconsOfTwoFeedsCarryingTheSameIdAndVersionApart()
++    {
++        byte[] first = [137, 80, 78, 71, 1, 1, 1, 1];
++        byte[] second = [137, 80, 78, 71, 2, 2, 2, 2];
++
++        using var feedA = new LocalFeed();
++        using var feedB = new LocalFeed();
++        feedA.WritePackage("Contoso.Tool", "2.0.0", iconFile: "icon.png", iconBytes: first);
++        feedB.WritePackage("Contoso.Tool", "2.0.0", iconFile: "icon.png", iconBytes: second);
++
++        string? iconA = LoadIconPath(feedA);
++        string? iconB = LoadIconPath(feedB);
++
++        Assert.NotNull(iconA);
++        Assert.NotNull(iconB);
++        Assert.NotEqual(iconA, iconB);
++        Assert.Equal(first, File.ReadAllBytes(iconA));
++        Assert.Equal(second, File.ReadAllBytes(iconB));
++    }
++
++    [Fact]
++    public void GetIconRereadsAPackageThatWasReplacedWithAnOlderOne()
++    {
++        byte[] original = [137, 80, 78, 71, 3, 3, 3, 3];
++        byte[] restored = [137, 80, 78, 71, 4, 4, 4, 4];
++
++        using var feed = new LocalFeed();
++        string file = feed.WritePackage(
++            "Contoso.Tool",
++            "2.0.0",
++            iconFile: "icon.png",
++            iconBytes: original
++        );
++
++        string? before = LoadIconPath(feed);
++        Assert.NotNull(before);
++        Assert.Equal(original, File.ReadAllBytes(before));
++
++        File.Delete(file);
++        string replaced = feed.WritePackage(
++            "Contoso.Tool",
++            "2.0.0",
++            iconFile: "icon.png",
++            iconBytes: restored
++        );
++        File.SetLastWriteTimeUtc(replaced, new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
++        NuGetLocalFeed.ClearCache();
++
++        string? after = LoadIconPath(feed);
++        Assert.NotNull(after);
++        Assert.Equal(restored, File.ReadAllBytes(after));
++    }
++
++    private static string? LoadIconPath(LocalFeed feed)
++    {
++        var manager = feed.CreateManager();
++        CacheableIcon? icon = manager.ExposedDetailsHelper.LoadIcon(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithSource(manager.Properties.DefaultSource)
++                .WithId("Contoso.Tool")
++                .WithVersion("2.0.0")
++                .Build()
++        );
++
++        return icon?.LocalPath;
++    }
++
++    [Fact]
++    public void GetInstallableVersionsListsTheFolderContentsNewestFirst()
++    {
++        using var feed = new LocalFeed();
++        feed.WritePackage("Contoso.Tool", "1.0.0");
++        feed.WritePackage("Contoso.Tool", "2.0.0-beta.1");
++        feed.WritePackage("Contoso.Tool", "2.0.0");
++        feed.WritePackage("Fabrikam.Tool", "3.0.0");
++
++        var manager = feed.CreateManager();
++        var versions = manager.ExposedDetailsHelper.LoadVersions(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithSource(manager.Properties.DefaultSource)
++                .WithId("Contoso.Tool")
++                .WithVersion("1.0.0")
++                .Build()
++        );
++
++        Assert.Equal(["2.0.0", "2.0.0-beta.1", "1.0.0"], versions);
++    }
++
++    [Fact]
++    public void GetInstallableVersionsReturnsNothingWhenTheFolderIsGone()
++    {
++        var manager = new TestNuGetManager(
++            Path.Join(Path.GetTempPath(), Path.GetRandomFileName()),
++            idOnlySearch: false
++        );
++
++        Assert.Empty(
++            manager.ExposedDetailsHelper.LoadVersions(
++                new PackageBuilder()
++                    .WithManager(manager)
++                    .WithSource(manager.Properties.DefaultSource)
++                    .WithId("Contoso.Tool")
++                    .WithVersion("1.0.0")
++                    .Build()
++            )
++        );
++    }
++
++    private static INativeTaskLogger Logger(BaseNuGet manager) =>
++        manager.TaskLogger.CreateNew(LoggableTaskType.FindPackages);
++
++    private sealed class LocalFeed : IDisposable
++    {
++        private readonly LocalNuGetFeedBuilder _feed = new();
++
++        public string Directory => _feed.Directory;
++
++        public TestNuGetManager CreateManager(bool idOnlySearch = false) =>
++            new(Directory, idOnlySearch);
++
++        public IReadOnlyList<Package> Find(
++            TestNuGetManager manager,
++            string query,
++            bool canPrerelease
++        ) =>
++            manager.FindPackagesLocal(
++                manager.Properties.DefaultSource,
++                Directory,
++                query,
++                canPrerelease,
++                Logger(manager)
++            );
++
++        public string WritePackage(
++            string id,
++            string version,
++            string? folder = null,
++            string description = "A package",
++            string authors = "Example Ltd",
++            string tags = "tooling",
++            string? iconUrl = null,
++            string? dependencyId = null,
++            string? iconFile = null,
++            byte[]? iconBytes = null
++        ) =>
++            _feed.WritePackage(
++                id,
++                version,
++                folder,
++                description,
++                authors,
++                tags,
++                iconUrl,
++                dependencyId,
++                iconFile,
++                iconBytes
++            );
++
++        public string WriteRawPackage(string fileName, string nuspec) =>
++            _feed.WriteRawPackage(fileName, nuspec);
++
++        public void Dispose() => _feed.Dispose();
++    }
++
++    private sealed class TestNuGetManager : BaseNuGet
++    {
++        private readonly bool _idOnlySearch;
++
++        public TestNuGetManager(string directory, bool idOnlySearch)
++        {
++            _idOnlySearch = idOnlySearch;
++
++            Capabilities = new ManagerCapabilities
++            {
++                SupportsCustomVersions = true,
++                SupportsCustomPackageIcons = true,
++                CanListDependencies = true,
++            };
++
++            Properties = new ManagerProperties
++            {
++                Id = "test-nuget",
++                Name = "TestNuGet",
++                DefaultSource = new ManagerSource(this, "local", new Uri(directory)),
++            };
++
++            ExposedDetailsHelper = new TestNuGetDetailsHelper(this);
++            DetailsHelper = ExposedDetailsHelper;
++        }
++
++        public TestNuGetDetailsHelper ExposedDetailsHelper { get; }
++
++        protected override bool UseSubstringSearch => _idOnlySearch;
++
++        protected override IReadOnlyList<Package> _getInstalledPackages_UnSafe() => [];
++
++        public override IReadOnlyList<string> FindCandidateExecutableFiles() => [];
++
++        protected override void _loadManagerExecutableFile(
++            out bool found,
++            out string executablePath,
++            out string callArgs
++        )
++        {
++            found = false;
++            executablePath = string.Empty;
++            callArgs = string.Empty;
++        }
++
++        protected override void _loadManagerVersion(out string version) => version = "0.0.0";
++    }
++
++    private sealed class TestNuGetDetailsHelper : BaseNuGetDetailsHelper
++    {
++        public TestNuGetDetailsHelper(BaseNuGet manager)
++            : base(manager) { }
++
++        protected override string? GetInstallLocation_UnSafe(IPackage package) => null;
++
++        public void LoadDetails(IPackageDetails details) => GetDetails_UnSafe(details);
++
++        public CacheableIcon? LoadIcon(IPackage package) => GetIcon_UnSafe(package);
++
++        public IReadOnlyList<string> LoadVersions(IPackage package) =>
++            GetInstallableVersions_UnSafe(package);
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+index cf408565c1464d6cbeeaf0e1d8d7561bb2962f0b..6dd2e17e86371962bf6b668ce0b74bb09a3f673d 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+@@ -7,6 +7,46 @@ namespace UniGetUI.PackageEngine.Tests;
+ 
+ public sealed class PowerShell7ManagerTests
+ {
++    [Fact]
++    public void ParseSources_KeepsRepositoriesThatAreNotHttpUrls()
++    {
++        var manager = new PowerShell7();
++        var helper = Assert.IsType<PowerShell7SourceHelper>(manager.SourcesHelper);
++
++        var sources = helper.ParseSources(
++            [
++                "",
++                "Name".PadRight(14) + "Uri",
++                "----".PadRight(14) + "---",
++                "PSGallery".PadRight(14) + "https://www.powershellgallery.com/api/v2",
++                "LocalRepo".PadRight(14) + "file:///C:/Shared Packages/PSRepo/",
++                "UncRepo".PadRight(14) + @"\\files\ps\modules",
++                "",
++            ]
++        );
++
++        Assert.Collection(
++            sources,
++            source =>
++            {
++                Assert.Equal("PSGallery", source.Name);
++                Assert.Equal("https://www.powershellgallery.com/api/v2", source.Url.ToString());
++            },
++            source =>
++            {
++                Assert.Equal("LocalRepo", source.Name);
++                Assert.True(source.Url.IsFile);
++                Assert.Equal(@"C:\Shared Packages\PSRepo\", source.Url.LocalPath);
++            },
++            source =>
++            {
++                Assert.Equal("UncRepo", source.Name);
++                Assert.True(source.Url.IsUnc);
++                Assert.Equal(@"\\files\ps\modules", source.Url.LocalPath);
++            }
++        );
++    }
++
+     [Fact]
+     public void ParseInstalledPackages_BuildsPackagesFromTabDelimitedOutput()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+index 145f5cb0c79517c1f622d79ac2783bec105402fa..9514dc3a21aabea218ca575cbfba26eb92a4bd6a 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+@@ -7,6 +7,46 @@ namespace UniGetUI.PackageEngine.Tests;
+ 
+ public sealed class PowerShellManagerTests
+ {
++    [Fact]
++    public void ParseSources_KeepsLocalAndUncRepositoryLocations()
++    {
++        var manager = new PowerShell();
++        var helper = Assert.IsType<PowerShellSourceHelper>(manager.SourcesHelper);
++
++        var sources = helper.ParseSources(
++            [
++                "",
++                "Name".PadRight(25) + "SourceLocation",
++                "----".PadRight(25) + "--------------",
++                "PSGallery".PadRight(25) + "https://www.powershellgallery.com/api/v2",
++                "Internal Modules".PadRight(25) + @"\\files\ps\modules",
++                "Local Drop".PadRight(25) + @"C:\Shared Packages\PowerShell",
++                "",
++            ]
++        );
++
++        Assert.Collection(
++            sources,
++            source =>
++            {
++                Assert.Equal("PSGallery", source.Name);
++                Assert.Equal("https://www.powershellgallery.com/api/v2", source.Url.ToString());
++            },
++            source =>
++            {
++                Assert.Equal("Internal Modules", source.Name);
++                Assert.True(source.Url.IsUnc);
++                Assert.Equal(@"\\files\ps\modules", source.Url.LocalPath);
++            },
++            source =>
++            {
++                Assert.Equal("Local Drop", source.Name);
++                Assert.True(source.Url.IsFile);
++                Assert.Equal(@"C:\Shared Packages\PowerShell", source.Url.LocalPath);
++            }
++        );
++    }
++
+     [Fact]
+     public void ParseInstalledPackages_BuildsPackagesFromModuleTable()
+     {
+-- 
+2.56.0
+

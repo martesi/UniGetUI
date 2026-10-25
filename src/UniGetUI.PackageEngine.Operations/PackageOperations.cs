@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using UniGetUI.Core.Classes;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
@@ -7,6 +8,7 @@ using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.Interfaces.ManagerProviders;
 using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.PackageLoader;
 using UniGetUI.PackageEngine.Serializable;
@@ -59,7 +61,12 @@ namespace UniGetUI.PackageEngine.Operations
 
                 Package.SetTag(PackageTag.OnQueue);
             };
-            CancelRequested += (_, _) => Package.SetTag(PackageTag.Default);
+            StatusChanged += (_, status) =>
+            {
+                if (status is OperationStatus.Canceled)
+                    Package.SetTag(PackageTag.Default);
+            };
+            OperationSucceeded += (_, _) => Package.Manager.InvalidateInstalledPackages();
             OperationSucceeded += (_, _) => HandleSuccess();
             OperationFailed += (_, _) => HandleFailure();
         }
@@ -99,16 +106,108 @@ namespace UniGetUI.PackageEngine.Operations
                 + Package.OverridenOptions.ToString();
         }
 
+        protected override async Task<OperationVeredict> PerformOperation()
+        {
+            // Observational stage marker only: structured progress starts as indeterminate
+            // with the role's stage label (e.g. "Installing..."). Re-reported on every
+            // attempt, so AutoRetry restarts also reset any previous speed. This changes
+            // nothing about execution, retries, elevation, proxy, or result handling.
+            ReportProgress(
+                Role switch
+                {
+                    OperationType.Install => OperationProgress.ForStage(
+                        OperationProgressStage.Installing
+                    ),
+                    OperationType.Update => OperationProgress.ForStage(
+                        OperationProgressStage.Updating
+                    ),
+                    OperationType.Uninstall => OperationProgress.ForStage(
+                        OperationProgressStage.Uninstalling
+                    ),
+                    _ => OperationProgress.Unknown,
+                }
+            );
+
+            {
+                if (!Package.Manager.Capabilities.SerializesOperations)
+                    return await PerformLocalOperation();
+
+                SemaphoreSlim gate = ManagerOperationGates.GetOrAdd(
+                    Package.Manager.Name,
+                    _ => new SemaphoreSlim(1, 1)
+                );
+                if (!await gate.WaitAsync(0))
+                {
+                    Line(
+                        CoreTools.Translate(
+                            "Waiting for another {0} operation to finish...",
+                            Package.Manager.DisplayName
+                        ),
+                        LineType.ProgressIndicator
+                    );
+                    IsWaitingForManager = true;
+                    try
+                    {
+                        await gate.WaitAsync(CancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return OperationVeredict.Canceled;
+                    }
+                    finally
+                    {
+                        IsWaitingForManager = false;
+                    }
+                }
+
+                try
+                {
+                    return await PerformLocalOperation();
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }
+
+
+        }
+
+        private async Task<OperationVeredict> PerformLocalOperation()
+        {
+            if (Package.Manager.OperationHelper is IManagedPackageOperationHelper managed)
+            {
+                try
+                {
+                    var result = await managed.TryPerformAsync(Package, Options, Role,
+                        message => Line(message, LineType.Information), ReportProgress, CancellationToken);
+                    if (result is not null)
+                        return result.Value;
+                    // Resolution may have pinned an initially unversioned request before fallback.
+                    PrepareProcessStartInfo();
+                }
+                catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
+                {
+                    return OperationVeredict.Canceled;
+                }
+            }
+            return await base.PerformOperation();
+        }
+
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> ManagerOperationGates =
+            new();
+
+
         protected sealed override void PrepareProcessStartInfo()
         {
             bool IsAdmin = CoreTools.IsAdministrator();
             Package.SetTag(PackageTag.OnQueue);
-            string operation_args = string.Join(
-                " ",
-                Package.Manager.OperationHelper.GetParameters(Package, Options, Role)
+            var operationParameters = Package.Manager.OperationHelper.GetParameters(
+                Package,
+                Options,
+                Role
             );
-            string FileName,
-                Arguments;
+            var callVector = Package.Manager.Status.OperationCallArgs;
 
             if (RequiresAdminRights() && IsAdmin is false)
             {
@@ -122,14 +221,36 @@ namespace UniGetUI.PackageEngine.Operations
                     RequestCachingOfUACPrompt();
                 }
 
-                FileName = CoreData.ElevatorPath;
-                Arguments =
-                    $"{CoreData.ElevatorArgs} \"{Package.Manager.Status.ExecutablePath}\" {Package.Manager.Status.ExecutableCallArgs} {operation_args}".TrimStart();
+                process.StartInfo.FileName = CoreData.ElevatorPath;
+                if (callVector.Count > 0)
+                {
+                    SetArgumentVector(
+                        [
+                            .. ElevatorArgumentPrefix(),
+                            Package.Manager.Status.ExecutablePath,
+                            .. callVector,
+                            .. operationParameters,
+                        ]
+                    );
+                }
+                else
+                {
+                    process.StartInfo.Arguments =
+                        $"{CoreData.ElevatorArgs} \"{Package.Manager.Status.ExecutablePath}\" {Package.Manager.Status.ExecutableCallArgs} {string.Join(" ", operationParameters)}".TrimStart();
+                }
             }
             else
             {
-                FileName = Package.Manager.Status.ExecutablePath;
-                Arguments = $"{Package.Manager.Status.ExecutableCallArgs} {operation_args}";
+                process.StartInfo.FileName = Package.Manager.Status.ExecutablePath;
+                if (callVector.Count > 0)
+                {
+                    SetArgumentVector([.. callVector, .. operationParameters]);
+                }
+                else
+                {
+                    process.StartInfo.Arguments =
+                        $"{Package.Manager.Status.ExecutableCallArgs} {string.Join(" ", operationParameters)}";
+                }
             }
 
             if (IsAdmin && IsWinGetManager(Package.Manager))
@@ -137,8 +258,8 @@ namespace UniGetUI.PackageEngine.Operations
                 RedirectWinGetTempFolder();
             }
 
-            process.StartInfo.FileName = FileName;
-            process.StartInfo.Arguments = Arguments;
+            process.StartInfo.StandardOutputEncoding = Package.Manager.OutputEncoding;
+            process.StartInfo.StandardErrorEncoding = Package.Manager.OutputEncoding;
 
             ApplyCapabilities(
                 IsAdmin,
@@ -153,9 +274,16 @@ namespace UniGetUI.PackageEngine.Operations
             List<string> Output
         )
         {
-            return Task.FromResult(
-                Package.Manager.OperationHelper.GetResult(Package, Role, Output, ReturnCode)
-            );
+            var result = Package.Manager.OperationHelper.GetResult(Package, Role, Output, ReturnCode);
+            if (result is OperationVeredict.Failure
+                && Output.Any(line => line.Contains("[WinError 32]", StringComparison.Ordinal)))
+            {
+                Metadata.FailureMessage = CoreTools.Translate(
+                    "A file of {package} is in use by another program. Close any program that may be using it, then try again",
+                    new Dictionary<string, object?> { { "package", Package.Name } }
+                );
+            }
+            return Task.FromResult(result);
         }
 
         private static bool IsWinGetManager(IPackageManager manager)
@@ -280,10 +408,30 @@ namespace UniGetUI.PackageEngine.Operations
             else if (role is OperationType.Uninstall && opts.PostUninstallCommand.Any())
                 l.Add(new(new PrePostOperation(opts.PostUninstallCommand), false));
 
+            static bool IsSupersededBy(IPackage installed, IPackage update) =>
+                update.Manager.CompareVersions(installed.VersionString, update.NewVersionString)
+                    is { } comparison
+                    ? comparison < 0
+                    : installed.NormalizedVersion < update.NormalizedNewVersion;
+
             if (role is OperationType.Update && opts.UninstallPreviousVersionsOnUpdate)
             {
+                var capabilities = package.Manager.Capabilities;
+                string? updatedScope =
+                    capabilities.SupportsCustomScopes
+                    && capabilities.SupportsCustomScopesOnUpdate
+                    && opts.InstallationScope.Length > 0
+                        ? opts.InstallationScope
+                        : package.OverridenOptions.Scope;
+
                 var matches = InstalledPackagesLoader.Instance.Packages.Where(p =>
-                    p.IsEquivalentTo(package) && p.NormalizedVersion < package.NormalizedNewVersion
+                    p.IsEquivalentTo(package)
+                    && (
+                        string.IsNullOrEmpty(p.OverridenOptions.Scope)
+                        || string.IsNullOrEmpty(updatedScope)
+                        || p.OverridenOptions.Scope == updatedScope
+                    )
+                    && IsSupersededBy(p, package)
                 );
                 foreach (var match in matches)
                 {

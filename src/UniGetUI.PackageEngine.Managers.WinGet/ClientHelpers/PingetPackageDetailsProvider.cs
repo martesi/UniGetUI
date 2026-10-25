@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Devolutions.Pinget.Core;
 using UniGetUI.Core.Data;
@@ -7,6 +8,8 @@ using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.ManagerClasses.Classes;
+using UniGetUI.PackageEngine.PackageClasses;
+using InstallOptions = UniGetUI.PackageEngine.Serializable.InstallOptions;
 
 namespace UniGetUI.PackageEngine.Managers.WingetManager;
 
@@ -14,6 +17,8 @@ internal interface IPingetPackageDetailsProvider
 {
     bool LoadPackageDetails(IPackageDetails details, INativeTaskLogger logger);
 }
+
+internal readonly record struct InstallerPreference(string? Scope, string? Architecture);
 
 internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
     : IPingetPackageDetailsProvider
@@ -23,11 +28,17 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
         try
         {
             PackageQuery query = PingetPackageDetailsProvider.CreateQuery(details.Package);
+            InstallerPreference preference =
+                PingetPackageDetailsProvider.GetConfiguredInstallerPreference(details.Package);
             logger.Log("Loading WinGet installer metadata with bundled Pinget CLI");
             logger.Log($" Query: {PingetPackageDetailsProvider.FormatQueryForLog(query)}");
+            logger.Log(
+                $" Installer preference applied to the returned manifest: Scope={preference.Scope}, "
+                    + $"Architecture={preference.Architecture}"
+            );
 
             string output = RunShow(query, logger);
-            ApplyManifestJson(details, output);
+            ApplyManifestJson(details, output, preference);
             return true;
         }
         catch (Exception ex)
@@ -169,12 +180,10 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
 
         if (CoreTools.IsAdministrator())
         {
-            string winGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string winGetTemp = AppPaths.RedirectTempToElevatedDirectory(process.StartInfo);
             logger.Log(
                 $"[WARN] Redirecting %TEMP% folder to {winGetTemp}, since UniGetUI was run as admin"
             );
-            process.StartInfo.Environment["TEMP"] = winGetTemp;
-            process.StartInfo.Environment["TMP"] = winGetTemp;
         }
 
         process.Start();
@@ -198,8 +207,14 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
         return output;
     }
 
-    private static void ApplyManifestJson(IPackageDetails details, string output)
+    internal static void ApplyManifestJson(
+        IPackageDetails details,
+        string output,
+        InstallerPreference preference = default,
+        Func<Uri, long>? installerSizeResolver = null
+    )
     {
+        installerSizeResolver ??= CoreTools.GetFileSizeAsLong;
         using JsonDocument document = JsonDocument.Parse(output);
         JsonElement manifest = document.RootElement;
         JsonElement installer = default;
@@ -207,7 +222,8 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
             manifest.TryGetProperty("Installers", out JsonElement installers)
             && installers.ValueKind == JsonValueKind.Array
             && installers.GetArrayLength() > 0
-            && (installer = installers[0]).ValueKind == JsonValueKind.Object;
+            && (installer = SelectInstaller(manifest, installers, preference)).ValueKind
+                == JsonValueKind.Object;
 
         SetIfMissing(value => details.Author = value, details.Author, GetString(manifest, "Author"));
         SetIfMissing(
@@ -260,9 +276,89 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
             if (TryCreateUri(GetString(installer, "InstallerUrl"), out Uri? installerUri))
             {
                 details.InstallerUrl = installerUri;
-                details.InstallerSize = CoreTools.GetFileSizeAsLong(installerUri);
+                details.InstallerSize = installerSizeResolver(installerUri);
             }
         }
+    }
+
+    private static JsonElement SelectInstaller(
+        JsonElement manifest,
+        JsonElement installers,
+        InstallerPreference preference
+    )
+    {
+        return SelectInstaller(manifest, installers, preference.Scope, preference.Architecture)
+            ?? SelectInstaller(manifest, installers, null, null)
+            ?? installers[0];
+    }
+
+    private static JsonElement? SelectInstaller(
+        JsonElement manifest,
+        JsonElement installers,
+        string? scope,
+        string? architecture
+    )
+    {
+        string? rootScope = GetString(manifest, "Scope");
+        string? rootMinimumOsVersion = GetString(manifest, "MinimumOSVersion");
+        IReadOnlyList<string>? rootPlatforms = GetStringArray(manifest, "Platform");
+        string systemArchitecture = PingetPackageDetailsProvider.CurrentArchitecture();
+        string[] preferredArchitectures = PingetPackageDetailsProvider.PreferredArchitectures(
+            systemArchitecture
+        );
+
+        JsonElement? selected = null;
+        int selectedRank = int.MinValue;
+        foreach (JsonElement candidate in installers.EnumerateArray())
+        {
+            if (candidate.ValueKind != JsonValueKind.Object)
+                continue;
+
+            if (
+                !PingetPackageDetailsProvider.MatchesCurrentPlatform(
+                    GetStringArray(candidate, "Platform") ?? rootPlatforms
+                )
+                || !PingetPackageDetailsProvider.MatchesCurrentOsVersion(
+                    GetString(candidate, "MinimumOSVersion") ?? rootMinimumOsVersion
+                )
+            )
+                continue;
+
+            string? candidateScope = GetString(candidate, "Scope") ?? rootScope;
+            if (
+                scope is not null
+                && candidateScope is not null
+                && !candidateScope.Equals(scope, StringComparison.OrdinalIgnoreCase)
+            )
+                continue;
+
+            string? candidateArchitecture = GetString(candidate, "Architecture");
+            if (
+                candidateArchitecture is not null
+                && !(
+                    architecture is not null
+                        ? candidateArchitecture.Equals(architecture, StringComparison.OrdinalIgnoreCase)
+                        : preferredArchitectures.Contains(
+                            candidateArchitecture,
+                            StringComparer.OrdinalIgnoreCase
+                        )
+                )
+            )
+                continue;
+
+            int rank = PingetPackageDetailsProvider.ArchitectureRank(
+                candidateArchitecture,
+                architecture ?? systemArchitecture,
+                preferredArchitectures
+            );
+            if (rank > selectedRank)
+            {
+                selected = candidate;
+                selectedRank = rank;
+            }
+        }
+
+        return selected;
     }
 
     private static string? GetString(JsonElement element, string propertyName) =>
@@ -270,6 +366,21 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
         && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
+    private static IReadOnlyList<string>? GetStringArray(JsonElement element, string propertyName)
+    {
+        if (
+            !element.TryGetProperty(propertyName, out JsonElement value)
+            || value.ValueKind != JsonValueKind.Array
+        )
+            return null;
+
+        return value
+            .EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString()!)
+            .ToArray();
+    }
 
     private static void SetIfMissing(
         Action<string> setValue,
@@ -313,29 +424,54 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
 {
     private readonly Func<PackageQuery, ShowResult> _showPackage;
     private readonly Func<Uri, long> _installerSizeResolver;
+    private readonly Func<IPackage, InstallerPreference> _installerPreferenceResolver;
 
     public PingetPackageDetailsProvider()
         : this(ShowWithRepository) { }
 
     internal PingetPackageDetailsProvider(
         Func<PackageQuery, ShowResult> showPackage,
-        Func<Uri, long>? installerSizeResolver = null
+        Func<Uri, long>? installerSizeResolver = null,
+        Func<IPackage, InstallerPreference>? installerPreferenceResolver = null
     )
     {
         _showPackage = showPackage;
         _installerSizeResolver = installerSizeResolver ?? CoreTools.GetFileSizeAsLong;
+        _installerPreferenceResolver =
+            installerPreferenceResolver ?? GetConfiguredInstallerPreference;
     }
 
     public bool LoadPackageDetails(IPackageDetails details, INativeTaskLogger logger)
     {
         try
         {
-            PackageQuery query = CreateQuery(details.Package);
+            InstallerPreference preference = _installerPreferenceResolver(details.Package);
+            PackageQuery query = CreateQuery(details.Package) with
+            {
+                InstallScope = preference.Scope,
+                InstallerArchitecture = preference.Architecture,
+            };
             logger.Log("Loading WinGet installer metadata with Pinget");
             logger.Log($" Query: {FormatQueryForLog(query)}");
             Logger.Info($"Loading WinGet installer metadata with Pinget. Query: {FormatQueryForLog(query)}");
 
             ShowResult result = _showPackage(query);
+            if (
+                result.SelectedInstaller is null
+                && PreferenceExcludesAnInstaller(result.Manifest.Installers, preference)
+            )
+            {
+                logger.Log(
+                    " No installer matches the configured scope/architecture, retrying without them"
+                );
+                result = _showPackage(
+                    query with
+                    {
+                        InstallScope = null,
+                        InstallerArchitecture = null,
+                    }
+                );
+            }
 
             foreach (string warning in result.Warnings)
             {
@@ -396,6 +532,115 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
         return query;
     }
 
+    internal static InstallerPreference GetConfiguredInstallerPreference(IPackage package)
+    {
+        InstallOptions options = InstallOptionsFactory.LoadForPackage(package);
+        if (!options.OverridesNextLevelOpts)
+            options = InstallOptionsFactory.LoadForManager(package.Manager);
+
+        return new InstallerPreference(
+            WinGetPkgOperationHelper.GetEffectiveScope(package, options),
+            WinGetPkgOperationHelper.GetEffectiveArchitecture(
+                package,
+                options,
+                forUpdate: package.IsUpgradable
+            )
+        );
+    }
+
+    private static bool PreferenceExcludesAnInstaller(
+        IEnumerable<Installer> installers,
+        InstallerPreference preference
+    ) =>
+        installers.Any(installer =>
+            (
+                preference.Scope is not null
+                && installer.Scope is not null
+                && !installer.Scope.Equals(preference.Scope, StringComparison.OrdinalIgnoreCase)
+            )
+            || (
+                preference.Architecture is not null
+                && installer.Architecture is not null
+                && !installer.Architecture.Equals(
+                    preference.Architecture,
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+        );
+
+    internal static bool MatchesCurrentPlatform(IReadOnlyList<string>? platforms) =>
+        platforms is null
+        || platforms.Count == 0
+        || !OperatingSystem.IsWindows()
+        || platforms.Contains("Windows.Desktop", StringComparer.OrdinalIgnoreCase);
+
+    internal static bool MatchesCurrentOsVersion(
+        string? minimumOsVersion,
+        string? currentOsVersion = null
+    )
+    {
+        if (string.IsNullOrWhiteSpace(minimumOsVersion))
+            return true;
+
+        currentOsVersion ??= OperatingSystem.IsWindows()
+            ? Environment.OSVersion.Version.ToString()
+            : null;
+        if (string.IsNullOrWhiteSpace(currentOsVersion))
+            return true;
+
+        if (
+            TryParseOsVersion(minimumOsVersion, out Version? minimum)
+            && TryParseOsVersion(currentOsVersion, out Version? current)
+        )
+            return current >= minimum;
+
+        return minimumOsVersion.Equals(currentOsVersion, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryParseOsVersion(string value, [NotNullWhen(true)] out Version? version) =>
+        Version.TryParse(
+            string.Join('.', value.Split('.', StringSplitOptions.RemoveEmptyEntries).Take(4)),
+            out version
+        );
+
+    internal static string CurrentArchitecture() =>
+        RuntimeInformation.OSArchitecture switch
+        {
+            System.Runtime.InteropServices.Architecture.X64 => "x64",
+            System.Runtime.InteropServices.Architecture.X86 => "x86",
+            System.Runtime.InteropServices.Architecture.Arm64 => "arm64",
+            _ => "neutral",
+        };
+
+    internal static string[] PreferredArchitectures(string systemArchitecture) =>
+        systemArchitecture switch
+        {
+            "arm64" => ["arm64", "neutral", "x64", "x86"],
+            "x64" => ["x64", "neutral", "x86"],
+            "x86" => ["x86", "neutral"],
+            _ => ["neutral"],
+        };
+
+    internal static int ArchitectureRank(
+        string? installerArchitecture,
+        string preferredArchitecture,
+        string[] preferredArchitectures
+    )
+    {
+        if (installerArchitecture is null)
+            return 0;
+        if (installerArchitecture.Equals(preferredArchitecture, StringComparison.OrdinalIgnoreCase))
+            return preferredArchitectures.Length + 2;
+        if (installerArchitecture.Equals("neutral", StringComparison.OrdinalIgnoreCase))
+            return preferredArchitectures.Length + 1;
+
+        int index = Array.FindIndex(
+            preferredArchitectures,
+            candidate => candidate.Equals(installerArchitecture, StringComparison.OrdinalIgnoreCase)
+        );
+        return index < 0 ? -1 : preferredArchitectures.Length - index;
+    }
+
     internal static void ApplyShowResult(
         IPackageDetails details,
         ShowResult result,
@@ -406,6 +651,7 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
         Manifest manifest = result.Manifest;
         Installer? installer = result.SelectedInstaller ?? manifest.Installers.FirstOrDefault();
 
+        SetIfPresent(value => details.Version = value, manifest.Version);
         SetIfMissing(value => details.Author = value, details.Author, manifest.Author);
         SetIfMissing(
             value => details.Description = value,
@@ -471,7 +717,88 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
     /// </summary>
     internal static IReadOnlySet<string>? TryGetInstallerHostsForVersion(
         IPackage package,
-        string version
+        string version,
+        Func<PackageQuery, ShowResult>? showPackage = null
+    )
+    {
+        string? trimmedVersion = TrimTrailingZeroSegments(version);
+        IReadOnlyList<string>? urls = TryGetInstallerUrlsCore(
+            package,
+            version,
+            requireExactVersion: true,
+            showPackage,
+            logFailures: trimmedVersion is null
+        );
+
+        if (urls is null && trimmedVersion is not null)
+        {
+            urls = TryGetInstallerUrlsCore(
+                package,
+                trimmedVersion,
+                requireExactVersion: true,
+                showPackage
+            );
+        }
+
+        if (urls is null)
+            return null;
+
+        HashSet<string> hosts = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string url in urls)
+        {
+            if (TryCreateUri(url, out Uri? uri) && uri is not null)
+                hosts.Add(uri.Host);
+        }
+
+        return hosts.Count > 0 ? hosts : null;
+    }
+
+    internal static IReadOnlyList<string>? TryGetInstallerUrls(
+        IPackage package,
+        string? version,
+        Func<PackageQuery, ShowResult>? showPackage = null
+    )
+    {
+        IReadOnlyList<string>? urls = TryGetInstallerUrlsCore(
+            package,
+            version,
+            requireExactVersion: false,
+            showPackage
+        );
+        if (urls is not null || string.IsNullOrWhiteSpace(version))
+            return urls;
+
+        return TryGetInstallerUrlsCore(package, null, requireExactVersion: false, showPackage);
+    }
+
+    internal static string? TrimTrailingZeroSegments(string version)
+    {
+        if (string.IsNullOrWhiteSpace(version))
+            return null;
+
+        string[] segments = version.Split('.');
+        if (segments.Length < 2)
+            return null;
+
+        foreach (string segment in segments)
+        {
+            if (segment.Length == 0 || !segment.All(char.IsAsciiDigit))
+                return null;
+        }
+
+        int last = segments.Length - 1;
+        while (last > 0 && segments[last].All(character => character == '0'))
+            last--;
+
+        return last == segments.Length - 1 ? null : string.Join('.', segments[..(last + 1)]);
+    }
+
+    private static IReadOnlyList<string>? TryGetInstallerUrlsCore(
+        IPackage package,
+        string? version,
+        bool requireExactVersion,
+        Func<PackageQuery, ShowResult>? showPackage,
+        bool logFailures = true
     )
     {
         try
@@ -490,11 +817,18 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
             string returnedVersion = result.Manifest.Version ?? "";
             if (!string.Equals(returnedVersion, version, StringComparison.OrdinalIgnoreCase))
             {
-                Logger.Info(
-                    $"Pinget returned manifest version '{returnedVersion}' when '{version}' "
-                    + $"was requested for {package.Id}; treating as not found"
-                );
-                return null;
+                string returnedVersion = result.Manifest.Version ?? "";
+                if (!string.Equals(returnedVersion, version, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (logFailures)
+                    {
+                        Logger.Info(
+                            $"Pinget returned manifest version '{returnedVersion}' when '{version}' "
+                            + $"was requested for {package.Id}; treating as not found"
+                        );
+                    }
+                    return null;
+                }
             }
 
             HashSet<string> hosts = new(StringComparer.OrdinalIgnoreCase);
@@ -508,9 +842,12 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
         }
         catch (Exception ex)
         {
-            Logger.Warn(
-                $"Could not resolve installer hosts for {package.Id} version {version}: {ex.Message}"
-            );
+            if (logFailures)
+            {
+                Logger.Warn(
+                    $"Could not resolve installer URLs for {package.Id} version {version}: {ex.Message}"
+                );
+            }
             return null;
         }
     }
@@ -538,6 +875,8 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
                 $"Name={query.Name}",
                 $"Source={query.Source}",
                 $"Exact={query.Exact}",
+                $"Scope={query.InstallScope}",
+                $"Architecture={query.InstallerArchitecture}",
             }.Where(part => !part.EndsWith("="))
         );
     }

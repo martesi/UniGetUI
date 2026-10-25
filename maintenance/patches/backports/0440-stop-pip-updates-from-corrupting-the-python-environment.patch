@@ -1,0 +1,694 @@
+From 86ecfa460812b38c3f7589a2ca431ffd9d53952a Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:40:16 +0800
+Subject: [PATCH] backport: Stop pip updates from corrupting the Python
+ environment (#5489)
+
+Upstream-Commit: c4ee2f1dd76697501581ce084d6addaf91f0caff
+Upstream-PR: Devolutions/UniGetUI#5489
+
+Upstream-Commit: ce0589d3b3e27e065e6d1520ceaba7c3558038f0
+Upstream-PR: Devolutions/UniGetUI#5485
+Classic-Source-Commit: 86ecfa460812b38c3f7589a2ca431ffd9d53952a
+
+---
+ .../ManagerCapabilities.cs                    |   1 +
+ .../Helpers/PipPkgOperationHelper.cs          |  12 +-
+ .../Pip.cs                                    |  28 +-
+ .../PackageOperations.cs                      |  93 ++++++
+ .../PackageOperationsTests.cs                 | 274 ++++++++++++++++++
+ .../PipManagerTests.cs                        | 136 +++++++++
+ 6 files changed, 534 insertions(+), 10 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+index 62da046fcd56b61cbbff21f6a67ee33ef5852d6c..ba1a2069ba81252f27db84e2ffab66ecdf3fff14 100644
+--- a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
++++ b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+@@ -42,6 +42,7 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+         public bool SupportsCustomScopesOnUpdate = true;
+         public bool SupportsCustomScopesOnUninstall = true;
+         public bool SupportsPreRelease = false;
++        public bool SerializesOperations = false;
+         public bool SupportsCustomLocations = false;
+         public bool SupportsCustomSources = false;
+         public bool SupportsCustomPackageIcons = false;
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgOperationHelper.cs
+index b60ed17330bb4266d78e827fc498aa38680342a7..4cc9f403cd54ad6bc562af6fbb1ada0c4c3c6c22 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgOperationHelper.cs
+@@ -94,14 +94,22 @@ internal sealed class PipPkgOperationHelper : BasePkgOperationHelper
+                 return OperationVeredict.AutoRetry;
+             }
+ 
+-            if (package.OverridenOptions.Scope != PackageScope.User)
++            if (
++                operation is not OperationType.Update
++                && package.OverridenOptions.Scope != PackageScope.User
++            )
+             {
+                 package.OverridenOptions.Scope = PackageScope.User;
+                 return OperationVeredict.AutoRetry;
+             }
+         }
+ 
+-        if (output_string.Contains("--user") && package.OverridenOptions.Scope != PackageScope.User)
++        if (
++            operation is not OperationType.Update
++            && output_string.Contains("--user")
++            && !output_string.Contains("[WinError 32]")
++            && package.OverridenOptions.Scope != PackageScope.User
++        )
+         {
+             package.OverridenOptions.Scope = PackageScope.User;
+             return OperationVeredict.AutoRetry;
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+index 35cffe9563bbb866bea19b8996ee8124bf5238dd..ebff3a3d55456557c1a701040849703425a8a79d 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+@@ -64,6 +64,7 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+                 SupportsCustomScopes = true,
+                 CanDownloadInstaller = true,
+                 SupportsPreRelease = true,
++                SerializesOperations = true,
+                 CanListDependencies = true,
+                 SupportsProxy = ProxySupport.Yes,
+                 SupportsProxyAuth = true,
+@@ -199,7 +200,8 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+             client.DefaultRequestHeaders.UserAgent.ParseAdd(CoreData.UserAgentString);
+             client.DefaultRequestHeaders.Add("Accept", "application/vnd.pypi.simple.v1+json");
+ 
+-            HttpResponseMessage response = client.GetAsync("https://pypi.org/simple/").GetAwaiter().GetResult();
++            using var request = new HttpRequestMessage(HttpMethod.Get, "https://pypi.org/simple/");
++            using HttpResponseMessage response = client.Send(request);
+             if (!response.IsSuccessStatusCode)
+                 throw new HttpRequestException($"PyPI simple index returned {(int)response.StatusCode} {response.ReasonPhrase}");
+ 
+@@ -255,9 +257,15 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+             await _versionFetchSemaphore.WaitAsync().ConfigureAwait(false);
+             try
+             {
+-                string json = await _httpClient
+-                    .GetStringAsync($"https://pypi.org/pypi/{Uri.EscapeDataString(packageName)}/json")
++                using var request = new HttpRequestMessage(
++                    HttpMethod.Get,
++                    $"https://pypi.org/pypi/{Uri.EscapeDataString(packageName)}/json"
++                );
++                using HttpResponseMessage response = await _httpClient
++                    .SendAsync(request)
+                     .ConfigureAwait(false);
++                response.EnsureSuccessStatusCode();
++                string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                 return (JsonNode.Parse(json) as JsonObject)?["info"]?["version"]?.GetValue<string>();
+             }
+             catch
+@@ -277,7 +285,7 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+ 
+         private readonly record struct CachedResolution(string ETag, string? Version);
+ 
+-        private readonly record struct VersionResolution(string? Version, bool Failed);
++        internal readonly record struct VersionResolution(string? Version, bool Failed);
+ 
+         private readonly object _indexUpdateCheckLock = new();
+         private bool _indexUpdateCheckProbed;
+@@ -451,16 +459,19 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+         private static readonly SemaphoreSlim _updateFetchSemaphore = new(6, 6);
+         private static readonly TimeSpan UpdateResolutionBudget = TimeSpan.FromSeconds(45);
+ 
+-        private static async Task<VersionResolution> ResolveLatestVersionAsync(
++        internal static async Task<VersionResolution> ResolveLatestVersionAsync(
+             HttpClient client,
+             string packageId,
+             PythonVersion interpreter,
+             CancellationToken token
+         )
+         {
+-            await _updateFetchSemaphore.WaitAsync(token).ConfigureAwait(false);
++            bool acquired = false;
+             try
+             {
++                await _updateFetchSemaphore.WaitAsync(token).ConfigureAwait(false);
++                acquired = true;
++
+                 using var request = new HttpRequestMessage(
+                     HttpMethod.Get,
+                     $"https://pypi.org/simple/{NormalizeProjectNameForUrl(packageId)}/"
+@@ -529,7 +540,8 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+             }
+             finally
+             {
+-                _updateFetchSemaphore.Release();
++                if (acquired)
++                    _updateFetchSemaphore.Release();
+             }
+         }
+ 
+@@ -980,7 +992,7 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+ 
+         protected override void _loadManagerVersion(out string version)
+         {
+-            Process process = new()
++            using Process process = new()
+             {
+                 StartInfo = new ProcessStartInfo
+                 {
+diff --git a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+index a52dc54109cdd662bdebacb48880ad3436e8f5a1..5b783e4e9afb770ddbcab5a43b67e72933d11b25 100644
+--- a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
++++ b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+@@ -1,3 +1,4 @@
++using System.Collections.Concurrent;
+ using UniGetUI.Core.Classes;
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.Logging;
+@@ -99,6 +100,98 @@ namespace UniGetUI.PackageEngine.Operations
+                 + Package.OverridenOptions.ToString();
+         }
+ 
++        protected override async Task<OperationVeredict> PerformOperation()
++        {
++            // Observational stage marker only: structured progress starts as indeterminate
++            // with the role's stage label (e.g. "Installing..."). Re-reported on every
++            // attempt, so AutoRetry restarts also reset any previous speed. This changes
++            // nothing about execution, retries, elevation, proxy, or result handling.
++            ReportProgress(
++                Role switch
++                {
++                    OperationType.Install => OperationProgress.ForStage(
++                        OperationProgressStage.Installing
++                    ),
++                    OperationType.Update => OperationProgress.ForStage(
++                        OperationProgressStage.Updating
++                    ),
++                    OperationType.Uninstall => OperationProgress.ForStage(
++                        OperationProgressStage.Uninstalling
++                    ),
++                    _ => OperationProgress.Unknown,
++                }
++            );
++
++            {
++                if (!Package.Manager.Capabilities.SerializesOperations)
++                    return await PerformLocalOperation();
++
++                SemaphoreSlim gate = ManagerOperationGates.GetOrAdd(
++                    Package.Manager.Name,
++                    _ => new SemaphoreSlim(1, 1)
++                );
++                if (!await gate.WaitAsync(0))
++                {
++                    Line(
++                        CoreTools.Translate(
++                            "Waiting for another {0} operation to finish...",
++                            Package.Manager.DisplayName
++                        ),
++                        LineType.ProgressIndicator
++                    );
++                    IsWaitingForManager = true;
++                    try
++                    {
++                        await gate.WaitAsync(CancellationToken);
++                    }
++                    catch (OperationCanceledException)
++                    {
++                        return OperationVeredict.Canceled;
++                    }
++                    finally
++                    {
++                        IsWaitingForManager = false;
++                    }
++                }
++
++                try
++                {
++                    return await PerformLocalOperation();
++                }
++                finally
++                {
++                    gate.Release();
++                }
++            }
++
++
++        }
++
++        private async Task<OperationVeredict> PerformLocalOperation()
++        {
++            if (Package.Manager.OperationHelper is IManagedPackageOperationHelper managed)
++            {
++                try
++                {
++                    var result = await managed.TryPerformAsync(Package, Options, Role,
++                        message => Line(message, LineType.Information), ReportProgress, CancellationToken);
++                    if (result is not null)
++                        return result.Value;
++                    // Resolution may have pinned an initially unversioned request before fallback.
++                    PrepareProcessStartInfo();
++                }
++                catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
++                {
++                    return OperationVeredict.Canceled;
++                }
++            }
++            return await base.PerformOperation();
++        }
++
++        private static readonly ConcurrentDictionary<string, SemaphoreSlim> ManagerOperationGates =
++            new();
++
++
+         protected sealed override void PrepareProcessStartInfo()
+         {
+             bool IsAdmin = CoreTools.IsAdministrator();
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+index 122370589a77f02a4223facd0e232284112f0a76..c4022c237011a73c2fbce6067732e71fb1964216 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+@@ -300,6 +300,280 @@ public sealed class PackageOperationsTests
+         Assert.Equal(PackageScope.Machine, badges.Scope);
+     }
+ 
++    private static TestPackageManager CreateSlowProcessManager(bool serializesOperations)
++    {
++        return new PackageManagerBuilder()
++            .WithName($"SlowManager{Guid.NewGuid():N}")
++            .ConfigureCapabilities(capabilities =>
++            {
++                capabilities.SerializesOperations = serializesOperations;
++                return capabilities;
++            })
++            .ConfigureManager(manager =>
++            {
++                manager.ExecutablePath = Path.Join(Environment.SystemDirectory, "cmd.exe");
++                manager.ExecutableArguments = "/c";
++            })
++            .ConfigureOperation(helper =>
++            {
++                helper.ParametersFactory = (_, _, _) => ["ping", "-n", "3", "127.0.0.1"];
++                helper.ResultFactory = (_, _, _, _) => OperationVeredict.Success;
++            })
++            .Build();
++    }
++
++    private static bool HasLine(AbstractOperation operation, string prefix) =>
++        operation.GetOutput().Any(line => line.Item1.StartsWith(prefix, StringComparison.Ordinal));
++
++    private static async Task WaitForConditionAsync(Func<bool> condition)
++    {
++        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
++        while (!condition())
++            await Task.Delay(25, timeout.Token);
++    }
++
++    private static Func<bool> ReportsWaitingOnTheGate(AbstractOperation operation)
++    {
++        bool reported = false;
++        operation.LogLineAdded += (_, line) =>
++        {
++            if (line.Item1.StartsWith("Waiting for another", StringComparison.Ordinal))
++                reported = true;
++        };
++        return () => reported;
++    }
++
++    [Fact]
++    public async Task OperationsOfASerializingManagerNeverRunTheirProcessesConcurrently()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        var manager = CreateSlowProcessManager(serializesOperations: true);
++        InitializeLoaders();
++        using var first = new InstallPackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("first").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++        using var second = new InstallPackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("second").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++        var secondWaited = ReportsWaitingOnTheGate(second);
++        bool? firstFinishedWhenSecondStarted = null;
++        second.LogLineAdded += (_, line) =>
++        {
++            if (line.Item1.StartsWith("Executing process", StringComparison.Ordinal))
++                firstFinishedWhenSecondStarted = HasLine(first, "Process return value");
++        };
++
++        Task firstRun = first.MainThread();
++        await WaitForConditionAsync(() => HasLine(first, "Start Time"));
++        Task secondRun = second.MainThread();
++        await Task.WhenAll(firstRun, secondRun).WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.Equal(OperationStatus.Succeeded, first.Status);
++        Assert.Equal(OperationStatus.Succeeded, second.Status);
++        Assert.True(firstFinishedWhenSecondStarted);
++        Assert.True(secondWaited());
++    }
++
++    [Fact]
++    public async Task OperationsOfANonSerializingManagerRunTheirProcessesConcurrently()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        var manager = CreateSlowProcessManager(serializesOperations: false);
++        InitializeLoaders();
++        using var first = new InstallPackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("first").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++        using var second = new InstallPackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("second").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++        var secondWaited = ReportsWaitingOnTheGate(second);
++        bool? firstFinishedWhenSecondStarted = null;
++        second.LogLineAdded += (_, line) =>
++        {
++            if (line.Item1.StartsWith("Executing process", StringComparison.Ordinal))
++                firstFinishedWhenSecondStarted = HasLine(first, "Process return value");
++        };
++
++        Task firstRun = first.MainThread();
++        await WaitForConditionAsync(() => HasLine(first, "Start Time"));
++        Task secondRun = second.MainThread();
++        await Task.WhenAll(firstRun, secondRun).WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.False(firstFinishedWhenSecondStarted);
++        Assert.False(secondWaited());
++    }
++
++    [Fact]
++    public async Task CancelingAnOperationWaitingOnASerializingManagerLeavesTheGateUsable()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        var manager = CreateSlowProcessManager(serializesOperations: true);
++        InitializeLoaders();
++        using var first = new InstallPackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("first").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++        using var waiting = new InstallPackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("waiting").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++        using var third = new InstallPackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("third").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++        var waitingReported = ReportsWaitingOnTheGate(waiting);
++        var thirdWaited = ReportsWaitingOnTheGate(third);
++
++        Task firstRun = first.MainThread();
++        await WaitForConditionAsync(() => HasLine(first, "Start Time"));
++        Task waitingRun = waiting.MainThread();
++        await WaitForConditionAsync(waitingReported);
++        waiting.Cancel();
++        await waitingRun.WaitAsync(TimeSpan.FromSeconds(10));
++        await firstRun.WaitAsync(TimeSpan.FromSeconds(30));
++        await third.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.Equal(OperationStatus.Canceled, waiting.Status);
++        Assert.False(HasLine(waiting, "Executing process"));
++        Assert.DoesNotContain(
++            waiting.GetOutput(),
++            line => line.Item1.Contains("CanceledException", StringComparison.Ordinal)
++        );
++        Assert.Equal(OperationStatus.Succeeded, first.Status);
++        Assert.Equal(OperationStatus.Succeeded, third.Status);
++        Assert.False(thirdWaited());
++    }
++
++    [Fact]
++    public async Task AnOperationWaitingOnASerializingManagerDoesNotHoldAParallelSlot()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        var serialized = CreateSlowProcessManager(serializesOperations: true);
++        var other = CreateSlowProcessManager(serializesOperations: false);
++        InitializeLoaders();
++        using var first = new InstallPackageOperation(
++            new PackageBuilder().WithManager(serialized).WithId("first").Build(),
++            new InstallOptions()
++        );
++        using var waiting = new InstallPackageOperation(
++            new PackageBuilder().WithManager(serialized).WithId("waiting").Build(),
++            new InstallOptions()
++        );
++        using var unrelated = new InstallPackageOperation(
++            new PackageBuilder().WithManager(other).WithId("unrelated").Build(),
++            new InstallOptions()
++        );
++        var waitingReported = ReportsWaitingOnTheGate(waiting);
++        bool? firstFinishedWhenUnrelatedStarted = null;
++        unrelated.LogLineAdded += (_, line) =>
++        {
++            if (line.Item1.StartsWith("Executing process", StringComparison.Ordinal))
++                firstFinishedWhenUnrelatedStarted = HasLine(first, "Process return value");
++        };
++
++        AbstractOperation.OperationQueue.Clear();
++        int previousMax = AbstractOperation.MAX_OPERATIONS;
++        AbstractOperation.MAX_OPERATIONS = 2;
++        try
++        {
++            Task firstRun = first.MainThread();
++            await WaitForConditionAsync(() => HasLine(first, "Start Time"));
++            Task waitingRun = waiting.MainThread();
++            await WaitForConditionAsync(waitingReported);
++            Task unrelatedRun = unrelated.MainThread();
++            await Task.WhenAll(firstRun, waitingRun, unrelatedRun).WaitAsync(TimeSpan.FromSeconds(30));
++        }
++        finally
++        {
++            AbstractOperation.MAX_OPERATIONS = previousMax;
++            AbstractOperation.OperationQueue.Clear();
++        }
++
++        Assert.Equal(OperationStatus.Succeeded, first.Status);
++        Assert.Equal(OperationStatus.Succeeded, waiting.Status);
++        Assert.Equal(OperationStatus.Succeeded, unrelated.Status);
++        Assert.False(firstFinishedWhenUnrelatedStarted);
++    }
++
++    private static TestPackageManager CreateFailingEchoManager(params string[] echoed)
++    {
++        return new PackageManagerBuilder()
++            .WithName($"FailingManager{Guid.NewGuid():N}")
++            .ConfigureManager(manager =>
++            {
++                manager.ExecutablePath = Path.Join(Environment.SystemDirectory, "cmd.exe");
++                manager.ExecutableArguments = "/c";
++            })
++            .ConfigureOperation(helper =>
++            {
++                helper.ParametersFactory = (_, _, _) => ["echo", .. echoed];
++                helper.ResultFactory = (_, _, _, _) => OperationVeredict.Failure;
++            })
++            .Build();
++    }
++
++    [Fact]
++    public async Task AFailureCausedByAFileInUseTellsTheUserToCloseTheProgramUsingIt()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        var manager = CreateFailingEchoManager("ERROR:", "[WinError", "32]", "file", "busy");
++        InitializeLoaders();
++        using var operation = new UpdatePackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("botocore").WithName("botocore").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++
++        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.Equal(OperationStatus.Failed, operation.Status);
++        Assert.Equal(
++            "A file of botocore is in use by another program. Close any program that may be using it, then try again",
++            operation.Metadata.FailureMessage
++        );
++    }
++
++    [Fact]
++    public async Task AFailureWithoutAFileInUseKeepsTheGenericFailureMessage()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        var manager = CreateFailingEchoManager("ERROR:", "[WinError", "5]", "denied");
++        InitializeLoaders();
++        using var operation = new UpdatePackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("botocore").WithName("botocore").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++
++        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.Equal(OperationStatus.Failed, operation.Status);
++        Assert.DoesNotContain("in use by another program", operation.Metadata.FailureMessage);
++    }
++
+     [Fact]
+     public async Task InstallOperationSuccessfulRunSetsPackageTagAndAddsInstalledCopy()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
+index ba0bc00f55ca2065a539228720c98671569004f7..18d50958023e1d4829696fdc4ae8374804d98d07 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
+@@ -345,4 +345,140 @@ public sealed class PipManagerTests : IDisposable
+         Assert.Equal(PackageScope.User, userScopedPackage.OverridenOptions.Scope);
+         Assert.Equal(OperationVeredict.Failure, failureResult);
+     }
++
++    [Theory]
++    [InlineData(OperationType.Install, OperationVeredict.AutoRetry, PackageScope.User)]
++    [InlineData(OperationType.Update, OperationVeredict.Failure, null)]
++    public void OperationHelperMovesOnlyNonUpdatesToTheUserSchemeOnARepeatedExternallyManagedFailure(
++        OperationType operation,
++        OperationVeredict expectedResult,
++        string? expectedScope
++    )
++    {
++        var manager = new Pip();
++        var package = new PackageBuilder().WithManager(manager).WithId("requests").Build();
++        string[] output = ["error: externally-managed-environment"];
++
++        var firstResult = manager.OperationHelper.GetResult(package, operation, output, 1);
++        var secondResult = manager.OperationHelper.GetResult(package, operation, output, 1);
++
++        Assert.Equal(OperationVeredict.AutoRetry, firstResult);
++        Assert.True(package.OverridenOptions.Pip_BreakSystemPackages);
++        Assert.Equal(expectedResult, secondResult);
++        Assert.Equal(expectedScope, package.OverridenOptions.Scope);
++    }
++
++    private static readonly string[] SharingViolationOutput =
++    [
++        "Attempting uninstall: botocore",
++        "ERROR: Could not install packages due to an OSError: [WinError 32] The process cannot access the file because it is being used by another process: 'C:\\Python314\\Lib\\site-packages\\botocore\\signers.py'",
++        "Consider using the `--user` option or check the permissions.",
++    ];
++
++    private static readonly string[] PermissionDeniedOutput =
++    [
++        "ERROR: Could not install packages due to an OSError: [WinError 5] Access is denied: 'C:\\Python314\\Lib\\site-packages\\requests'",
++        "Consider using the `--user` option or check the permissions.",
++    ];
++
++    [Theory]
++    [InlineData(OperationType.Install)]
++    [InlineData(OperationType.Update)]
++    public void OperationHelperDoesNotMoveToTheUserSchemeOnASharingViolation(
++        OperationType operation
++    )
++    {
++        var manager = new Pip();
++        var package = new PackageBuilder().WithManager(manager).WithId("boto3").Build();
++
++        var result = manager.OperationHelper.GetResult(
++            package,
++            operation,
++            SharingViolationOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.Failure, result);
++        Assert.Null(package.OverridenOptions.Scope);
++    }
++
++    [Fact]
++    public void OperationHelperDoesNotMoveAnUpdateToTheUserScheme()
++    {
++        var manager = new Pip();
++        var package = new PackageBuilder().WithManager(manager).WithId("requests").Build();
++
++        var result = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            PermissionDeniedOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.Failure, result);
++        Assert.Null(package.OverridenOptions.Scope);
++    }
++
++    [Fact]
++    public void OperationHelperStillRetriesAnInstallInTheUserSchemeWhenAccessIsDenied()
++    {
++        var manager = new Pip();
++        var package = new PackageBuilder().WithManager(manager).WithId("requests").Build();
++
++        var result = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Install,
++            PermissionDeniedOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.AutoRetry, result);
++        Assert.Equal(PackageScope.User, package.OverridenOptions.Scope);
++    }
++
++    [Fact]
++    public void PipSerializesItsOperations()
++    {
++        Assert.True(new Pip().Capabilities.SerializesOperations);
++    }
++
++    [Fact]
++    public async Task ResolveLatestVersionReportsAFailureWhenTheResolutionBudgetIsAlreadySpent()
++    {
++        Assert.True(PythonVersion.TryParse("3.12.0", out PythonVersion interpreter));
++
++        using HttpClient client = new(CoreTools.GenericHttpClientParameters);
++        using CancellationTokenSource budget = new();
++        await budget.CancelAsync();
++
++        Pip.VersionResolution resolution = await Pip.ResolveLatestVersionAsync(
++            client,
++            "requests",
++            interpreter,
++            budget.Token
++        );
++
++        Assert.True(resolution.Failed);
++        Assert.Null(resolution.Version);
++    }
++
++    [Fact]
++    public async Task ResolveLatestVersionKeepsServingLaterLookupsAfterASpentBudget()
++    {
++        Assert.True(PythonVersion.TryParse("3.12.0", out PythonVersion interpreter));
++
++        using HttpClient client = new(CoreTools.GenericHttpClientParameters);
++
++        for (int i = 0; i < 12; i++)
++        {
++            using CancellationTokenSource budget = new();
++            await budget.CancelAsync();
++
++            Pip.VersionResolution resolution = await Pip
++                .ResolveLatestVersionAsync(client, $"package-{i}", interpreter, budget.Token)
++                .WaitAsync(TimeSpan.FromSeconds(10));
++
++            Assert.True(resolution.Failed);
++        }
++    }
+ }
+-- 
+2.56.0
+

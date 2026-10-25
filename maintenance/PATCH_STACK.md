@@ -43,7 +43,7 @@ worktree; run replay commands in the maintenance checkout.
 5. Run `pwsh ./scripts/verify-patch-stack.ps1` and the checks required for the
    changed source.
 
-The final `classic/1110-classic-maintenance-docs.patch` consolidates maintenance
+The `classic/1110-classic-maintenance-docs.patch` consolidates maintenance
 rules, preserves the decisions below, and removes the unused ledger and its
 existence checks. Earlier patches are retained for provenance.
 
@@ -76,3 +76,27 @@ feature checklist. Add a note only when a patch does not explain an exception.
 | #5077, reinstall orchestration | Skip: Classic already chains one install operation after the uninstall prerequisite and does not launch uninstall separately. Neither reported defect applies. |
 | #4959, frontend retirement | Remove the obsolete frontend selector while preserving WinUI and legacy helpers for compatibility. |
 | Classic issue #5, SQLite | Pin SQLitePCLRaw to 2.1.13 for GHSA-2m69-gcr7-jv3q. Remove the override when upstream or Pinget stops resolving vulnerable 2.1.11. |
+
+### October 2026 review
+
+Reviewed shared-code changes through upstream `5d8e9bc6d2cbe0a6850cac403dfc3e9e6cbf02fe`
+(2026-10-23), including the earlier settings/path and command-injection fixes
+in #5346 and #5348 and the elevated temporary-directory fix in #5526.
+The appended patches retain the individual upstream references.
+
+- #5346 and #5348: wire protocol sanitization, bundle filtering, standalone-command
+  validation, and PowerShell launcher deployment into WinUI's existing entry points.
+- #5446, #5483, and #5545: share the elevation-cache and executable-search fixes;
+  preserve Classic's existing headless host and installed product identity.
+- #5459 and #5536: retain the shared per-manager search selection API and result
+  limits; an explicit empty WinUI search lists supported sources. The Avalonia
+  filter-pane controls are not imported.
+- #5489 and #5569: keep local manager serialization and managed Cargo execution.
+  Classic has no Agent broker backend, so broker routing, policy-editor changes,
+  and broker-only tests are excluded.
+- The shared operation foundation includes cancellation, safe queue scheduling,
+  and structured download progress. Avalonia operation-card presentation and
+  persistent pending-reboot UI are outside this backport.
+- Avalonia Software Catalog/editor, TUI, macOS presentation, sidebar reordering,
+  upstream release-channel identity, and agent automation workflows remain outside
+  Classic's WinUI maintenance boundary.

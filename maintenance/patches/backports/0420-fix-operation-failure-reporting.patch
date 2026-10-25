@@ -1,0 +1,567 @@
+From 672eab9a9facefd401ae82fbf007f8aaf02b690f Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:39:04 +0800
+Subject: [PATCH] backport: Fix/operation failure reporting (#5486)
+
+Upstream-Commit: 09d4678d69938fa1b89a33071d6354a5d7d2b80f
+Upstream-PR: Devolutions/UniGetUI#5486
+Classic-Source-Commit: 672eab9a9facefd401ae82fbf007f8aaf02b690f
+
+---
+ .../OverridenInstallationOptions.cs           |   3 +-
+ .../Helpers/PowerShellPkgOperationHelper.cs   |  52 +++-
+ .../Helpers/WinGetPkgOperationHelper.cs       |   9 +-
+ .../PackageOperationsTests.cs                 |  56 ++++
+ .../PowerShellManagerTests.cs                 | 288 ++++++++++++++++++
+ 5 files changed, 392 insertions(+), 16 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+index 0ef5c946ac1ac5d2b9962d1351e08c83fb16515c..5b7a01178d4bc3f9c77927f3d8411aa3fa60321d 100644
+--- a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
++++ b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+@@ -6,6 +6,7 @@ public struct OverridenInstallationOptions
+     public bool? RunAsAdministrator;
+     public bool PowerShell_DoNotSetScopeParameter = false;
+     public bool PowerShell_AllowClobber = false;
++    public bool PowerShell_UpdateThroughInstall = false;
+     public bool? WinGet_SpecifyVersion = null;
+     public bool Pip_BreakSystemPackages = false;
+     public bool WinGet_DropArchAndScope = false;
+@@ -21,6 +22,6 @@ public struct OverridenInstallationOptions
+ 
+     public override string ToString()
+     {
+-        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};PS_AllowClobber={PowerShell_AllowClobber};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope};WG_UseLocalId={WinGet_UseLocalIdentifier};Cargo_DoNotUseBinstall={Cargo_DoNotUseBinstall};Cargo_CustomInstallPath={Cargo_CustomInstallPathRequested}>";
++        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};PS_AllowClobber={PowerShell_AllowClobber};PS_UpdateThroughInstall={PowerShell_UpdateThroughInstall};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope};WG_UseLocalId={WinGet_UseLocalIdentifier};Cargo_DoNotUseBinstall={Cargo_DoNotUseBinstall};Cargo_CustomInstallPath={Cargo_CustomInstallPathRequested}>";
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
+index 72807ed5141edb8f7fae9230498889a91e0e6526..4ca0946af3402d8718a799fc6811083f9f9e92bc 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
+@@ -25,35 +25,57 @@ internal sealed class PowerShellPkgOperationHelper : BasePkgOperationHelper
+         bool standalone
+     )
+     {
++        bool updatesThroughInstall =
++            operation is OperationType.Update && options.SkipHashCheck;
++        bool usesInstallVerb = operation is OperationType.Install || updatesThroughInstall;
++
+         List<string> parameters =
+         [
+-            operation switch
+-            {
+-                OperationType.Install => Manager.Properties.InstallVerb,
+-                OperationType.Update => Manager.Properties.UpdateVerb,
+-                OperationType.Uninstall => Manager.Properties.UninstallVerb,
+-                _ => throw new InvalidDataException("Invalid package operation"),
+-            },
++            usesInstallVerb
++                ? Manager.Properties.InstallVerb
++                : operation switch
++                {
++                    OperationType.Update => Manager.Properties.UpdateVerb,
++                    OperationType.Uninstall => Manager.Properties.UninstallVerb,
++                    _ => throw new InvalidDataException("Invalid package operation"),
++                },
+         ];
+         parameters.AddRange(["-Name", package.Id, "-Confirm:$false", "-Force"]);
+ 
++        if (!standalone)
++            package.OverridenOptions.PowerShell_UpdateThroughInstall = updatesThroughInstall;
++
++        bool shellInterpreted = standalone || Manager.Status.OperationCallArgs.Count is 0;
++
++        if (updatesThroughInstall && package.Source.Name.Length > 0)
++            parameters.AddRange(
++                [
++                    "-Repository",
++                    shellInterpreted ? QuoteForPowerShell(package.Source.Name) : package.Source.Name,
++                ]
++            );
++
+         if (operation is not OperationType.Uninstall)
+         {
+             if (options.PreRelease)
+                 parameters.Add("-AllowPrerelease");
+ 
+             // Update-Module (PowerShellGet) has no -Scope parameter; only Install-Module accepts it
+-            if (operation is OperationType.Install && !package.OverridenOptions.PowerShell_DoNotSetScopeParameter)
++            if (usesInstallVerb && !package.OverridenOptions.PowerShell_DoNotSetScopeParameter)
+             {
+                 // The scope chosen in the options dialog wins; fall back to the auto-detected install scope
+                 string scope = options.InstallationScope.Length > 0
+                     ? options.InstallationScope
+                     : package.OverridenOptions.Scope ?? "";
+-                parameters.AddRange(["-Scope", scope == PackageScope.Global ? "AllUsers" : "CurrentUser"]);
++
++                if (operation is OperationType.Install || scope.Length > 0)
++                    parameters.AddRange(
++                        ["-Scope", scope == PackageScope.Global ? "AllUsers" : "CurrentUser"]
++                    );
+             }
+         }
+ 
+-        if (operation is OperationType.Install)
++        if (usesInstallVerb)
+         {
+             if (package.OverridenOptions.PowerShell_AllowClobber)
+                 parameters.Add("-AllowClobber");
+@@ -61,7 +83,7 @@ internal sealed class PowerShellPkgOperationHelper : BasePkgOperationHelper
+             if (options.SkipHashCheck)
+                 parameters.Add("-SkipPublisherCheck");
+ 
+-            if (options.Version != "")
++            if (operation is OperationType.Install && options.Version != "")
+                 parameters.AddRange(["-RequiredVersion", options.Version]);
+         }
+ 
+@@ -100,6 +122,9 @@ internal sealed class PowerShellPkgOperationHelper : BasePkgOperationHelper
+         return parameters;
+     }
+ 
++    private static string QuoteForPowerShell(string value) =>
++        $"'{value.Replace("'", "''")}'";
++
+     protected override OperationVeredict _getOperationResult(
+         IPackage package,
+         OperationType operation,
+@@ -109,6 +134,9 @@ internal sealed class PowerShellPkgOperationHelper : BasePkgOperationHelper
+     {
+         string output_string = string.Join("\n", processOutput);
+ 
++        bool routedThroughInstall = package.OverridenOptions.PowerShell_UpdateThroughInstall;
++        package.OverridenOptions.PowerShell_UpdateThroughInstall = false;
++
+         if (
+             package.OverridenOptions.RunAsAdministrator is not true
+             && (
+@@ -132,7 +160,7 @@ internal sealed class PowerShellPkgOperationHelper : BasePkgOperationHelper
+         }
+ 
+         if (
+-            operation is OperationType.Install
++            (operation is OperationType.Install || routedThroughInstall)
+             && output_string.Contains("CommandAlreadyAvailable")
+             && !package.OverridenOptions.PowerShell_AllowClobber
+         )
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index dee2c13b505dcbf56dfa963439399bf409dbb283..489e6b5072d87ece3d5bea103976f0e808917f70 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -3,6 +3,7 @@ using Microsoft.Win32;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.Tools;
++using UniGetUI.PackageEngine.Classes.Manager;
+ using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
+ using UniGetUI.PackageEngine.Classes.Packages.Classes;
+ using UniGetUI.PackageEngine.Enums;
+@@ -229,20 +230,22 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             )
+             {
+                 if (CoreTools.IsAdministrator())
+-                    throw new UnauthorizedAccessException(
++                    throw new OperationPreconditionException(
+                         CoreTools.Translate(
+                             "This package cannot be installed from an elevated context."
+                         )
++                            + " "
+                             + CoreTools.Translate(
+                                 "Please run UniGetUI as a regular user and try again."
+                             )
+                     );
+ 
+                 if (options.RunAsAdministrator)
+-                    throw new UnauthorizedAccessException(
++                    throw new OperationPreconditionException(
+                         CoreTools.Translate(
+                             "This package cannot be installed from an elevated context."
+                         )
++                            + " "
+                             + CoreTools.Translate(
+                                 "Please check the installation options for this package and try again"
+                             )
+@@ -262,7 +265,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         }
+         catch (Exception ex)
+         {
+-            if (ex is UnauthorizedAccessException)
++            if (ex is OperationPreconditionException)
+                 throw;
+ 
+             Logger.Error("Recovered from fatal WinGet exception:");
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+index 5649da86e6427e7343b6882ce12ea0cb70019643..122370589a77f02a4223facd0e232284112f0a76 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+@@ -3,6 +3,7 @@ using System.Reflection;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.Interface.Enums;
++using UniGetUI.PackageEngine.Classes.Manager;
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.Managers.NpmManager;
+@@ -634,4 +635,59 @@ public sealed class PackageOperationsTests
+             return Task.FromResult(new Uri("about:blank"));
+         }
+     }
++    [Fact]
++    public async Task UnmetPreconditionIsReportedWithoutTheInternalErrorStackTrace()
++    {
++        using var operation = new ThrowingStubOperation(
++            new OperationPreconditionException("Run UniGetUI as a regular user and try again.")
++        );
++
++        await operation.MainThread();
++
++        Assert.Equal(OperationStatus.Failed, operation.Status);
++        var lines = operation.GetOutput().Select(line => line.Item1).ToList();
++        Assert.Contains("Run UniGetUI as a regular user and try again.", lines);
++        Assert.DoesNotContain("An internal error occurred:", lines);
++        Assert.DoesNotContain(lines, line => line.Contains("OperationPreconditionException"));
++    }
++
++    [Fact]
++    public async Task AnUnexpectedExceptionStillReportsItsStackTrace()
++    {
++        using var operation = new ThrowingStubOperation(
++            new InvalidOperationException("some unexpected failure")
++        );
++
++        await operation.MainThread();
++
++        Assert.Equal(OperationStatus.Failed, operation.Status);
++        var lines = operation.GetOutput().Select(line => line.Item1).ToList();
++        Assert.Contains(lines, line => line.Contains("InvalidOperationException"));
++        Assert.Contains(lines, line => line.TrimStart().StartsWith("at ", StringComparison.Ordinal));
++    }
++
++    private sealed class ThrowingStubOperation : AbstractOperation
++    {
++        private readonly Exception _exception;
++
++        public ThrowingStubOperation(Exception exception)
++            : base(queue_enabled: false)
++        {
++            _exception = exception;
++            Metadata.Status = "Throwing stub status";
++            Metadata.Title = "Throwing stub title";
++            Metadata.OperationInformation = "Throwing stub info";
++            Metadata.SuccessTitle = "Throwing stub success";
++            Metadata.SuccessMessage = "Throwing stub success";
++            Metadata.FailureTitle = "Throwing stub failure";
++            Metadata.FailureMessage = "Throwing stub failure";
++        }
++
++        protected override void ApplyRetryAction(string retryMode) { }
++
++        protected override Task<OperationVeredict> PerformOperation() => throw _exception;
++
++        public override Task<Uri> GetOperationIcon() => Task.FromResult(new Uri("about:blank"));
++    }
++
+ }
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+index c0c0ddb6db8b0ddebc1753b47771b11d2471c20e..7c1568ded4eb727fd05cd2acf6089bdc4449b032 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+@@ -168,6 +168,294 @@ public sealed class PowerShellManagerTests
+         Assert.DoesNotContain("-Scope", parameters);
+     }
+ 
++    [Fact]
++    public void GetParameters_UpdateKeepsUpdateModuleWhenIntegrityChecksAreNotSkipped()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Update
++        );
++
++        Assert.Contains("Update-Module", parameters);
++        Assert.DoesNotContain("Install-Module", parameters);
++        Assert.DoesNotContain("-SkipPublisherCheck", parameters);
++    }
++
++    [Fact]
++    public void GetParameters_UpdateRunsThroughInstallModuleWhenIntegrityChecksAreSkipped()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        Assert.Contains("Install-Module", parameters);
++        Assert.DoesNotContain("Update-Module", parameters);
++        Assert.Contains("-SkipPublisherCheck", parameters);
++        Assert.Contains("-Name", parameters);
++        Assert.Contains(package.Id, parameters);
++    }
++
++    [Fact]
++    public void GetParameters_UpdateThroughInstallModuleCarriesTheSelectedScope()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions
++        {
++            SkipHashCheck = true,
++            InstallationScope = PackageScope.Machine,
++        };
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        Assert.Contains("-Scope", parameters);
++        Assert.Contains("AllUsers", parameters);
++    }
++
++    [Fact]
++    public void GetParameters_UpdateThroughInstallModuleOmitsScopeWhenNoneIsKnown()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        Assert.DoesNotContain("-Scope", parameters);
++        Assert.DoesNotContain("CurrentUser", parameters);
++    }
++
++    [Fact]
++    public void GetParameters_UpdateThroughInstallModuleKeepsTheInstalledRepository()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        int repositoryIndex = parameters.ToList().IndexOf("-Repository");
++        Assert.NotEqual(-1, repositoryIndex);
++        Assert.Contains(package.Source.Name, parameters[repositoryIndex + 1]);
++    }
++
++    [Fact]
++    public void GetStandaloneParameters_UpdateThroughInstallModuleQuotesTheRepository()
++    {
++        var manager = new PowerShell();
++        var package = Assert.Single(
++            PowerShell.ParseInstalledPackages(
++                ["Devolutions.PowerShell\t1.0.0\tInternal Modules"],
++                manager
++            )
++        );
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        var parameters = manager.OperationHelper.GetStandaloneParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        int repositoryIndex = parameters.ToList().IndexOf("-Repository");
++        Assert.NotEqual(-1, repositoryIndex);
++        Assert.Equal("'Internal Modules'", parameters[repositoryIndex + 1]);
++    }
++
++    [Fact]
++    public void GetParameters_UpdateThroughInstallModuleKeepsTheRepositoryRawForTheArgumentVector()
++    {
++        var manager = new PowerShell();
++        manager.Status.OperationCallArgs = LauncherVector;
++
++        var package = Assert.Single(
++            PowerShell.ParseInstalledPackages(
++                ["Devolutions.PowerShell\t1.0.0\tInternal Modules"],
++                manager
++            )
++        );
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        int repositoryIndex = parameters.ToList().IndexOf("-Repository");
++        Assert.NotEqual(-1, repositoryIndex);
++        Assert.Equal("Internal Modules", parameters[repositoryIndex + 1]);
++    }
++
++    private static readonly string[] LauncherVector =
++    [
++        "-NoProfile",
++        "-ExecutionPolicy",
++        "Bypass",
++        "-File",
++        @"C:\App\Assets\Utilities\unigetui_ps_operation.ps1",
++        "tls12",
++    ];
++
++    [Fact]
++    public void GetStandaloneParameters_DoesNotRecordTheRoutingDecisionOnThePackage()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        manager.OperationHelper.GetStandaloneParameters(package, options, OperationType.Update);
++
++        Assert.False(package.OverridenOptions.PowerShell_UpdateThroughInstall);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            ClobberFailureOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.Failure, veredict);
++        Assert.False(package.OverridenOptions.PowerShell_AllowClobber);
++    }
++
++    [Fact]
++    public void GetResult_ClearsTheRoutingDecisionSoItCannotLeakIntoALaterOperation()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++        Assert.True(package.OverridenOptions.PowerShell_UpdateThroughInstall);
++
++        manager.OperationHelper.GetResult(package, OperationType.Update, ["done"], 0);
++
++        Assert.False(package.OverridenOptions.PowerShell_UpdateThroughInstall);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            ClobberFailureOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.Failure, veredict);
++    }
++
++    [Fact]
++    public void GetStandaloneParameters_UpdateThroughInstallModuleEscapesAQuotedRepository()
++    {
++        var manager = new PowerShell();
++        var package = Assert.Single(
++            PowerShell.ParseInstalledPackages(
++                ["Devolutions.PowerShell\t1.0.0\tBob's Modules"],
++                manager
++            )
++        );
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        var parameters = manager.OperationHelper.GetStandaloneParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        int repositoryIndex = parameters.ToList().IndexOf("-Repository");
++        Assert.NotEqual(-1, repositoryIndex);
++        Assert.Equal("'Bob''s Modules'", parameters[repositoryIndex + 1]);
++    }
++
++    [Fact]
++    public void GetParameters_UpdateThroughInstallModuleIgnoresAPinnedVersion()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { SkipHashCheck = true, Version = "1.0.0" };
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        Assert.DoesNotContain("-RequiredVersion", parameters);
++        Assert.DoesNotContain("1.0.0", parameters);
++    }
++
++    [Fact]
++    public void GetResult_RetriesWithAllowClobberOnAnUpdateRoutedThroughInstallModule()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var options = new InstallOptions { SkipHashCheck = true };
++        manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            ClobberFailureOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.AutoRetry, veredict);
++        Assert.True(package.OverridenOptions.PowerShell_AllowClobber);
++
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            options,
++            OperationType.Update
++        );
++
++        Assert.Contains("-AllowClobber", parameters);
++    }
++
++    [Fact]
++    public void GetResult_DoesNotRetryWithAllowClobberOnAPlainUpdate()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Update
++        );
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            ClobberFailureOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.Failure, veredict);
++        Assert.False(package.OverridenOptions.PowerShell_AllowClobber);
++    }
++
+     [Theory]
+     [InlineData(OperationType.Install)]
+     [InlineData(OperationType.Update)]
+-- 
+2.56.0
+

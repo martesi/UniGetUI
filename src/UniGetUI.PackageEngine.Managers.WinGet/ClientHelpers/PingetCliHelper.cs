@@ -65,7 +65,10 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
                 match.AvailableVersion!,
                 GetSource(match),
                 Manager
-            );
+            )
+            {
+                InstalledVersionIsUnverified = versionUnknown,
+            };
 
             // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
             if (versionUnknown || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
@@ -99,16 +102,46 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
                     GetSource(match),
                     Manager
                 )
+                {
+                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
+                        match.InstalledVersion
+                    ),
+                }
             )
             .ToArray();
     }
 
     public IReadOnlyList<Package> FindPackages_UnSafe(string query)
     {
-        SearchResponse result = RunJson<SearchResponse>(
-            LoggableTaskType.FindPackages,
-            $"search {Quote(query)} --output json"
-        );
+        if (query.Length == 0)
+        {
+            return Manager
+                .SourcesHelper.GetSources()
+                .SelectMany(SearchSourceForBrowse)
+                .ToArray();
+        }
+
+        return SearchPackages($"search {Quote(query)} --output json");
+    }
+
+    private Package[] SearchSourceForBrowse(IManagerSource source)
+    {
+        try
+        {
+            return SearchPackages(
+                $"search {Quote(string.Empty)} --source {Quote(source.Name)} --count {SearchLimits.MaxEmptyQueryResultsPerSource} --output json"
+            );
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Could not list the packages of the WinGet source {source.Name}: {ex.Message}");
+            return [];
+        }
+    }
+
+    private Package[] SearchPackages(string arguments)
+    {
+        SearchResponse result = RunJson<SearchResponse>(LoggableTaskType.FindPackages, arguments);
 
         return result
             .Matches.Select(match =>
@@ -208,12 +241,10 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
 
         if (CoreTools.IsAdministrator())
         {
-            string winGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string winGetTemp = AppPaths.RedirectTempToElevatedDirectory(process.StartInfo);
             logger.AddToStdErr(
                 $"[WARN] Redirecting %TEMP% folder to {winGetTemp}, since UniGetUI was run as admin"
             );
-            process.StartInfo.Environment["TEMP"] = winGetTemp;
-            process.StartInfo.Environment["TMP"] = winGetTemp;
         }
 
         process.Start();

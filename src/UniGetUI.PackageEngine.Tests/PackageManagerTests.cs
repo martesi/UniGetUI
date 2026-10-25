@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.SettingsEngine.SecureSettings;
@@ -80,6 +81,7 @@ public sealed class PackageManagerTests : IDisposable
         var manager = CreateManager();
         manager.ExecutableFound = false;
         manager.ExecutablePath = CreateExecutable("missing-manager.exe");
+        Settings.SetDictionaryItem<string, bool>(Settings.K.DisabledManagers, manager.Name, false);
 
         manager.Initialize();
 
@@ -91,6 +93,66 @@ public sealed class PackageManagerTests : IDisposable
             CoreTools.Translate("{pm} was not found!").Replace("{pm}", manager.DisplayName).Trim('!'),
             manager.Status.Version
         );
+    }
+
+    [Fact]
+    public void FirstInitializeDisablesManagerWhoseExecutableIsMissing()
+    {
+        var manager = CreateManager();
+        manager.ExecutableFound = false;
+        manager.ExecutablePath = CreateExecutable("never-installed-manager.exe");
+
+        manager.Initialize();
+
+        Assert.False(manager.IsEnabled());
+        Assert.False(manager.IsReady());
+        Assert.False(manager.Status.Found);
+        Assert.True(Settings.GetDictionaryItem<string, bool>(Settings.K.DisabledManagers, manager.Name));
+        Assert.Equal(
+            CoreTools.Translate("{0} is disabled", manager.DisplayName),
+            manager.Status.Version
+        );
+    }
+
+    [Fact]
+    public void FirstInitializeKeepsFoundManagerEnabledAfterItsExecutableDisappears()
+    {
+        var manager = CreateManager();
+        manager.ExecutablePath = CreateExecutable("installed-manager.exe");
+
+        manager.Initialize();
+
+        Assert.True(manager.IsReady());
+        Assert.True(Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, manager.Name));
+        Assert.False(Settings.GetDictionaryItem<string, bool>(Settings.K.DisabledManagers, manager.Name));
+
+        manager.ExecutableFound = false;
+        manager.Initialize();
+
+        Assert.True(manager.IsEnabled());
+        Assert.False(manager.IsReady());
+        Assert.False(manager.Status.Found);
+    }
+
+    [Fact]
+    public void FirstInitializeDisablesOnlyMissingManagersWhenInitializedConcurrently()
+    {
+        var managers = Enumerable.Range(0, 16).Select(i =>
+        {
+            var manager = CreateManager();
+            manager.ExecutableFound = i % 2 == 0;
+            manager.ExecutablePath = CreateExecutable($"{manager.Name}.exe");
+            return manager;
+        }).ToList();
+
+        Parallel.ForEach(managers, manager => manager.Initialize());
+
+        foreach (var manager in managers)
+        {
+            Assert.True(Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, manager.Name));
+            Assert.Equal(manager.ExecutableFound, manager.IsEnabled());
+            Assert.Equal(manager.ExecutableFound, manager.IsReady());
+        }
     }
 
     [Fact]
@@ -107,6 +169,23 @@ public sealed class PackageManagerTests : IDisposable
         Assert.True(manager.Status.Found);
         Assert.Equal(manager.ExecutablePath, manager.Status.ExecutablePath);
         Assert.Equal("9.9.9-test", manager.Status.Version);
+    }
+
+    [Fact]
+    public void InitializeEnabledManagerThatCannotBeStartedIsFoundButNotReady()
+    {
+        var manager = CreateManager();
+        manager.ExecutablePath = CreateExecutable("unstartable-manager.exe");
+        manager.VersionLoadFailure = new Win32Exception(
+            unchecked((int)0xC0EA0001),
+            "No applicable app licenses found"
+        );
+
+        manager.Initialize();
+
+        Assert.True(manager.IsEnabled());
+        Assert.True(manager.Status.Found);
+        Assert.False(manager.IsReady());
     }
 
     [Fact]
@@ -266,7 +345,7 @@ public sealed class PackageManagerTests : IDisposable
     }
 
     [Fact]
-    public void GetAvailableUpdatesRetriesOnceAndRefreshesIndexesPerAttempt()
+    public void GetAvailableUpdatesRetriesOnceWithoutRefreshingIndexesAgain()
     {
         var manager = CreateReadyManager();
         var attempts = 0;
@@ -283,7 +362,7 @@ public sealed class PackageManagerTests : IDisposable
         var package = Assert.Single(packages);
         Assert.Equal("Contoso.Update", package.Id);
         Assert.Equal(1, manager.AttemptFastRepairCalls);
-        Assert.Equal(2, manager.RefreshPackageIndexesCalls);
+        Assert.Equal(1, manager.RefreshPackageIndexesCalls);
     }
 
     [Fact]

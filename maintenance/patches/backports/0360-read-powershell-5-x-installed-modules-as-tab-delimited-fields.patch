@@ -1,0 +1,212 @@
+From d406ad0ecef42f630ef03fd06f30d25599f63cdb Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:36:43 +0800
+Subject: [PATCH] backport: Read PowerShell 5.x installed modules as
+ tab-delimited fields (#5453)
+
+Upstream-Commit: 857e0368e62de1de3d00136255de947c0e8ee78f
+Upstream-PR: Devolutions/UniGetUI#5453
+Classic-Source-Commit: d406ad0ecef42f630ef03fd06f30d25599f63cdb
+
+---
+ .../PowerShell.cs                             | 31 ++++------
+ .../PackageOperationCommandInjectionTests.cs  |  6 +-
+ .../PowerShellManagerTests.cs                 | 60 ++++++++++++-------
+ .../ShellManagerLaunchModeTests.cs            |  6 +-
+ 4 files changed, 52 insertions(+), 51 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+index c6e4c6a668856faca447e364babcef373fe5f84e..63c3b46c556752e0e6d704c0eaf6f0fa97badc73 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+@@ -1,6 +1,5 @@
+ using System.Diagnostics;
+ using System.Text;
+-using System.Text.RegularExpressions;
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.Tools;
+@@ -91,7 +90,9 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+                 StartInfo = new ProcessStartInfo
+                 {
+                     FileName = Status.ExecutablePath,
+-                    Arguments = Status.ExecutableCallArgs + " Get-InstalledModule",
++                    Arguments =
++                        Status.ExecutableCallArgs
++                        + " \"Get-InstalledModule | ForEach-Object { $_.Name + [char]9 + $_.Version + [char]9 + $_.Repository }\"",
+                     RedirectStandardOutput = true,
+                     RedirectStandardError = true,
+                     RedirectStandardInput = true,
+@@ -187,36 +188,24 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+         )
+         {
+             List<Package> packages = [];
+-            bool dashesPassed = false;
+ 
+-            foreach (string rawLine in outputLines)
++            foreach (string line in outputLines)
+             {
+-                if (!dashesPassed)
+-                {
+-                    if (rawLine.Contains("-----"))
+-                    {
+-                        dashesPassed = true;
+-                    }
+-
+-                    continue;
+-                }
+-
+-                string[] elements = Regex.Replace(rawLine, " {2,}", " ").Split(' ');
++                string[] elements = line.Split('\t');
+                 if (elements.Length < 3)
+-                {
+                     continue;
+-                }
+ 
+                 for (int i = 0; i < elements.Length; i++)
+-                {
+                     elements[i] = elements[i].Trim();
+-                }
++
++                if (elements[0].Length == 0)
++                    continue;
+ 
+                 packages.Add(
+                     new Package(
+-                        CoreTools.FormatAsName(elements[1]),
+-                        elements[1],
++                        CoreTools.FormatAsName(elements[0]),
+                         elements[0],
++                        elements[1],
+                         manager.SourcesHelper.Factory.GetSourceOrDefault(elements[2]),
+                         manager
+                     )
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageOperationCommandInjectionTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageOperationCommandInjectionTests.cs
+index 7227e86ae2e933a282448745677045643e1dd28b..c2bc93944dc7cca5880b72ed8b0ec9762a672dfa 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageOperationCommandInjectionTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageOperationCommandInjectionTests.cs
+@@ -18,11 +18,7 @@ public sealed class PackageOperationCommandInjectionTests
+ 
+     private static IPackage WinPowerShellPackage(PowerShell manager, string id = "Devolutions.PowerShell")
+         => Assert.Single(PowerShell.ParseInstalledPackages(
+-            [
+-                "Version Name Repository Description",
+-                "------- ---- ---------- -----------",
+-                $"1.0.0 {id} PSGallery x",
+-            ],
++            [$"{id}\t1.0.0\tPSGallery"],
+             manager));
+ 
+     private static IPackage PowerShell7Package(PowerShell7 manager, string id = "Devolutions.PowerShell")
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+index 9514dc3a21aabea218ca575cbfba26eb92a4bd6a..1ea530087ccf0573b8a2194894b934d73edb3ce0 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+@@ -48,15 +48,13 @@ public sealed class PowerShellManagerTests
+     }
+ 
+     [Fact]
+-    public void ParseInstalledPackages_BuildsPackagesFromModuleTable()
++    public void ParseInstalledPackages_BuildsPackagesFromModuleList()
+     {
+         var manager = new PowerShell();
+         var packages = PowerShell.ParseInstalledPackages(
+             [
+-                "Version Name Repository Description",
+-                "------- ---- ---------- -----------",
+-                "5.5.0 Pester PSGallery Test framework",
+-                "2.2.5 PSReadLine PSGallery Command line editing",
++                "Pester\t5.5.0\tPSGallery",
++                "PSReadLine\t2.2.5\tPSGallery",
+             ],
+             manager
+         );
+@@ -86,10 +84,8 @@ public sealed class PowerShellManagerTests
+         var package = Assert.Single(
+             PowerShell.ParseInstalledPackages(
+                 [
+-                    "Version Name Repository Description",
+-                    "------- ---- ---------- -----------",
+                     "not-enough-columns",
+-                    "5.5.0 Pester PSGallery Test framework",
++                    "Pester\t5.5.0\tPSGallery",
+                 ],
+                 manager
+             )
+@@ -98,20 +94,44 @@ public sealed class PowerShellManagerTests
+         Assert.Equal("Pester", package.Id);
+     }
+ 
+-    private static UniGetUI.PackageEngine.Interfaces.IPackage BuildInstalledPackage(
+-        PowerShell manager
+-    ) =>
+-        Assert.Single(
+-            PowerShell.ParseInstalledPackages(
+-                [
+-                    "Version Name Repository Description",
+-                    "------- ---- ---------- -----------",
+-                    "1.0.0 Devolutions.PowerShell PSGallery x",
+-                ],
+-                manager
+-            )
++    [Fact]
++    public void ParseInstalledPackages_PreservesLongNamesAndVersionsVerbatim()
++    {
++        var manager = new PowerShell();
++
++        var packages = PowerShell.ParseInstalledPackages(
++            [
++                "VMware.PowerCLI.VCenter.Types.ApplianceService\t12.6.0.19600125\tPSGallery",
++                "Microsoft.Graph.Beta.DeviceManagement.Administration\t2.34.0\tPSGallery",
++            ],
++            manager
+         );
+ 
++        Assert.Collection(
++            packages,
++            package =>
++            {
++                Assert.Equal("VMware.PowerCLI.VCenter.Types.ApplianceService", package.Id);
++                Assert.Equal("12.6.0.19600125", package.VersionString);
++            },
++            package =>
++            {
++                Assert.Equal(
++                    "Microsoft.Graph.Beta.DeviceManagement.Administration",
++                    package.Id
++                );
++                Assert.Equal("2.34.0", package.VersionString);
++            }
++        );
++    }
++
++    private static UniGetUI.PackageEngine.Interfaces.IPackage BuildInstalledPackage(PowerShell manager)
++        => Assert.Single(PowerShell.ParseInstalledPackages(
++            [
++                "Devolutions.PowerShell\t1.0.0\tPSGallery",
++            ],
++            manager));
++
+     [Fact]
+     public void GetParameters_InstallRespectsExplicitScope()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/ShellManagerLaunchModeTests.cs b/src/UniGetUI.PackageEngine.Tests/ShellManagerLaunchModeTests.cs
+index 3561647af13d536b1331d2ebbc28c87a04caea45..95efb5df3a36155489c25059322e4039d221ee5a 100644
+--- a/src/UniGetUI.PackageEngine.Tests/ShellManagerLaunchModeTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/ShellManagerLaunchModeTests.cs
+@@ -31,11 +31,7 @@ public sealed class ShellManagerLaunchModeTests
+     private static IPackage PowerShellPackage(PowerShell manager) =>
+         Assert.Single(
+             PowerShell.ParseInstalledPackages(
+-                [
+-                    "Version Name Repository Description",
+-                    "------- ---- ---------- -----------",
+-                    "1.0.0 Devolutions.PowerShell PSGallery x",
+-                ],
++                ["Devolutions.PowerShell\t1.0.0\tPSGallery"],
+                 manager
+             )
+         );
+-- 
+2.56.0
+

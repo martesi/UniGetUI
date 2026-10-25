@@ -1,0 +1,241 @@
+From 67a980a165231eee16e717f0a861bd00f0a86c5f Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:46:20 +0800
+Subject: [PATCH] backport: Disable package managers whose tool is missing on
+ first run (#5573)
+
+Upstream-Commit: 9a6998062ef2871ddeb46018a4faae0d5dbb8c40
+Upstream-PR: Devolutions/UniGetUI#5573
+Classic-Source-Commit: 67a980a165231eee16e717f0a861bd00f0a86c5f
+
+---
+ .../SettingsTest.cs                           | 45 ++++++++++++++
+ .../InternalsVisibleTo.cs                     |  3 +
+ .../SettingsEngine_Dictionaries.cs            | 12 +++-
+ .../Manager/PackageManager.cs                 | 24 ++++++++
+ .../PackageManagerTests.cs                    | 61 +++++++++++++++++++
+ 5 files changed, 143 insertions(+), 2 deletions(-)
+ create mode 100644 src/UniGetUI.Core.Settings/InternalsVisibleTo.cs
+
+diff --git a/src/UniGetUI.Core.Settings.Tests/SettingsTest.cs b/src/UniGetUI.Core.Settings.Tests/SettingsTest.cs
+index 6ca45f8ebea045af3843802b00235898b0cad357..0354bcb5df9293857ba974cc7764665dce562546 100644
+--- a/src/UniGetUI.Core.Settings.Tests/SettingsTest.cs
++++ b/src/UniGetUI.Core.Settings.Tests/SettingsTest.cs
+@@ -549,6 +549,51 @@ namespace UniGetUI.Core.SettingsEngine.Tests
+             );
+         }
+ 
++        [Fact]
++        public void ADictionaryLoadPublishedAfterAWriteKeepsTheWrite()
++        {
++            Settings.ResetSettings();
++            string file = Path.Join(
++                CoreData.UniGetUIUserConfigurationDirectory,
++                $"{Settings.ResolveKey(Settings.K.DisabledManagers)}.json"
++            );
++            var staleLoad = new Dictionary<object, object?> { ["Stale"] = true };
++
++            Settings.SetDictionary(
++                Settings.K.DisabledManagers,
++                new Dictionary<string, bool> { ["Written"] = true }
++            );
++
++            Assert.False(Settings._publishLoadedDictionary(Settings.K.DisabledManagers, staleLoad));
++            Assert.True(
++                Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, "Written")
++            );
++            Assert.False(
++                Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, "Stale")
++            );
++
++            Settings.SetDictionaryItem(Settings.K.DisabledManagers, "Other", false);
++            string onDisk = File.ReadAllText(file);
++            Assert.Contains("Written", onDisk);
++            Assert.DoesNotContain("Stale", onDisk);
++
++            Settings.ResetSettings();
++        }
++
++        [Fact]
++        public void ADictionaryLoadIntoAColdCacheIsPublished()
++        {
++            Settings.ResetSettings();
++            var load = new Dictionary<object, object?> { ["Loaded"] = true };
++
++            Assert.True(Settings._publishLoadedDictionary(Settings.K.DisabledManagers, load));
++            Assert.True(
++                Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, "Loaded")
++            );
++
++            Settings.ResetSettings();
++        }
++
+         [Fact]
+         public static void EnsureAllKeysResolve()
+         {
+diff --git a/src/UniGetUI.Core.Settings/InternalsVisibleTo.cs b/src/UniGetUI.Core.Settings/InternalsVisibleTo.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f92abd5c2279f17ed114858a11008ef8b5af0cef
+--- /dev/null
++++ b/src/UniGetUI.Core.Settings/InternalsVisibleTo.cs
+@@ -0,0 +1,3 @@
++using System.Runtime.CompilerServices;
++
++[assembly: InternalsVisibleTo("UniGetUI.Core.Settings.Tests")]
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Dictionaries.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Dictionaries.cs
+index 19701e180fa7bb5df1cc7c224d6ab03938b96afc..a6b0935136f26823d6ea13d476dec386a8d7835a 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Dictionaries.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Dictionaries.cs
+@@ -71,11 +71,14 @@ namespace UniGetUI.Core.SettingsEngine
+                     }
+                 }
+ 
+-                _dictionarySettings[key] = value.ToDictionary(
++                Dictionary<object, object?> loaded = value.ToDictionary(
+                     kvp => (object)kvp.Key,
+                     kvp => (object?)kvp.Value
+                 );
+-                return value;
++                if (_publishLoadedDictionary(key, loaded))
++                    return value;
++
++                return _getDictionary<KeyT, ValueT>(key);
+             }
+             catch (Exception ex)
+             {
+@@ -85,6 +88,11 @@ namespace UniGetUI.Core.SettingsEngine
+             }
+         }
+ 
++        internal static bool _publishLoadedDictionary(K key, Dictionary<object, object?> loaded)
++        {
++            return ReferenceEquals(_dictionarySettings.GetOrAdd(key, loaded), loaded);
++        }
++
+         // Returns an empty dictionary if the setting doesn't exist and null if the types are invalid
+         public static IReadOnlyDictionary<KeyT, ValueT?>? GetDictionary<KeyT, ValueT>(K settingsKey)
+             where KeyT : notnull
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+index 36318c02b393de1e7040554dec84d8c7c3b17510..5abea438dcb39c3edafe38c352f368d36e9092bb 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+@@ -118,6 +118,16 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+                     out string path,
+                     out string callArguments
+                 );
++
++                if (_recordDefaultEnabledState(found))
++                {
++                    Status = new() { Version = CoreTools.Translate("{0} is disabled", DisplayName) };
++                    Logger.ImportantInfo(
++                        $"{Name} was not found on the system and has been disabled by default"
++                    );
++                    return;
++                }
++
+                 Status = new ManagerStatus();
+                 Status.Found = found;
+                 Status.ExecutablePath = path;
+@@ -305,6 +315,20 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+             return !Settings.GetDictionaryItem<string, bool>(Settings.K.DisabledManagers, Name);
+         }
+ 
++        private static readonly object _defaultEnabledStateLock = new();
++
++        private bool _recordDefaultEnabledState(bool found)
++        {
++            lock (_defaultEnabledStateLock)
++            {
++                if (Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, Name))
++                    return false;
++
++                Settings.SetDictionaryItem(Settings.K.DisabledManagers, Name, !found);
++                return !found;
++            }
++        }
++
+         /// <summary>
+         /// Returns true if the manager is enabled and available (the required executable files were found). Returns false otherwise
+         /// </summary>
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageManagerTests.cs
+index 129471f010f0fdb3f9d33c15ec721262202068fb..d0d60a054b3be13bfc17018ed417500ebd4bacca 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageManagerTests.cs
+@@ -81,6 +81,7 @@ public sealed class PackageManagerTests : IDisposable
+         var manager = CreateManager();
+         manager.ExecutableFound = false;
+         manager.ExecutablePath = CreateExecutable("missing-manager.exe");
++        Settings.SetDictionaryItem<string, bool>(Settings.K.DisabledManagers, manager.Name, false);
+ 
+         manager.Initialize();
+ 
+@@ -94,6 +95,66 @@ public sealed class PackageManagerTests : IDisposable
+         );
+     }
+ 
++    [Fact]
++    public void FirstInitializeDisablesManagerWhoseExecutableIsMissing()
++    {
++        var manager = CreateManager();
++        manager.ExecutableFound = false;
++        manager.ExecutablePath = CreateExecutable("never-installed-manager.exe");
++
++        manager.Initialize();
++
++        Assert.False(manager.IsEnabled());
++        Assert.False(manager.IsReady());
++        Assert.False(manager.Status.Found);
++        Assert.True(Settings.GetDictionaryItem<string, bool>(Settings.K.DisabledManagers, manager.Name));
++        Assert.Equal(
++            CoreTools.Translate("{0} is disabled", manager.DisplayName),
++            manager.Status.Version
++        );
++    }
++
++    [Fact]
++    public void FirstInitializeKeepsFoundManagerEnabledAfterItsExecutableDisappears()
++    {
++        var manager = CreateManager();
++        manager.ExecutablePath = CreateExecutable("installed-manager.exe");
++
++        manager.Initialize();
++
++        Assert.True(manager.IsReady());
++        Assert.True(Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, manager.Name));
++        Assert.False(Settings.GetDictionaryItem<string, bool>(Settings.K.DisabledManagers, manager.Name));
++
++        manager.ExecutableFound = false;
++        manager.Initialize();
++
++        Assert.True(manager.IsEnabled());
++        Assert.False(manager.IsReady());
++        Assert.False(manager.Status.Found);
++    }
++
++    [Fact]
++    public void FirstInitializeDisablesOnlyMissingManagersWhenInitializedConcurrently()
++    {
++        var managers = Enumerable.Range(0, 16).Select(i =>
++        {
++            var manager = CreateManager();
++            manager.ExecutableFound = i % 2 == 0;
++            manager.ExecutablePath = CreateExecutable($"{manager.Name}.exe");
++            return manager;
++        }).ToList();
++
++        Parallel.ForEach(managers, manager => manager.Initialize());
++
++        foreach (var manager in managers)
++        {
++            Assert.True(Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, manager.Name));
++            Assert.Equal(manager.ExecutableFound, manager.IsEnabled());
++            Assert.Equal(manager.ExecutableFound, manager.IsReady());
++        }
++    }
++
+     [Fact]
+     public void InitializeEnabledManagerWithExecutableBecomesReady()
+     {
+-- 
+2.56.0
+

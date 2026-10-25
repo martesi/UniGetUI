@@ -3,8 +3,11 @@ using System.Reflection;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
+using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.Managers.NpmManager;
+using UniGetUI.PackageEngine.Managers.PipManager;
 using UniGetUI.PackageEngine.Operations;
 using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.PackageLoader;
@@ -133,6 +136,233 @@ public sealed class PackageOperationsTests
         Assert.Contains("1.0.0 -> 3.0.0", operation.Metadata.OperationInformation);
     }
 
+    // UninstallPreviousVersionsOnUpdate is the one destructive consumer of the per-manager
+    // version comparison: it queues every installed copy it considers superseded for removal.
+    // On a SemVer registry the pre-release IS superseded by its stable release and must be
+    // cleaned up, which the shared numeric comparison could never see.
+    [Fact]
+    public async Task UpdateOperationQueuesASupersededPreReleaseForUninstallOnSemVerManagers()
+    {
+        var manager = new Npm();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("contoso-tool")
+            .WithVersion("2.0.0-rc1")
+            .WithNewVersion("2.0.0")
+            .Build();
+        InitializeLoaders();
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("contoso-tool")
+                .WithVersion("2.0.0-rc1")
+                .Build()
+        );
+
+        using var operation = new UpdatePackageOperation(
+            package,
+            new InstallOptions { UninstallPreviousVersionsOnUpdate = true }
+        );
+
+        var inner = Assert.Single(GetInnerOperations(operation, "PostOperations"));
+        var uninstall = Assert.IsType<UninstallPackageOperation>(inner.Operation);
+        Assert.Equal("2.0.0-rc1", uninstall.Package.VersionString);
+    }
+
+    // The mirror image, and the reason this had to be per-manager: on PyPI a bare trailing
+    // dash-number is an implicit POST-release, so "1.0.0-1" is NEWER than "1.0.0" and must
+    // never be queued for removal when updating onto it.
+    [Fact]
+    public async Task UpdateOperationLeavesANewerPostReleaseInstalledOnPip()
+    {
+        var manager = new Pip();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("contoso-tool")
+            .WithVersion("0.9.0")
+            .WithNewVersion("1.0.0")
+            .Build();
+        InitializeLoaders();
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("contoso-tool")
+                .WithVersion("1.0.0-1")
+                .Build()
+        );
+
+        using var operation = new UpdatePackageOperation(
+            package,
+            new InstallOptions { UninstallPreviousVersionsOnUpdate = true }
+        );
+
+        Assert.Empty(GetInnerOperations(operation, "PostOperations"));
+    }
+
+    // Pins pre-existing behaviour rather than endorsing it: when an installed version cannot be
+    // parsed at all, it is still treated as superseded and queued for removal. Left as-is
+    // deliberately - changing what a destructive operation does to unparseable input belongs in
+    // its own change, not in a version-comparison fix.
+    [Fact]
+    public async Task UpdateOperationStillQueuesAnUnparseableInstalledVersionForUninstall()
+    {
+        var manager = CreateManager();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("1.0.0")
+            .WithNewVersion("3.0.0")
+            .Build();
+        InitializeLoaders();
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("Contoso.Tool")
+                .WithVersion("10c8e557")
+                .Build()
+        );
+
+        using var operation = new UpdatePackageOperation(
+            package,
+            new InstallOptions { UninstallPreviousVersionsOnUpdate = true }
+        );
+
+        var inner = Assert.Single(GetInnerOperations(operation, "PostOperations"));
+        var uninstall = Assert.IsType<UninstallPackageOperation>(inner.Operation);
+        Assert.Equal("10c8e557", uninstall.Package.VersionString);
+    }
+
+    [Fact]
+    public async Task UpdateOperationOnlyQueuesPreviousVersionsFromTheSameScope()
+    {
+        var manager = CreateManager();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("2.0.0")
+            .WithNewVersion("3.0.0")
+            .WithOptions(new OverridenInstallationOptions(PackageScope.User))
+            .Build();
+        InitializeLoaders();
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("Contoso.Tool")
+                .WithVersion("1.0.0")
+                .WithOptions(new OverridenInstallationOptions(PackageScope.Machine))
+                .Build()
+        );
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("Contoso.Tool")
+                .WithVersion("1.5.0")
+                .WithOptions(new OverridenInstallationOptions(PackageScope.User))
+                .Build()
+        );
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("Contoso.Tool")
+                .WithVersion("1.7.0")
+                .Build()
+        );
+
+        using var operation = new UpdatePackageOperation(
+            package,
+            new InstallOptions { UninstallPreviousVersionsOnUpdate = true }
+        );
+
+        var uninstalled = GetInnerOperations(operation, "PostOperations")
+            .Select(inner => Assert.IsType<UninstallPackageOperation>(inner.Operation).Package.VersionString)
+            .Order()
+            .ToArray();
+        Assert.Equal(["1.5.0", "1.7.0"], uninstalled);
+    }
+
+    [Fact]
+    public async Task UpdateOperationQueuesPreviousVersionsFromTheScopeChosenForTheUpdate()
+    {
+        var manager = CreateManager();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("2.0.0")
+            .WithNewVersion("3.0.0")
+            .WithOptions(new OverridenInstallationOptions(PackageScope.User))
+            .Build();
+        InitializeLoaders();
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("Contoso.Tool")
+                .WithVersion("1.0.0")
+                .WithOptions(new OverridenInstallationOptions(PackageScope.Machine))
+                .Build()
+        );
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("Contoso.Tool")
+                .WithVersion("1.5.0")
+                .WithOptions(new OverridenInstallationOptions(PackageScope.User))
+                .Build()
+        );
+
+        using var operation = new UpdatePackageOperation(
+            package,
+            new InstallOptions
+            {
+                UninstallPreviousVersionsOnUpdate = true,
+                InstallationScope = PackageScope.Machine,
+            }
+        );
+
+        var inner = Assert.Single(GetInnerOperations(operation, "PostOperations"));
+        var uninstall = Assert.IsType<UninstallPackageOperation>(inner.Operation);
+        Assert.Equal("1.0.0", uninstall.Package.VersionString);
+    }
+
+    [Fact]
+    public async Task UpdateOperationWithoutAScopeQueuesPreviousVersionsFromEveryScope()
+    {
+        var manager = CreateManager();
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("2.0.0")
+            .WithNewVersion("3.0.0")
+            .Build();
+        InitializeLoaders();
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("Contoso.Tool")
+                .WithVersion("1.0.0")
+                .WithOptions(new OverridenInstallationOptions(PackageScope.Machine))
+                .Build()
+        );
+        await InstalledPackagesLoader.Instance.AddForeign(
+            new PackageBuilder()
+                .WithManager(manager)
+                .WithId("Contoso.Tool")
+                .WithVersion("1.5.0")
+                .WithOptions(new OverridenInstallationOptions(PackageScope.User))
+                .Build()
+        );
+
+        using var operation = new UpdatePackageOperation(
+            package,
+            new InstallOptions { UninstallPreviousVersionsOnUpdate = true }
+        );
+
+        var uninstalled = GetInnerOperations(operation, "PostOperations")
+            .Select(inner => Assert.IsType<UninstallPackageOperation>(inner.Operation).Package.VersionString)
+            .Order()
+            .ToArray();
+        Assert.Equal(["1.0.0", "1.5.0"], uninstalled);
+    }
+
     [Fact]
     public void UninstallOperationBuildsPreAndPostCommandsForUninstallPath()
     {
@@ -199,6 +429,301 @@ public sealed class PackageOperationsTests
         Assert.True(badges.Interactive);
         Assert.True(badges.SkipHashCheck);
         Assert.Equal(PackageScope.Machine, badges.Scope);
+    }
+
+    private static TestPackageManager CreateSlowProcessManager(bool serializesOperations)
+    {
+        return new PackageManagerBuilder()
+            .WithName($"SlowManager{Guid.NewGuid():N}")
+            .ConfigureCapabilities(capabilities =>
+            {
+                capabilities.SerializesOperations = serializesOperations;
+                return capabilities;
+            })
+            .ConfigureManager(manager =>
+            {
+                manager.ExecutablePath = Path.Join(Environment.SystemDirectory, "cmd.exe");
+                manager.ExecutableArguments = "/c";
+            })
+            .ConfigureOperation(helper =>
+            {
+                helper.ParametersFactory = (_, _, _) => ["ping", "-n", "3", "127.0.0.1"];
+                helper.ResultFactory = (_, _, _, _) => OperationVeredict.Success;
+            })
+            .Build();
+    }
+
+    private static bool HasLine(AbstractOperation operation, string prefix) =>
+        operation.GetOutput().Any(line => line.Item1.StartsWith(prefix, StringComparison.Ordinal));
+
+    private static async Task WaitForConditionAsync(Func<bool> condition)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (!condition())
+            await Task.Delay(25, timeout.Token);
+    }
+
+    private static Func<bool> ReportsWaitingOnTheGate(AbstractOperation operation)
+    {
+        bool reported = false;
+        operation.LogLineAdded += (_, line) =>
+        {
+            if (line.Item1.StartsWith("Waiting for another", StringComparison.Ordinal))
+                reported = true;
+        };
+        return () => reported;
+    }
+
+    [Fact]
+    public async Task ASuccessfulOperationInvalidatesTheInstalledPackagesOfItsManager()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var manager = CreateSlowProcessManager(serializesOperations: false);
+        InitializeLoaders();
+        long generationBefore = manager.InstalledPackagesGeneration;
+        using var operation = new UpdatePackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("updated").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+
+        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(OperationStatus.Succeeded, operation.Status);
+        Assert.NotEqual(generationBefore, manager.InstalledPackagesGeneration);
+    }
+
+    [Fact]
+    public async Task OperationsOfASerializingManagerNeverRunTheirProcessesConcurrently()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var manager = CreateSlowProcessManager(serializesOperations: true);
+        InitializeLoaders();
+        using var first = new InstallPackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("first").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+        using var second = new InstallPackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("second").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+        var secondWaited = ReportsWaitingOnTheGate(second);
+        bool? firstFinishedWhenSecondStarted = null;
+        second.LogLineAdded += (_, line) =>
+        {
+            if (line.Item1.StartsWith("Executing process", StringComparison.Ordinal))
+                firstFinishedWhenSecondStarted = HasLine(first, "Process return value");
+        };
+
+        Task firstRun = first.MainThread();
+        await WaitForConditionAsync(() => HasLine(first, "Start Time"));
+        Task secondRun = second.MainThread();
+        await Task.WhenAll(firstRun, secondRun).WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(OperationStatus.Succeeded, first.Status);
+        Assert.Equal(OperationStatus.Succeeded, second.Status);
+        Assert.True(firstFinishedWhenSecondStarted);
+        Assert.True(secondWaited());
+    }
+
+    [Fact]
+    public async Task OperationsOfANonSerializingManagerRunTheirProcessesConcurrently()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var manager = CreateSlowProcessManager(serializesOperations: false);
+        InitializeLoaders();
+        using var first = new InstallPackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("first").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+        using var second = new InstallPackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("second").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+        var secondWaited = ReportsWaitingOnTheGate(second);
+        bool? firstFinishedWhenSecondStarted = null;
+        second.LogLineAdded += (_, line) =>
+        {
+            if (line.Item1.StartsWith("Executing process", StringComparison.Ordinal))
+                firstFinishedWhenSecondStarted = HasLine(first, "Process return value");
+        };
+
+        Task firstRun = first.MainThread();
+        await WaitForConditionAsync(() => HasLine(first, "Start Time"));
+        Task secondRun = second.MainThread();
+        await Task.WhenAll(firstRun, secondRun).WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.False(firstFinishedWhenSecondStarted);
+        Assert.False(secondWaited());
+    }
+
+    [Fact]
+    public async Task CancelingAnOperationWaitingOnASerializingManagerLeavesTheGateUsable()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var manager = CreateSlowProcessManager(serializesOperations: true);
+        InitializeLoaders();
+        using var first = new InstallPackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("first").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+        using var waiting = new InstallPackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("waiting").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+        using var third = new InstallPackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("third").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+        var waitingReported = ReportsWaitingOnTheGate(waiting);
+        var thirdWaited = ReportsWaitingOnTheGate(third);
+
+        Task firstRun = first.MainThread();
+        await WaitForConditionAsync(() => HasLine(first, "Start Time"));
+        Task waitingRun = waiting.MainThread();
+        await WaitForConditionAsync(waitingReported);
+        waiting.Cancel();
+        await waitingRun.WaitAsync(TimeSpan.FromSeconds(10));
+        await firstRun.WaitAsync(TimeSpan.FromSeconds(30));
+        await third.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(OperationStatus.Canceled, waiting.Status);
+        Assert.False(HasLine(waiting, "Executing process"));
+        Assert.DoesNotContain(
+            waiting.GetOutput(),
+            line => line.Item1.Contains("CanceledException", StringComparison.Ordinal)
+        );
+        Assert.Equal(OperationStatus.Succeeded, first.Status);
+        Assert.Equal(OperationStatus.Succeeded, third.Status);
+        Assert.False(thirdWaited());
+    }
+
+    [Fact]
+    public async Task AnOperationWaitingOnASerializingManagerDoesNotHoldAParallelSlot()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var serialized = CreateSlowProcessManager(serializesOperations: true);
+        var other = CreateSlowProcessManager(serializesOperations: false);
+        InitializeLoaders();
+        using var first = new InstallPackageOperation(
+            new PackageBuilder().WithManager(serialized).WithId("first").Build(),
+            new InstallOptions()
+        );
+        using var waiting = new InstallPackageOperation(
+            new PackageBuilder().WithManager(serialized).WithId("waiting").Build(),
+            new InstallOptions()
+        );
+        using var unrelated = new InstallPackageOperation(
+            new PackageBuilder().WithManager(other).WithId("unrelated").Build(),
+            new InstallOptions()
+        );
+        var waitingReported = ReportsWaitingOnTheGate(waiting);
+        bool? firstFinishedWhenUnrelatedStarted = null;
+        unrelated.LogLineAdded += (_, line) =>
+        {
+            if (line.Item1.StartsWith("Executing process", StringComparison.Ordinal))
+                firstFinishedWhenUnrelatedStarted = HasLine(first, "Process return value");
+        };
+
+        AbstractOperation.OperationQueue.Clear();
+        int previousMax = AbstractOperation.MAX_OPERATIONS;
+        AbstractOperation.MAX_OPERATIONS = 2;
+        try
+        {
+            Task firstRun = first.MainThread();
+            await WaitForConditionAsync(() => HasLine(first, "Start Time"));
+            Task waitingRun = waiting.MainThread();
+            await WaitForConditionAsync(waitingReported);
+            Task unrelatedRun = unrelated.MainThread();
+            await Task.WhenAll(firstRun, waitingRun, unrelatedRun).WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            AbstractOperation.MAX_OPERATIONS = previousMax;
+            AbstractOperation.OperationQueue.Clear();
+        }
+
+        Assert.Equal(OperationStatus.Succeeded, first.Status);
+        Assert.Equal(OperationStatus.Succeeded, waiting.Status);
+        Assert.Equal(OperationStatus.Succeeded, unrelated.Status);
+        Assert.False(firstFinishedWhenUnrelatedStarted);
+    }
+
+    private static TestPackageManager CreateFailingEchoManager(params string[] echoed)
+    {
+        return new PackageManagerBuilder()
+            .WithName($"FailingManager{Guid.NewGuid():N}")
+            .ConfigureManager(manager =>
+            {
+                manager.ExecutablePath = Path.Join(Environment.SystemDirectory, "cmd.exe");
+                manager.ExecutableArguments = "/c";
+            })
+            .ConfigureOperation(helper =>
+            {
+                helper.ParametersFactory = (_, _, _) => ["echo", .. echoed];
+                helper.ResultFactory = (_, _, _, _) => OperationVeredict.Failure;
+            })
+            .Build();
+    }
+
+    [Fact]
+    public async Task AFailureCausedByAFileInUseTellsTheUserToCloseTheProgramUsingIt()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var manager = CreateFailingEchoManager("ERROR:", "[WinError", "32]", "file", "busy");
+        InitializeLoaders();
+        using var operation = new UpdatePackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("botocore").WithName("botocore").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+
+        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(OperationStatus.Failed, operation.Status);
+        Assert.Equal(
+            "A file of botocore is in use by another program. Close any program that may be using it, then try again",
+            operation.Metadata.FailureMessage
+        );
+    }
+
+    [Fact]
+    public async Task AFailureWithoutAFileInUseKeepsTheGenericFailureMessage()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var manager = CreateFailingEchoManager("ERROR:", "[WinError", "5]", "denied");
+        InitializeLoaders();
+        using var operation = new UpdatePackageOperation(
+            new PackageBuilder().WithManager(manager).WithId("botocore").WithName("botocore").Build(),
+            new InstallOptions(),
+            IgnoreParallelInstalls: true
+        );
+
+        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(OperationStatus.Failed, operation.Status);
+        Assert.DoesNotContain("in use by another program", operation.Metadata.FailureMessage);
     }
 
     [Fact]
@@ -536,4 +1061,59 @@ public sealed class PackageOperationsTests
             return Task.FromResult(new Uri("about:blank"));
         }
     }
+    [Fact]
+    public async Task UnmetPreconditionIsReportedWithoutTheInternalErrorStackTrace()
+    {
+        using var operation = new ThrowingStubOperation(
+            new OperationPreconditionException("Run UniGetUI as a regular user and try again.")
+        );
+
+        await operation.MainThread();
+
+        Assert.Equal(OperationStatus.Failed, operation.Status);
+        var lines = operation.GetOutput().Select(line => line.Item1).ToList();
+        Assert.Contains("Run UniGetUI as a regular user and try again.", lines);
+        Assert.DoesNotContain("An internal error occurred:", lines);
+        Assert.DoesNotContain(lines, line => line.Contains("OperationPreconditionException"));
+    }
+
+    [Fact]
+    public async Task AnUnexpectedExceptionStillReportsItsStackTrace()
+    {
+        using var operation = new ThrowingStubOperation(
+            new InvalidOperationException("some unexpected failure")
+        );
+
+        await operation.MainThread();
+
+        Assert.Equal(OperationStatus.Failed, operation.Status);
+        var lines = operation.GetOutput().Select(line => line.Item1).ToList();
+        Assert.Contains(lines, line => line.Contains("InvalidOperationException"));
+        Assert.Contains(lines, line => line.TrimStart().StartsWith("at ", StringComparison.Ordinal));
+    }
+
+    private sealed class ThrowingStubOperation : AbstractOperation
+    {
+        private readonly Exception _exception;
+
+        public ThrowingStubOperation(Exception exception)
+            : base(queue_enabled: false)
+        {
+            _exception = exception;
+            Metadata.Status = "Throwing stub status";
+            Metadata.Title = "Throwing stub title";
+            Metadata.OperationInformation = "Throwing stub info";
+            Metadata.SuccessTitle = "Throwing stub success";
+            Metadata.SuccessMessage = "Throwing stub success";
+            Metadata.FailureTitle = "Throwing stub failure";
+            Metadata.FailureMessage = "Throwing stub failure";
+        }
+
+        protected override void ApplyRetryAction(string retryMode) { }
+
+        protected override Task<OperationVeredict> PerformOperation() => throw _exception;
+
+        public override Task<Uri> GetOperationIcon() => Task.FromResult(new Uri("about:blank"));
+    }
+
 }

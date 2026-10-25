@@ -1,3 +1,4 @@
+using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
@@ -27,7 +28,9 @@ internal sealed class PipPkgOperationHelper : BasePkgOperationHelper
             },
         ];
         parameters.AddRange([
-            options.Version.Any() ? $"{package.Id}=={options.Version}" : package.Id,
+            options.Version.Any()
+                ? CoreTools.EscapeCommandLineArgument($"{package.Id}=={options.Version}")
+                : package.Id,
             "--no-input",
             "--no-color",
             "--no-cache",
@@ -91,14 +94,22 @@ internal sealed class PipPkgOperationHelper : BasePkgOperationHelper
                 return OperationVeredict.AutoRetry;
             }
 
-            if (package.OverridenOptions.Scope != PackageScope.User)
+            if (
+                operation is not OperationType.Update
+                && package.OverridenOptions.Scope != PackageScope.User
+            )
             {
                 package.OverridenOptions.Scope = PackageScope.User;
                 return OperationVeredict.AutoRetry;
             }
         }
 
-        if (output_string.Contains("--user") && package.OverridenOptions.Scope != PackageScope.User)
+        if (
+            operation is not OperationType.Update
+            && output_string.Contains("--user")
+            && !output_string.Contains("[WinError 32]")
+            && package.OverridenOptions.Scope != PackageScope.User
+        )
         {
             package.OverridenOptions.Scope = PackageScope.User;
             return OperationVeredict.AutoRetry;

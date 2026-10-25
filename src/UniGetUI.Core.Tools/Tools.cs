@@ -1,7 +1,10 @@
+using System.Buffers;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -328,6 +331,16 @@ namespace UniGetUI.Core.Tools
             if (url is null)
                 return 0;
 
+            if (url.IsFile)
+            {
+                Logger.Warn(
+                    $"Refusing to measure the file system address {url}: this helper answers "
+                        + "for network addresses only, and its callers take the address from "
+                        + "package metadata"
+                );
+                return 0;
+            }
+
             try
             {
                 using HttpClient client = new(CoreTools.GenericHttpClientParameters);
@@ -349,6 +362,9 @@ namespace UniGetUI.Core.Tools
         {
             try
             {
+                if (url.IsFile)
+                    return Path.GetFileName(url.LocalPath);
+
                 var handler = CoreTools.GenericHttpClientParameters;
                 handler.AllowAutoRedirect = false;
                 using HttpClient client = new(handler);
@@ -390,10 +406,10 @@ namespace UniGetUI.Core.Tools
         {
             public static readonly Version Null = new(-1, -1, -1, -1);
 
-            public readonly int Major;
-            public readonly int Minor;
-            public readonly int Patch;
-            public readonly int Remainder;
+            public readonly BigInteger Major;
+            public readonly BigInteger Minor;
+            public readonly BigInteger Patch;
+            public readonly BigInteger Remainder;
 
             /// <summary>
             /// Segments past the fourth, with trailing zeroes trimmed so that equal versions
@@ -402,12 +418,23 @@ namespace UniGetUI.Core.Tools
             /// (e.g. a build revision on a four-part version: 1.2.3.4_1 vs 1.2.3.4_2) order
             /// correctly instead of collapsing into Remainder.
             /// </summary>
-            private readonly int[]? _extraSegments;
+            private readonly BigInteger[]? _extraSegments;
 
-            public Version(int major, int minor = 0, int patch = 0, int remainder = 0)
+            public Version(
+                BigInteger major,
+                BigInteger minor = default,
+                BigInteger patch = default,
+                BigInteger remainder = default
+            )
                 : this(major, minor, patch, remainder, null) { }
 
-            private Version(int major, int minor, int patch, int remainder, int[]? extraSegments)
+            private Version(
+                BigInteger major,
+                BigInteger minor,
+                BigInteger patch,
+                BigInteger remainder,
+                BigInteger[]? extraSegments
+            )
             {
                 Major = major;
                 Minor = minor;
@@ -420,16 +447,16 @@ namespace UniGetUI.Core.Tools
             /// Builds a Version from an arbitrary number of segments. Segments past the fourth are
             /// retained for comparison rather than being folded into Remainder.
             /// </summary>
-            internal static Version FromSegments(IReadOnlyList<int> segments)
+            internal static Version FromSegments(IReadOnlyList<BigInteger> segments)
             {
                 int count = segments.Count;
                 while (count > 4 && segments[count - 1] == 0)
                     count--;
 
-                int[]? extra = null;
+                BigInteger[]? extra = null;
                 if (count > 4)
                 {
-                    extra = new int[count - 4];
+                    extra = new BigInteger[count - 4];
                     for (int i = 4; i < count; i++)
                         extra[i - 4] = segments[i];
                 }
@@ -442,12 +469,14 @@ namespace UniGetUI.Core.Tools
                     extra
                 );
 
-                static int Segment(IReadOnlyList<int> values, int index) =>
-                    index < values.Count ? values[index] : 0;
+                static BigInteger Segment(IReadOnlyList<BigInteger> values, int index) =>
+                    index < values.Count ? values[index] : BigInteger.Zero;
             }
 
-            private int ExtraSegment(int index) =>
-                _extraSegments is not null && index < _extraSegments.Length ? _extraSegments[index] : 0;
+            private BigInteger ExtraSegment(int index) =>
+                _extraSegments is not null && index < _extraSegments.Length
+                    ? _extraSegments[index]
+                    : BigInteger.Zero;
 
             public int CompareTo(object? other_) => other_ is Version other ? CompareTo(other) : 0;
 
@@ -525,7 +554,7 @@ namespace UniGetUI.Core.Tools
                 hash.Add(Minor);
                 hash.Add(Patch);
                 hash.Add(Remainder);
-                foreach (int segment in _extraSegments ?? [])
+                foreach (BigInteger segment in _extraSegments ?? [])
                     hash.Add(segment);
                 return hash.ToHashCode();
             }
@@ -588,25 +617,34 @@ namespace UniGetUI.Core.Tools
                 // Collect every segment rather than capping at four. Capping used to append the
                 // surplus digits to the fourth segment, which inflated it: 1.2.3.4_1 became
                 // 1.2.3.41 and so compared as greater than the newer 1.2.3.5, hiding the update.
-                List<string> segmentDigits = [""];
+                List<BigInteger> numbers = [];
+                StringBuilder digits = new();
+                bool gapInSegment = false;
+                bool spliced = false;
                 bool first = true;
 
                 foreach (char c in version)
                 {
                     if (char.IsDigit(c))
-                        segmentDigits[^1] += c;
+                    {
+                        spliced |= gapInSegment;
+                        digits.Append(c);
+                    }
                     else if (!first && separators.Contains(c))
-                        segmentDigits.Add("");
+                    {
+                        numbers.Add(ParseVersionSegment(digits.ToString(), spliced));
+                        digits.Clear();
+                        gapInSegment = false;
+                        spliced = false;
+                    }
+                    else if (digits.Length > 0)
+                    {
+                        gapInSegment = true;
+                    }
                     first = false;
                 }
 
-                int[] numbers = new int[segmentDigits.Count];
-                for (int i = 0; i < numbers.Length; i++)
-                {
-                    if (int.TryParse(segmentDigits[i], out int val))
-                        numbers[i] = val;
-                }
-
+                numbers.Add(ParseVersionSegment(digits.ToString(), spliced));
                 return Version.FromSegments(numbers);
             }
             catch
@@ -614,6 +652,24 @@ namespace UniGetUI.Core.Tools
                 Logger.Warn($"Failed to parse version {version} to float");
                 return CoreTools.Version.Null;
             }
+        }
+
+        private static BigInteger ParseVersionSegment(string digits, bool spliced)
+        {
+            if (spliced)
+                return int.TryParse(digits, out int small) ? small : BigInteger.Zero;
+
+            if (long.TryParse(digits, out long value))
+                return value;
+
+            return BigInteger.TryParse(
+                digits,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out BigInteger large
+            )
+                ? large
+                : BigInteger.Zero;
         }
 
         public static System.Version NormalizeVersionForComparison(System.Version version)
@@ -630,20 +686,43 @@ namespace UniGetUI.Core.Tools
         /// <returns>The safe version of the query</returns>
         public static string EnsureSafeQueryString(string query)
         {
-            return query
-                .Replace(";", string.Empty)
-                .Replace("&", string.Empty)
-                .Replace("|", string.Empty)
-                .Replace(">", string.Empty)
-                .Replace("<", string.Empty)
-                .Replace("%", string.Empty)
-                .Replace("\"", string.Empty)
-                .Replace("~", string.Empty)
-                .Replace("?", string.Empty)
-                .Replace("/", string.Empty)
-                .Replace("'", string.Empty)
-                .Replace("\\", string.Empty)
-                .Replace("`", string.Empty);
+            StringBuilder builder = new();
+            foreach (char character in query)
+            {
+                if (char.IsControl(character))
+                    continue;
+
+                if (
+                    character
+                    is ';'
+                        or '&'
+                        or '|'
+                        or '>'
+                        or '<'
+                        or '%'
+                        or '"'
+                        or '~'
+                        or '?'
+                        or '\''
+                        or '\\'
+                        or '`'
+                        or '$'
+                        or '('
+                        or ')'
+                        or '{'
+                        or '}'
+                        or '['
+                        or ']'
+                        or '#'
+                        or '!'
+                        or '^'
+                )
+                    continue;
+
+                builder.Append(character);
+            }
+
+            return builder.ToString();
         }
 
         /// <summary>
@@ -676,10 +755,40 @@ namespace UniGetUI.Core.Tools
             return new Uri(url);
         }
 
+        // Grants every process the right to set the foreground window, bypassing the
+        // foreground lock so a UAC consent prompt can surface in front. ASFW_ANY = -1.
+        private const int ASFW_ANY = -1;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+        /// <summary>
+        /// Windows: hand our foreground rights to the imminent UAC consent prompt so it surfaces
+        /// in front instead of only flashing the taskbar (#5146). Windows decides whether we
+        /// still hold that privilege and grants nothing once another app owns the foreground.
+        /// Either way this only ever lets the consent UI come forward; it never activates our
+        /// own window, so a minimized UniGetUI stays minimized (#5102). No-op elsewhere.
+        /// Must be called immediately before launching the elevator.
+        /// </summary>
+        public static void PrepareForegroundForElevation()
+        {
+            if (!OperatingSystem.IsWindows())
+                return;
+
+            AllowSetForegroundWindow(ASFW_ANY);
+        }
+
         /// <summary>
         /// Enables GSudo cache for the current process
         /// </summary>
-        private static bool _isCaching;
+        private static readonly SemaphoreSlim _uacCacheLock = new(1, 1);
+
+        private static bool _uacCacheHeld;
+
+        private static long _uacCacheGeneration;
+
+        public static long UACCacheGeneration => Interlocked.Read(ref _uacCacheGeneration);
 
         public static async Task CacheUACForCurrentProcess()
         {
@@ -691,22 +800,31 @@ namespace UniGetUI.Core.Tools
                 return;
             }
 
-            while (_isCaching)
-                await Task.Delay(100);
+            var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
 
+            // pkexec prompts on every invocation and has no caching protocol.
+            if (elevatorName == "pkexec")
+                return;
+
+            bool isSessionCache = elevatorName != "sudo";
+
+            await _uacCacheLock.WaitAsync();
             try
             {
-                _isCaching = true;
-                Logger.Info("Caching admin rights for process id " + Environment.ProcessId);
-
-                var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
-
-                // pkexec prompts on every invocation and has no caching protocol.
-                if (elevatorName == "pkexec")
+                if (isSessionCache && _uacCacheHeld)
                 {
-                    _isCaching = false;
-                    return;
+                    if (await ProbeElevationCacheAsync() is not ElevationCacheState.Unavailable)
+                        return;
+
+                    Logger.Warn(
+                        "The administrator rights cache is no longer reachable, it will be requested again"
+                    );
+                    _uacCacheHeld = false;
+                    _elevationCacheWaitTimedOut = false;
+                    Interlocked.Increment(ref _uacCacheGeneration);
                 }
+
+                Logger.Info("Caching admin rights for process id " + Environment.ProcessId);
 
                 // sudo: -v validates/extends the cached timestamp.
                 // Prepend -A only when the SUDO_ASKPASS helper is configured.
@@ -727,42 +845,249 @@ namespace UniGetUI.Core.Tools
                         RedirectStandardInput = true,
                         CreateNoWindow = true,
                         StandardOutputEncoding = Encoding.UTF8,
+                        StandardErrorEncoding = Encoding.UTF8,
                     },
                 };
+
+                // When admin-rights caching is enabled, the UAC consent prompt is raised here.
+                // Surface it in front instead of letting it flash unnoticed in the taskbar (#5146).
+                PrepareForegroundForElevation();
+
                 p.Start();
+
+                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = p.StandardError.ReadToEndAsync();
+                await Task.WhenAll(stdout, stderr);
                 await p.WaitForExitAsync();
-                _isCaching = false;
+
+                string output = string
+                    .Join(
+                        Environment.NewLine,
+                        new[] { stdout.Result, stderr.Result }.Where(line =>
+                            !string.IsNullOrWhiteSpace(line)
+                        )
+                    )
+                    .Trim();
+
+                if (p.ExitCode != 0)
+                {
+                    _uacCacheHeld = false;
+                    Logger.Error(
+                        $"The elevator could not cache administrator rights (exit code {p.ExitCode}). "
+                            + "Every operation that requires elevation will ask for consent separately."
+                    );
+                    if (output.Length > 0)
+                        Logger.Error(output);
+                }
+                else if (
+                    isSessionCache
+                    && await WaitForElevationCacheAsync() is ElevationCacheState.Unavailable
+                )
+                {
+                    _uacCacheHeld = false;
+                    Logger.Error(
+                        "The elevator reported success but no administrator rights cache became "
+                            + $"reachable for process id {Environment.ProcessId}. Every operation "
+                            + "that requires elevation will ask for consent separately."
+                    );
+                    if (output.Length > 0)
+                        Logger.Error(output);
+                }
+                else
+                {
+                    _uacCacheHeld = true;
+                    Interlocked.Increment(ref _uacCacheGeneration);
+
+                    Logger.Info(
+                        $"The elevator cached administrator rights for process id {Environment.ProcessId}"
+                    );
+                    if (output.Length > 0)
+                        Logger.Info(output);
+                }
             }
             catch (Exception ex)
             {
+                Logger.Error("Failed to cache administrator rights for the current process");
                 Logger.Error(ex);
-                _isCaching = false;
+            }
+            finally
+            {
+                _uacCacheLock.Release();
+            }
+        }
+
+        private enum ElevationCacheState
+        {
+            Available,
+            Unavailable,
+            Unknown,
+        }
+
+        private static bool _elevationCacheProbeUnsupported;
+
+        private static bool _elevationCacheProbeFailureLogged;
+
+        private static bool _elevationCacheWaitTimedOut;
+
+        private static async Task<ElevationCacheState> WaitForElevationCacheAsync()
+        {
+            ElevationCacheState state = await ProbeElevationCacheAsync();
+
+            if (_elevationCacheWaitTimedOut)
+                return state;
+
+            int[] retryDelays = [250, 500, 1000, 2000, 4000];
+
+            foreach (int delay in retryDelays)
+            {
+                if (state is not ElevationCacheState.Unavailable)
+                    return state;
+
+                await Task.Delay(delay);
+                state = await ProbeElevationCacheAsync();
+            }
+
+            _elevationCacheWaitTimedOut = state is ElevationCacheState.Unavailable;
+            return state;
+        }
+
+        private static async Task<ElevationCacheState> ProbeElevationCacheAsync()
+        {
+            if (
+                !OperatingSystem.IsWindows()
+                || _elevationCacheProbeUnsupported
+                || CoreData.ElevatorPath.Length is 0
+            )
+                return ElevationCacheState.Unknown;
+
+            try
+            {
+                using Process p = new()
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = CoreData.ElevatorPath,
+                        Arguments = "status CacheAvailable",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        RedirectStandardInput = true,
+                        CreateNoWindow = true,
+                        StandardOutputEncoding = Encoding.UTF8,
+                        StandardErrorEncoding = Encoding.UTF8,
+                    },
+                };
+
+                p.Start();
+                p.StandardInput.Close();
+
+                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = p.StandardError.ReadToEndAsync();
+                Task reads = Task.WhenAll(stdout, stderr);
+                _ = reads.ContinueWith(
+                    completed => _ = completed.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default
+                );
+
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+                try
+                {
+                    await p.WaitForExitAsync(cts.Token);
+                    await reads.WaitAsync(cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    try
+                    {
+                        p.Kill(entireProcessTree: true);
+                    }
+                    catch (Exception killEx)
+                        when (killEx is InvalidOperationException or NotSupportedException)
+                    {
+                        Logger.Debug(killEx);
+                    }
+
+                    Logger.Warn("The elevator did not report the administrator rights cache status");
+                    return ElevationCacheState.Unknown;
+                }
+
+                if (bool.TryParse(stdout.Result.Trim(), out bool available))
+                    return available
+                        ? ElevationCacheState.Available
+                        : ElevationCacheState.Unavailable;
+
+                string error = stderr.Result.Trim();
+
+                if (error.Contains("not a valid Status Key", StringComparison.OrdinalIgnoreCase))
+                    _elevationCacheProbeUnsupported = true;
+
+                if (!_elevationCacheProbeFailureLogged)
+                {
+                    _elevationCacheProbeFailureLogged = true;
+                    Logger.Warn(
+                        $"The elevator did not report the administrator rights cache status (exit code {p.ExitCode})"
+                    );
+                    if (error.Length > 0)
+                        Logger.Warn(error);
+                }
+
+                return ElevationCacheState.Unknown;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("Failed to read the administrator rights cache status");
+                Logger.Warn(ex);
+                return ElevationCacheState.Unknown;
+            }
+        }
+
+        /// <summary>
+        /// Forgets that an elevation cache is held, without releasing it. The next operation
+        /// that needs elevation will ask the elevator again; that request is free and silent
+        /// when the session is still alive, and re-establishes it when it is not.
+        /// </summary>
+        public static async Task<bool> InvalidateUACCacheState(long? expectedGeneration = null)
+        {
+            await _uacCacheLock.WaitAsync();
+            try
+            {
+                _elevationCacheWaitTimedOut = false;
+
+                if (expectedGeneration is long expected
+                    && (expected != _uacCacheGeneration || !_uacCacheHeld))
+                    return false;
+
+                _uacCacheHeld = false;
+                Interlocked.Increment(ref _uacCacheGeneration);
+                return true;
+            }
+            finally
+            {
+                _uacCacheLock.Release();
             }
         }
 
         /// <summary>
         /// Reset UAC cache for the current process
         /// </summary>
-        public static async Task ResetUACForCurrentProcess()
+        public static async Task<bool> ResetUACForCurrentProcess(long? expectedGeneration = null)
         {
             if (Settings.Get(Settings.K.ProhibitElevation))
             {
                 Logger.Error(
                     "Elevation is prohibited, ResetUACForCurrentProcess() call will be ignored"
                 );
-                return;
+                return false;
             }
-
-            Logger.Info(
-                "Resetting administrator rights cache for process id " + Environment.ProcessId
-            );
 
             var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
 
             // pkexec prompts on every invocation and has no caching protocol.
             if (elevatorName == "pkexec")
             {
-                return;
+                return false;
             }
 
             // sudo: -K removes all cached timestamps.
@@ -771,22 +1096,74 @@ namespace UniGetUI.Core.Tools
                 ? "-K"
                 : "cache off --pid " + Environment.ProcessId;
 
-            using Process p = new()
+            await _uacCacheLock.WaitAsync();
+            try
             {
-                StartInfo = new ProcessStartInfo
+                _elevationCacheWaitTimedOut = false;
+
+                if (expectedGeneration is long expected
+                    && (expected != _uacCacheGeneration || !_uacCacheHeld))
+                    return false;
+
+                _uacCacheHeld = false;
+                Interlocked.Increment(ref _uacCacheGeneration);
+
+                Logger.Info(
+                    "Resetting administrator rights cache for process id " + Environment.ProcessId
+                );
+
+                using Process p = new()
                 {
-                    FileName = CoreData.ElevatorPath,
-                    Arguments = resetArgs,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    RedirectStandardInput = true,
-                    CreateNoWindow = true,
-                    StandardOutputEncoding = Encoding.UTF8,
-                },
-            };
-            p.Start();
-            await p.WaitForExitAsync();
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = CoreData.ElevatorPath,
+                        Arguments = resetArgs,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        RedirectStandardInput = true,
+                        CreateNoWindow = true,
+                        StandardOutputEncoding = Encoding.UTF8,
+                        StandardErrorEncoding = Encoding.UTF8,
+                    },
+                };
+
+                p.Start();
+
+                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = p.StandardError.ReadToEndAsync();
+                await Task.WhenAll(stdout, stderr);
+                await p.WaitForExitAsync();
+
+                if (p.ExitCode != 0)
+                {
+                    Logger.Warn(
+                        $"The elevator could not release the administrator rights cache (exit code {p.ExitCode})"
+                    );
+                    string output = string
+                        .Join(
+                            Environment.NewLine,
+                            new[] { stdout.Result, stderr.Result }.Where(line =>
+                                !string.IsNullOrWhiteSpace(line)
+                            )
+                        )
+                        .Trim();
+                    if (output.Length > 0)
+                        Logger.Warn(output);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to release the administrator rights cache");
+                Logger.Error(ex);
+                return true;
+            }
+            finally
+            {
+                _uacCacheLock.Release();
+            }
         }
 
         /// <summary>
@@ -895,10 +1272,156 @@ namespace UniGetUI.Core.Tools
         }
 
         /// <summary>
-        /// Pings the update server and 3 well-known sites to check for internet availability
+        /// Runs a command and returns its trimmed standard output. <paramref name="timeout"/> is the
+        /// total budget; the command and the children it still owns are killed once it elapses.
+        /// </summary>
+        /// <remarks>
+        /// A descendant that outlives the command itself cannot be reached: the OS reparents it as
+        /// soon as the root exits, so it stays out of the process tree while still holding the
+        /// output pipe open. Such a call times out and reports failure instead of returning output.
+        /// </remarks>
+        public static bool TryReadStandardOutput(
+            ProcessStartInfo startInfo,
+            TimeSpan timeout,
+            out string output
+        )
+        {
+            output = "";
+            Process? process = null;
+            Task<string>? reader = null;
+            var budget = Stopwatch.StartNew();
+            try
+            {
+                process = Process.Start(startInfo);
+                if (process is null)
+                    return false;
+
+                // StandardOutput.ReadToEnd() blocks until the child closes stdout, which a hung
+                // child never does, making any later WaitForExit(timeout) unreachable. Wait on
+                // the read itself instead, and kill the child so the pipe gets released.
+                reader = process.StandardOutput.ReadToEndAsync();
+                if (!reader.Wait(timeout))
+                {
+                    // An exited root means a descendant inherited stdout and is holding it open;
+                    // it is already reparented, so killing the tree below cannot reach it.
+                    string cause = process.HasExited
+                        ? "it exited but something it started still holds its output open"
+                        : "it did not respond in time and will be terminated";
+                    Logger.Warn(
+                        $"Could not read the output of '{startInfo.FileName}' within "
+                            + $"{timeout.TotalSeconds:0.#}s: {cause}"
+                    );
+                    return false;
+                }
+
+                // stdout reached EOF, so the output is complete whether or not the child has left
+                // yet. Give it what remains of the budget to exit on its own; the finally kills it
+                // otherwise, so a child that drops stdout early cannot stretch the wait past it.
+                TimeSpan remaining = timeout - budget.Elapsed;
+                if (remaining > TimeSpan.Zero)
+                    process.WaitForExit((int)remaining.TotalMilliseconds);
+
+                output = reader.Result.Trim();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not read the output of '{startInfo.FileName}':");
+                Logger.Warn(ex);
+                return false;
+            }
+            finally
+            {
+                try
+                {
+                    if (process is not null && !process.HasExited)
+                        process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // Best effort: the process may have exited on its own in the meantime.
+                }
+
+                // Dispose() leaves StandardOutput open (we read it in sync mode), so an abandoned
+                // read ends by itself once the killed child's pipe hits EOF. Observe it regardless.
+                reader?.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
+                process?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Waits until the device reports internet access, giving up after
+        /// <see cref="InternetWaitTimeout"/> so that a wrong answer from the system never blocks loading forever
         /// </summary>
         public static async Task WaitForInternetConnection() =>
             await TaskRecycler<int>.RunOrAttachAsync_VOID(_waitForInternetConnection);
+
+        private static readonly TimeSpan InternetWaitTimeout = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan HttpCheckTimeout = TimeSpan.FromSeconds(5);
+        private const string ConnectivityTestUrl = "http://www.msftconnecttest.com/connecttest.txt";
+        private const string ConnectivityTestBody = "Microsoft Connect Test";
+
+        private static bool _systemReportsInternetAccess()
+        {
+#if WINDOWS
+            var profile = NetworkInformation.GetInternetConnectionProfile();
+            return profile?.GetNetworkConnectivityLevel() == NetworkConnectivityLevel.InternetAccess;
+#else
+            return NetworkInterface.GetIsNetworkAvailable();
+#endif
+        }
+
+        private static bool _tryHttpConnectivityCheck(TimeSpan budget)
+        {
+            var handler = GenericHttpClientParameters;
+            handler.AllowAutoRedirect = false;
+            return HttpConnectivityCheck(handler, new Uri(ConnectivityTestUrl), budget);
+        }
+
+        /// <summary>
+        /// Fetches the connectivity test page and returns whether it came back as expected within
+        /// <paramref name="budget"/> (at most <see cref="HttpCheckTimeout"/>). Once SendAsync has returned its
+        /// task, the call stops waiting at that limit even if the request does not react to cancellation, and
+        /// leaves the request to end on its own.
+        /// </summary>
+        internal static bool HttpConnectivityCheck(HttpMessageHandler handler, Uri url, TimeSpan budget)
+        {
+            TimeSpan limit = budget < HttpCheckTimeout ? budget : HttpCheckTimeout;
+            try
+            {
+                return HttpConnectivityCheckAsync(handler, url, limit).WaitAsync(limit).GetAwaiter().GetResult();
+            }
+            catch (Exception)
+            {
+                // WaitAsync throws once the limit has passed, and any other failure is no connection either
+                return false;
+            }
+        }
+
+        private static async Task<bool> HttpConnectivityCheckAsync(HttpMessageHandler handler, Uri url, TimeSpan limit)
+        {
+            try
+            {
+                using HttpClient client = new(handler)
+                {
+                    Timeout = limit,
+                    MaxResponseContentBufferSize = 1024,
+                };
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                using HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(false);
+                if (response.StatusCode != HttpStatusCode.OK)
+                    return false;
+
+                // A captive portal can answer 200 too, so the page itself has to be the expected one
+                using var reader = new StreamReader(response.Content.ReadAsStream());
+                return reader.ReadToEnd().Trim() == ConnectivityTestBody;
+            }
+            catch (Exception)
+            {
+                // Any failure, including the timeout, means the endpoint could not be reached
+                return false;
+            }
+        }
 
         public static void _waitForInternetConnection()
         {
@@ -906,30 +1429,56 @@ namespace UniGetUI.Core.Tools
                 return;
 
             Logger.Debug("Checking for internet connectivity...");
+            WaitForConnectivity(
+                _systemReportsInternetAccess,
+                _tryHttpConnectivityCheck,
+                InternetWaitTimeout,
+                TimeSpan.FromSeconds(1)
+            );
+        }
+
+        /// <summary>
+        /// Polls until the system or the HTTP check reports connectivity, or until
+        /// <paramref name="timeout"/> has elapsed. The HTTP check is told how much of the timeout
+        /// is left. Returns whether connectivity was established.
+        /// </summary>
+        internal static bool WaitForConnectivity(
+            Func<bool> systemReportsInternet,
+            Func<TimeSpan, bool> httpCheckSucceeds,
+            TimeSpan timeout,
+            TimeSpan pollInterval
+        )
+        {
+            var stopwatch = Stopwatch.StartNew();
             bool internetLost = false;
 
-#if WINDOWS
-            var profile = NetworkInformation.GetInternetConnectionProfile();
-            while (
-                profile is null
-                || profile.GetNetworkConnectivityLevel()
-                    is not NetworkConnectivityLevel.InternetAccess
-            )
+            while (true)
             {
-                Thread.Sleep(1000);
-                profile = NetworkInformation.GetInternetConnectionProfile();
-                if (!internetLost)
+                if (systemReportsInternet())
+                {
+                    Logger.Debug("Internet connectivity was established.");
+                    return true;
+                }
+
+                // NCSI may be stale (common Windows 10 bug); verify with a real HTTP request
+                TimeSpan remaining = timeout - stopwatch.Elapsed;
+                if (remaining > TimeSpan.Zero && httpCheckSucceeds(remaining))
+                {
+                    Logger.Debug(
+                        "Internet connectivity was established (HTTP check passed, NCSI was stale)."
+                    );
+                    return true;
+                }
+
+                remaining = timeout - stopwatch.Elapsed;
+                if (remaining <= TimeSpan.Zero)
                 {
                     Logger.Warn(
-                        "User is not connected to the internet, waiting for an internet connectio to be available..."
+                        $"Internet connectivity check timed out after {timeout.TotalSeconds}s, proceeding anyway."
                     );
-                    internetLost = true;
+                    return false;
                 }
-            }
-#else
-            while (!NetworkInterface.GetIsNetworkAvailable())
-            {
-                Thread.Sleep(1000);
+
                 if (!internetLost)
                 {
                     Logger.Warn(
@@ -937,9 +1486,9 @@ namespace UniGetUI.Core.Tools
                     );
                     internetLost = true;
                 }
+
+                Thread.Sleep(remaining < pollInterval ? remaining : pollInterval);
             }
-#endif
-            Logger.Debug("Internet connectivity was established.");
         }
 
         public static string TextProgressGenerator(int length, int progressPercent, string? extra)
@@ -1050,11 +1599,345 @@ namespace UniGetUI.Core.Tools
             return LanguageEngine?.Locale ?? "Unset/Unknown";
         }
 
-        private static readonly HashSet<char> _illegalPathChars = Path.GetInvalidFileNameChars()
-            .ToHashSet();
+        private static readonly HashSet<char> _illegalPathChars = BuildIllegalPathChars();
 
-        public static string MakeValidFileName(string name) =>
-            string.Concat(name.Where(x => !_illegalPathChars.Contains(x)));
+        private static HashSet<char> BuildIllegalPathChars()
+        {
+            HashSet<char> characters = new(Path.GetInvalidFileNameChars());
+
+            foreach (char character in @"""<>|:*?\/")
+                characters.Add(character);
+
+            for (char character = (char)0; character < (char)32; character++)
+                characters.Add(character);
+
+            return characters;
+        }
+
+        private static readonly HashSet<string> _reservedDeviceNames = BuildReservedDeviceNames();
+
+        private static HashSet<string> BuildReservedDeviceNames()
+        {
+            HashSet<string> names = new(StringComparer.OrdinalIgnoreCase)
+            {
+                "CON",
+                "PRN",
+                "AUX",
+                "NUL",
+            };
+
+            for (int index = 0; index <= 9; index++)
+            {
+                names.Add($"COM{index}");
+                names.Add($"LPT{index}");
+            }
+
+            foreach (char superscript in "\u00b9\u00b2\u00b3")
+            {
+                names.Add($"COM{superscript}");
+                names.Add($"LPT{superscript}");
+            }
+
+            return names;
+        }
+
+        public static string MakeValidFileName(string name)
+        {
+            string sanitized = string.Concat(name.Where(x => !_illegalPathChars.Contains(x)));
+
+            if (sanitized.Length is 0)
+                return sanitized;
+
+            if (sanitized.All(character => character is '.' || char.IsWhiteSpace(character)))
+                return "_";
+
+            string trimmed = sanitized.TrimEnd('.', ' ');
+
+            if (trimmed.Length is 0)
+                return "_";
+
+            return _reservedDeviceNames.Contains(trimmed.Split('.')[0]) ? $"_{trimmed}" : trimmed;
+        }
+
+        public const int MaxPackageVersionLength = 128;
+        public const int MaxPackageIdentifierLength = 256;
+
+        private static readonly SearchValues<char> _commandLineSensitiveCharacters =
+            SearchValues.Create(";&|$`()[]{}<>'\"%!^#\r\n\t\v\f ");
+
+        public static bool IsCommandLineInertValue(string value) =>
+            !value.AsSpan().ContainsAny(_commandLineSensitiveCharacters);
+
+        /// <summary>
+        /// Whether a package identifier can be placed on any command line without being read as an
+        /// option or splitting into further arguments. Quoting is not enough on its own: a quoted
+        /// argument still binds as an option when it starts with a dash. Applies to every manager,
+        /// including those whose command line is not interpreted by a shell.
+        /// </summary>
+        public static bool IsOptionSafeIdentifier(string identifier, bool quotedByTheSink = false)
+        {
+            if (identifier.Length is 0)
+                return false;
+
+            if (identifier[0] is '-' or '/')
+                return false;
+
+            foreach (char character in identifier)
+            {
+                if (char.IsControl(character))
+                    return false;
+
+                // Whitespace only splits an identifier into further arguments where the sink emits
+                // it bare. WinGet quotes it, and its Add/Remove-programs identifiers legitimately
+                // contain spaces, for example "ARP\Machine\X86\Microsoft Copilot".
+                if (!quotedByTheSink && char.IsWhiteSpace(character))
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Whether a value can be placed on a command line without being read as an option. Unlike
+        /// an identifier it may contain spaces, because the sinks that accept such values quote
+        /// them; WinGet publishes versions such as "2021 Update".
+        /// </summary>
+        public static bool IsOptionSafeValue(string value)
+        {
+            if (value.Length is 0)
+                return true;
+
+            if (value[0] is '-' or '/')
+                return false;
+
+            foreach (char character in value)
+            {
+                if (char.IsControl(character))
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Starts a process and closes its standard input straight away, for callers that have
+        /// nothing to write to it.
+        /// <para>
+        /// The PowerShell shims that ship with npm and Scoop pipe $input to the real program
+        /// whenever $MyInvocation.ExpectingInput is set, which it is whenever standard input is
+        /// not a console - a redirected pipe, or one inherited from a parent that has none of its
+        /// own, as in the headless daemon. Enumerating $input does not return until that pipe is
+        /// closed, so a shim invoked with the pipe left open never runs at all. Closing it makes
+        /// the pipeline enumerate empty and the shim run immediately.
+        /// </para>
+        /// </summary>
+        public static void StartAndCloseStandardInput(Process process)
+        {
+            process.Start();
+
+            if (process.StartInfo.RedirectStandardInput)
+            {
+                process.StandardInput.Close();
+            }
+        }
+
+        private static readonly SearchValues<char> _processNameSensitiveCharacters =
+            SearchValues.Create("\"%!&|<>^");
+
+        /// <summary>
+        /// Whether a process image name can be placed inside a quoted argument of a command string
+        /// that cmd.exe will parse, as the exported installation script does.
+        /// <para>
+        /// A double quote ends the quoting, and cmd expands %NAME% before it parses the command,
+        /// inside double quotes included, so an expansion whose value carries a quote and a
+        /// separator injects further commands. Delayed expansion of !NAME! is off by default but a
+        /// user can enable it. The remaining separators are inert inside intact quoting and are
+        /// refused as insurance; none of them, nor a leading option marker, is usable in a real
+        /// image name anyway.
+        /// </para>
+        /// </summary>
+        public static bool IsSafeProcessImageName(string name)
+        {
+            if (name.Length is 0)
+                return false;
+
+            if (name[0] is '-' or '/')
+                return false;
+
+            foreach (char character in name)
+            {
+                if (char.IsControl(character))
+                    return false;
+            }
+
+            return !name.AsSpan().ContainsAny(_processNameSensitiveCharacters);
+        }
+
+        public static bool IsValidPackageVersion(string version)
+        {
+            if (version.Length is 0 or > MaxPackageVersionLength)
+                return false;
+
+            if (!char.IsAsciiLetterOrDigit(version[0]))
+                return false;
+
+            foreach (char character in version)
+            {
+                if (
+                    !char.IsAsciiLetterOrDigit(character)
+                    && character is not ('.' or '_' or '+' or '-' or '~' or ':')
+                )
+                    return false;
+            }
+
+            return true;
+        }
+
+        public static bool IsValidPackageIdentifier(string identifier)
+        {
+            if (identifier.Length is 0 or > MaxPackageIdentifierLength)
+                return false;
+
+            if (identifier[0] is '@')
+            {
+                if (identifier.Length < 2 || !char.IsLetterOrDigit(identifier[1]))
+                    return false;
+            }
+            else if (!char.IsLetterOrDigit(identifier[0]))
+            {
+                return false;
+            }
+
+            foreach (char character in identifier)
+            {
+                if (
+                    !char.IsLetterOrDigit(character)
+                    && character
+                        is not ('.' or '_' or '+' or '-' or '~' or ':' or '@' or '/' or '^' or '*' or '=')
+                )
+                    return false;
+            }
+
+            return true;
+        }
+
+        private const string LauncherProbeMarker = "UNIGETUI_LAUNCHER_OK";
+
+        private const int LauncherProbeTimeout = 20000;
+
+        private static readonly ConcurrentDictionary<string, bool> _launcherProbeCache = new();
+
+        /// <summary>
+        /// Runs the operation launcher once to confirm it can actually execute before the manager
+        /// commits to the -File launch path. A machine-wide execution policy overrides the
+        /// -ExecutionPolicy argument, and antivirus or a broken deployment can block the script
+        /// too, so the mechanism is verified rather than assumed. Callers fall back to the
+        /// concatenated -Command form when this returns false.
+        /// </summary>
+        public static bool PowerShellLauncherWorks(string powerShellPath, string launcherPath)
+        {
+            if (!File.Exists(launcherPath))
+                return false;
+
+            return _launcherProbeCache.GetOrAdd(
+                $"{powerShellPath}|{launcherPath}",
+                _ => ProbePowerShellLauncher(powerShellPath, launcherPath)
+            );
+        }
+
+        private static bool ProbePowerShellLauncher(string powerShellPath, string launcherPath)
+        {
+            try
+            {
+                using Process process = new();
+                process.StartInfo.FileName = powerShellPath;
+                foreach (
+                    string argument in new[]
+                    {
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        launcherPath,
+                        "plain",
+                        "Write-Output",
+                        LauncherProbeMarker,
+                    }
+                )
+                {
+                    process.StartInfo.ArgumentList.Add(argument);
+                }
+
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.CreateNoWindow = true;
+                process.Start();
+
+                // Both pipes have to be drained while waiting, not before: reading to the end first
+                // blocks until the child closes the stream, which makes the timeout unreachable,
+                // and leaving the other pipe unread deadlocks the child once it fills.
+                Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+                if (!process.WaitForExit(LauncherProbeTimeout))
+                {
+                    Logger.Warn(
+                        "The PowerShell operation launcher probe timed out; falling back to -Command"
+                    );
+                    try
+                    {
+                        process.Kill(true);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
+                    {
+                        // The process ended between the wait and the kill.
+                    }
+
+                    return false;
+                }
+
+                Task reads = Task.WhenAll(stdout, stderr);
+                reads.ContinueWith(
+                    completed => _ = completed.Exception,
+                    TaskContinuationOptions.OnlyOnFaulted
+                );
+
+                string output = reads.Wait(LauncherProbeTimeout) ? stdout.Result : "";
+
+                bool works = process.ExitCode is 0 && output.Contains(LauncherProbeMarker);
+                if (!works)
+                    Logger.Warn(
+                        $"The PowerShell operation launcher could not be executed (exit {process.ExitCode}); falling back to -Command"
+                    );
+
+                return works;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("The PowerShell operation launcher probe failed");
+                Logger.Warn(ex);
+                return false;
+            }
+        }
+
+        public static string EscapePowerShellSingleQuoted(string value)
+        {
+            StringBuilder builder = new();
+            builder.Append('\'');
+            foreach (char character in value)
+            {
+                if (character is '"' || char.IsControl(character))
+                    continue;
+
+                if (character is '\'')
+                    builder.Append('\'');
+
+                builder.Append(character);
+            }
+            builder.Append('\'');
+            return builder.ToString();
+        }
 
         public static string EscapeCommandLineArgument(string argument)
         {
@@ -1152,15 +2035,10 @@ namespace UniGetUI.Core.Tools
 
         private static IEnumerable<string> EnumerateSearchDirectories(string pathValue)
         {
-            if (OperatingSystem.IsWindows())
-            {
-                yield return Environment.CurrentDirectory;
-            }
-
             foreach (string pathEntry in pathValue.Split(Path.PathSeparator))
             {
                 string normalizedEntry = NormalizeSearchDirectory(pathEntry);
-                if (normalizedEntry.Length is not 0)
+                if (Path.IsPathFullyQualified(normalizedEntry))
                 {
                     yield return normalizedEntry;
                 }
@@ -1171,7 +2049,7 @@ namespace UniGetUI.Core.Tools
         {
             if (string.IsNullOrWhiteSpace(pathEntry))
             {
-                return Environment.CurrentDirectory;
+                return string.Empty;
             }
 
             return pathEntry.Trim().Trim('"');

@@ -17,7 +17,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
         /// Whether this PackageDetails instance has valid data or not.
         /// To load valid data, make use of the `Load()` method
         /// </summary>
-        public bool IsPopulated { get; private set; }
+        public bool IsPopulated =>
+            _populated && _populatedGeneration == InstallOptionsFactory.SavedGeneration;
+
+        private const int MaxLoadAttempts = 3;
+        private bool _populated;
+        private int _populatedGeneration;
 
         /// <summary>
         /// The description of the package
@@ -48,6 +53,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
         /// A URL pointing to the license of the package.
         /// </summary>
         public Uri? LicenseUrl { get; set; }
+
+        /// <summary>
+        /// The version of the package the installer URL points at, as reported by the
+        /// loaded manifest. Null when the manager does not report it.
+        /// </summary>
+        public string? Version { get; set; }
 
         /// <summary>
         /// A URL pointing to the installer of the package
@@ -105,8 +116,20 @@ namespace UniGetUI.PackageEngine.PackageClasses
         {
             try
             {
-                await Task.Run(() => Package.Manager.DetailsHelper.GetDetails(this));
-                IsPopulated = true;
+                for (int attempt = 0; ; attempt++)
+                {
+                    int generation = InstallOptionsFactory.SavedGeneration;
+                    await Task.Run(() => Package.Manager.DetailsHelper.GetDetails(this));
+                    if (
+                        generation == InstallOptionsFactory.SavedGeneration
+                        || attempt == MaxLoadAttempts - 1
+                    )
+                    {
+                        _populatedGeneration = generation;
+                        _populated = true;
+                        break;
+                    }
+                }
             }
             catch (Exception ex)
             {

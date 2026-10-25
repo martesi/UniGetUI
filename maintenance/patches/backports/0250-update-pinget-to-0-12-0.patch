@@ -1,0 +1,29 @@
+From 3e6bad961413a0ce6fb71d90f93dab579bf39335 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:30:11 +0800
+Subject: [PATCH] backport: Update Pinget to 0.12.0 (#5364)
+
+Upstream-Commit: 093a1d0d00f200a9b7ab050d07ce60980e45089c
+Upstream-PR: Devolutions/UniGetUI#5364
+Classic-Source-Commit: 3e6bad961413a0ce6fb71d90f93dab579bf39335
+
+---
+ .../UniGetUI.PackageEngine.Managers.WinGet.csproj               | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj b/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
+index 67e1791f124cfd60a9b161d6af539abf91a564b7..b822e9f77cc99f780efb30739552791292c9c99e 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
+@@ -24,7 +24,7 @@
+     </ItemGroup>
+ 
+     <ItemGroup>
+-        <PackageReference Include="Devolutions.Pinget.Core" Version="0.9.0" />
++        <PackageReference Include="Devolutions.Pinget.Core" Version="0.12.0" />
+         <PackageReference Include="PhotoSauce.MagicScaler" Version="0.15.0" />
+         <!-- Security override for GHSA-2m69-gcr7-jv3q inherited through Microsoft.Data.Sqlite. -->
+         <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+-- 
+2.56.0
+

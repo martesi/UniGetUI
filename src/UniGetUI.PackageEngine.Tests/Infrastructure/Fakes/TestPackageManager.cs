@@ -8,6 +8,9 @@ namespace UniGetUI.PackageEngine.Tests.Infrastructure.Fakes;
 
 public sealed class TestPackageManager : PackageManager
 {
+    private bool _installerUrlFollowsPackageVersion;
+    private bool _commandLineIsShellInterpreted;
+    private IReadOnlyList<string> _operationCallArgs = [];
     private Func<string, IReadOnlyList<Package>> _findPackages = _ => [];
     private Func<IReadOnlyList<Package>> _getAvailableUpdates = static () => [];
     private Func<IReadOnlyList<Package>> _getInstalledPackages = static () => [];
@@ -85,6 +88,8 @@ public sealed class TestPackageManager : PackageManager
 
     public string LoadedVersion { get; set; } = "1.0.0-test";
 
+    public Exception? VersionLoadFailure { get; set; }
+
     public int AttemptFastRepairCalls { get; private set; }
 
     public int RefreshPackageIndexesCalls { get; private set; }
@@ -104,6 +109,31 @@ public sealed class TestPackageManager : PackageManager
     public void SetInstalledPackages(Func<IReadOnlyList<Package>> getInstalledPackages)
     {
         _getInstalledPackages = getInstalledPackages;
+    }
+
+    public override bool InstallerUrlFollowsPackageVersion => _installerUrlFollowsPackageVersion;
+
+    public override bool CommandLineIsShellInterpreted => _commandLineIsShellInterpreted;
+
+    public void SetCommandLineIsShellInterpreted(bool shellInterpreted)
+    {
+        _commandLineIsShellInterpreted = shellInterpreted;
+    }
+
+    public void SetOperationCallArgs(params string[] operationCallArgs)
+    {
+        _operationCallArgs = operationCallArgs;
+        Status.OperationCallArgs = operationCallArgs;
+    }
+
+    protected override IReadOnlyList<string> _getOperationCallArgs(
+        string executablePath,
+        string callArguments
+    ) => _operationCallArgs;
+
+    public void SetInstallerUrlFollowsPackageVersion(bool followsPackageVersion)
+    {
+        _installerUrlFollowsPackageVersion = followsPackageVersion;
     }
 
     public void SetCandidateExecutableFiles(params string[] candidateExecutableFiles)
@@ -139,6 +169,11 @@ public sealed class TestPackageManager : PackageManager
 
     protected override void _loadManagerVersion(out string version)
     {
+        if (VersionLoadFailure is not null)
+        {
+            throw VersionLoadFailure;
+        }
+
         version = LoadedVersion;
     }
 

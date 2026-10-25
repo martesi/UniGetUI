@@ -462,6 +462,10 @@
     </ItemGroup>
 
     <ItemGroup>
+        <Content Include="..\SharedAssets\Assets\Utilities\unigetui_ps_operation.ps1" Link="Assets\Utilities\unigetui_ps_operation.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+
+    <ItemGroup>
         <Compile Include="..\SharedAssemblyInfo.cs" Link="SharedAssemblyInfo.cs" />
         <Compile Include="..\Shared\SharedPreUiCommandDispatcher.cs" Link="Shared\SharedPreUiCommandDispatcher.cs" />
     </ItemGroup>

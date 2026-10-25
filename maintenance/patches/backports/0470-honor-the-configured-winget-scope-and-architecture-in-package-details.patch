@@ -1,0 +1,1190 @@
+From e9edec9a665842d46ed525785a2bb0563a4addfd Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:42:37 +0800
+Subject: [PATCH] backport: Honor the configured WinGet scope and architecture
+ in package details (#5521)
+
+Upstream-Commit: 288ef55d71b24c9aa83f3621f16547d0e7cd2cc2
+Upstream-PR: Devolutions/UniGetUI#5521
+Classic-Source-Commit: e9edec9a665842d46ed525785a2bb0563a4addfd
+
+---
+ .../ManagerHelpers/IPackageOperationHelper.cs |  19 ++
+ .../PingetPackageDetailsProvider.cs           | 261 +++++++++++++++-
+ .../Helpers/WinGetPkgOperationHelper.cs       | 137 +++++---
+ .../Manager/Classes/NullPackageManager.cs     |  12 +
+ .../Manager/Helpers/BasePkgOperationHelper.cs |  19 ++
+ .../Packages/Classes/InstallOptionsFactory.cs |   5 +
+ .../Packages/Classes/PackageDetails.cs        |  23 +-
+ .../Fakes/TestPackageOperationHelper.cs       |  22 ++
+ .../PackageDetailsLoadTests.cs                | 126 ++++++++
+ .../WinGetManagerTests.cs                     | 293 ++++++++++++++++++
+ 10 files changed, 871 insertions(+), 46 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/PackageDetailsLoadTests.cs
+
+diff --git a/src/UniGetUI.PackageEngine.Interfaces/ManagerHelpers/IPackageOperationHelper.cs b/src/UniGetUI.PackageEngine.Interfaces/ManagerHelpers/IPackageOperationHelper.cs
+index 80add5992a0ef2244e37f456ea66f5281bae6774..eadddb92d11136af16ead0346750019ef63a3339 100644
+--- a/src/UniGetUI.PackageEngine.Interfaces/ManagerHelpers/IPackageOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Interfaces/ManagerHelpers/IPackageOperationHelper.cs
+@@ -41,5 +41,24 @@ namespace UniGetUI.PackageEngine.Interfaces.ManagerProviders
+             IReadOnlyList<string> processOutput,
+             int returnCode
+         );
++
++        /// <summary>
++        /// Applies manager-specific elevation requirements for the given operation, e.g. by
++        /// setting <c>package.OverridenOptions.RunAsAdministrator</c> when the package's
++        /// installer is known to require elevation. Called before the operation runs, on
++        /// both the local execution path and the agent-broker path, so that elevation is
++        /// requested consistently regardless of how the operation is executed.
++        /// </summary>
++        public void ApplyElevationRequirements(
++            IPackage package,
++            InstallOptions options,
++            OperationType operation
++        );
++
++        public void ApplyOperationOverrides(
++            IPackage package,
++            InstallOptions options,
++            OperationType operation
++        );
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
+index 0061ab2f4f7550f3deffa6196352968af4110794..63388e1796c1274f543012d96b58aac8b4c43c44 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
+@@ -1,5 +1,6 @@
+ using System.Diagnostics;
+ using System.Diagnostics.CodeAnalysis;
++using System.Runtime.InteropServices;
+ using System.Text.Json;
+ using Devolutions.Pinget.Core;
+ using UniGetUI.Core.Data;
+@@ -7,6 +8,8 @@ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.ManagerClasses.Classes;
++using UniGetUI.PackageEngine.PackageClasses;
++using InstallOptions = UniGetUI.PackageEngine.Serializable.InstallOptions;
+ 
+ namespace UniGetUI.PackageEngine.Managers.WingetManager;
+ 
+@@ -15,6 +18,8 @@ internal interface IPingetPackageDetailsProvider
+     bool LoadPackageDetails(IPackageDetails details, INativeTaskLogger logger);
+ }
+ 
++internal readonly record struct InstallerPreference(string? Scope, string? Architecture);
++
+ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
+     : IPingetPackageDetailsProvider
+ {
+@@ -23,11 +28,17 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
+         try
+         {
+             PackageQuery query = PingetPackageDetailsProvider.CreateQuery(details.Package);
++            InstallerPreference preference =
++                PingetPackageDetailsProvider.GetConfiguredInstallerPreference(details.Package);
+             logger.Log("Loading WinGet installer metadata with bundled Pinget CLI");
+             logger.Log($" Query: {PingetPackageDetailsProvider.FormatQueryForLog(query)}");
++            logger.Log(
++                $" Installer preference applied to the returned manifest: Scope={preference.Scope}, "
++                    + $"Architecture={preference.Architecture}"
++            );
+ 
+             string output = RunShow(query, logger);
+-            ApplyManifestJson(details, output);
++            ApplyManifestJson(details, output, preference);
+             return true;
+         }
+         catch (Exception ex)
+@@ -198,8 +209,14 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
+         return output;
+     }
+ 
+-    private static void ApplyManifestJson(IPackageDetails details, string output)
++    internal static void ApplyManifestJson(
++        IPackageDetails details,
++        string output,
++        InstallerPreference preference = default,
++        Func<Uri, long>? installerSizeResolver = null
++    )
+     {
++        installerSizeResolver ??= CoreTools.GetFileSizeAsLong;
+         using JsonDocument document = JsonDocument.Parse(output);
+         JsonElement manifest = document.RootElement;
+         JsonElement installer = default;
+@@ -207,7 +224,8 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
+             manifest.TryGetProperty("Installers", out JsonElement installers)
+             && installers.ValueKind == JsonValueKind.Array
+             && installers.GetArrayLength() > 0
+-            && (installer = installers[0]).ValueKind == JsonValueKind.Object;
++            && (installer = SelectInstaller(manifest, installers, preference)).ValueKind
++                == JsonValueKind.Object;
+ 
+         SetIfMissing(value => details.Author = value, details.Author, GetString(manifest, "Author"));
+         SetIfMissing(
+@@ -260,17 +278,112 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
+             if (TryCreateUri(GetString(installer, "InstallerUrl"), out Uri? installerUri))
+             {
+                 details.InstallerUrl = installerUri;
+-                details.InstallerSize = CoreTools.GetFileSizeAsLong(installerUri);
++                details.InstallerSize = installerSizeResolver(installerUri);
+             }
+         }
+     }
+ 
++    private static JsonElement SelectInstaller(
++        JsonElement manifest,
++        JsonElement installers,
++        InstallerPreference preference
++    )
++    {
++        return SelectInstaller(manifest, installers, preference.Scope, preference.Architecture)
++            ?? SelectInstaller(manifest, installers, null, null)
++            ?? installers[0];
++    }
++
++    private static JsonElement? SelectInstaller(
++        JsonElement manifest,
++        JsonElement installers,
++        string? scope,
++        string? architecture
++    )
++    {
++        string? rootScope = GetString(manifest, "Scope");
++        string? rootMinimumOsVersion = GetString(manifest, "MinimumOSVersion");
++        IReadOnlyList<string>? rootPlatforms = GetStringArray(manifest, "Platform");
++        string systemArchitecture = PingetPackageDetailsProvider.CurrentArchitecture();
++        string[] preferredArchitectures = PingetPackageDetailsProvider.PreferredArchitectures(
++            systemArchitecture
++        );
++
++        JsonElement? selected = null;
++        int selectedRank = int.MinValue;
++        foreach (JsonElement candidate in installers.EnumerateArray())
++        {
++            if (candidate.ValueKind != JsonValueKind.Object)
++                continue;
++
++            if (
++                !PingetPackageDetailsProvider.MatchesCurrentPlatform(
++                    GetStringArray(candidate, "Platform") ?? rootPlatforms
++                )
++                || !PingetPackageDetailsProvider.MatchesCurrentOsVersion(
++                    GetString(candidate, "MinimumOSVersion") ?? rootMinimumOsVersion
++                )
++            )
++                continue;
++
++            string? candidateScope = GetString(candidate, "Scope") ?? rootScope;
++            if (
++                scope is not null
++                && candidateScope is not null
++                && !candidateScope.Equals(scope, StringComparison.OrdinalIgnoreCase)
++            )
++                continue;
++
++            string? candidateArchitecture = GetString(candidate, "Architecture");
++            if (
++                candidateArchitecture is not null
++                && !(
++                    architecture is not null
++                        ? candidateArchitecture.Equals(architecture, StringComparison.OrdinalIgnoreCase)
++                        : preferredArchitectures.Contains(
++                            candidateArchitecture,
++                            StringComparer.OrdinalIgnoreCase
++                        )
++                )
++            )
++                continue;
++
++            int rank = PingetPackageDetailsProvider.ArchitectureRank(
++                candidateArchitecture,
++                architecture ?? systemArchitecture,
++                preferredArchitectures
++            );
++            if (rank > selectedRank)
++            {
++                selected = candidate;
++                selectedRank = rank;
++            }
++        }
++
++        return selected;
++    }
++
+     private static string? GetString(JsonElement element, string propertyName) =>
+         element.TryGetProperty(propertyName, out JsonElement value)
+         && value.ValueKind == JsonValueKind.String
+             ? value.GetString()
+             : null;
+ 
++    private static IReadOnlyList<string>? GetStringArray(JsonElement element, string propertyName)
++    {
++        if (
++            !element.TryGetProperty(propertyName, out JsonElement value)
++            || value.ValueKind != JsonValueKind.Array
++        )
++            return null;
++
++        return value
++            .EnumerateArray()
++            .Where(item => item.ValueKind == JsonValueKind.String)
++            .Select(item => item.GetString()!)
++            .ToArray();
++    }
++
+     private static void SetIfMissing(
+         Action<string> setValue,
+         string? currentValue,
+@@ -313,29 +426,54 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
+ {
+     private readonly Func<PackageQuery, ShowResult> _showPackage;
+     private readonly Func<Uri, long> _installerSizeResolver;
++    private readonly Func<IPackage, InstallerPreference> _installerPreferenceResolver;
+ 
+     public PingetPackageDetailsProvider()
+         : this(ShowWithRepository) { }
+ 
+     internal PingetPackageDetailsProvider(
+         Func<PackageQuery, ShowResult> showPackage,
+-        Func<Uri, long>? installerSizeResolver = null
++        Func<Uri, long>? installerSizeResolver = null,
++        Func<IPackage, InstallerPreference>? installerPreferenceResolver = null
+     )
+     {
+         _showPackage = showPackage;
+         _installerSizeResolver = installerSizeResolver ?? CoreTools.GetFileSizeAsLong;
++        _installerPreferenceResolver =
++            installerPreferenceResolver ?? GetConfiguredInstallerPreference;
+     }
+ 
+     public bool LoadPackageDetails(IPackageDetails details, INativeTaskLogger logger)
+     {
+         try
+         {
+-            PackageQuery query = CreateQuery(details.Package);
++            InstallerPreference preference = _installerPreferenceResolver(details.Package);
++            PackageQuery query = CreateQuery(details.Package) with
++            {
++                InstallScope = preference.Scope,
++                InstallerArchitecture = preference.Architecture,
++            };
+             logger.Log("Loading WinGet installer metadata with Pinget");
+             logger.Log($" Query: {FormatQueryForLog(query)}");
+             Logger.Info($"Loading WinGet installer metadata with Pinget. Query: {FormatQueryForLog(query)}");
+ 
+             ShowResult result = _showPackage(query);
++            if (
++                result.SelectedInstaller is null
++                && PreferenceExcludesAnInstaller(result.Manifest.Installers, preference)
++            )
++            {
++                logger.Log(
++                    " No installer matches the configured scope/architecture, retrying without them"
++                );
++                result = _showPackage(
++                    query with
++                    {
++                        InstallScope = null,
++                        InstallerArchitecture = null,
++                    }
++                );
++            }
+ 
+             foreach (string warning in result.Warnings)
+             {
+@@ -396,6 +534,115 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
+         return query;
+     }
+ 
++    internal static InstallerPreference GetConfiguredInstallerPreference(IPackage package)
++    {
++        InstallOptions options = InstallOptionsFactory.LoadForPackage(package);
++        if (!options.OverridesNextLevelOpts)
++            options = InstallOptionsFactory.LoadForManager(package.Manager);
++
++        return new InstallerPreference(
++            WinGetPkgOperationHelper.GetEffectiveScope(package, options),
++            WinGetPkgOperationHelper.GetEffectiveArchitecture(
++                package,
++                options,
++                forUpdate: package.IsUpgradable
++            )
++        );
++    }
++
++    private static bool PreferenceExcludesAnInstaller(
++        IEnumerable<Installer> installers,
++        InstallerPreference preference
++    ) =>
++        installers.Any(installer =>
++            (
++                preference.Scope is not null
++                && installer.Scope is not null
++                && !installer.Scope.Equals(preference.Scope, StringComparison.OrdinalIgnoreCase)
++            )
++            || (
++                preference.Architecture is not null
++                && installer.Architecture is not null
++                && !installer.Architecture.Equals(
++                    preference.Architecture,
++                    StringComparison.OrdinalIgnoreCase
++                )
++            )
++        );
++
++    internal static bool MatchesCurrentPlatform(IReadOnlyList<string>? platforms) =>
++        platforms is null
++        || platforms.Count == 0
++        || !OperatingSystem.IsWindows()
++        || platforms.Contains("Windows.Desktop", StringComparer.OrdinalIgnoreCase);
++
++    internal static bool MatchesCurrentOsVersion(
++        string? minimumOsVersion,
++        string? currentOsVersion = null
++    )
++    {
++        if (string.IsNullOrWhiteSpace(minimumOsVersion))
++            return true;
++
++        currentOsVersion ??= OperatingSystem.IsWindows()
++            ? Environment.OSVersion.Version.ToString()
++            : null;
++        if (string.IsNullOrWhiteSpace(currentOsVersion))
++            return true;
++
++        if (
++            TryParseOsVersion(minimumOsVersion, out Version? minimum)
++            && TryParseOsVersion(currentOsVersion, out Version? current)
++        )
++            return current >= minimum;
++
++        return minimumOsVersion.Equals(currentOsVersion, StringComparison.OrdinalIgnoreCase);
++    }
++
++    private static bool TryParseOsVersion(string value, [NotNullWhen(true)] out Version? version) =>
++        Version.TryParse(
++            string.Join('.', value.Split('.', StringSplitOptions.RemoveEmptyEntries).Take(4)),
++            out version
++        );
++
++    internal static string CurrentArchitecture() =>
++        RuntimeInformation.OSArchitecture switch
++        {
++            System.Runtime.InteropServices.Architecture.X64 => "x64",
++            System.Runtime.InteropServices.Architecture.X86 => "x86",
++            System.Runtime.InteropServices.Architecture.Arm64 => "arm64",
++            _ => "neutral",
++        };
++
++    internal static string[] PreferredArchitectures(string systemArchitecture) =>
++        systemArchitecture switch
++        {
++            "arm64" => ["arm64", "neutral", "x64", "x86"],
++            "x64" => ["x64", "neutral", "x86"],
++            "x86" => ["x86", "neutral"],
++            _ => ["neutral"],
++        };
++
++    internal static int ArchitectureRank(
++        string? installerArchitecture,
++        string preferredArchitecture,
++        string[] preferredArchitectures
++    )
++    {
++        if (installerArchitecture is null)
++            return 0;
++        if (installerArchitecture.Equals(preferredArchitecture, StringComparison.OrdinalIgnoreCase))
++            return preferredArchitectures.Length + 2;
++        if (installerArchitecture.Equals("neutral", StringComparison.OrdinalIgnoreCase))
++            return preferredArchitectures.Length + 1;
++
++        int index = Array.FindIndex(
++            preferredArchitectures,
++            candidate => candidate.Equals(installerArchitecture, StringComparison.OrdinalIgnoreCase)
++        );
++        return index < 0 ? -1 : preferredArchitectures.Length - index;
++    }
++
+     internal static void ApplyShowResult(
+         IPackageDetails details,
+         ShowResult result,
+@@ -630,6 +877,8 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
+                 $"Name={query.Name}",
+                 $"Source={query.Source}",
+                 $"Exact={query.Exact}",
++                $"Scope={query.InstallScope}",
++                $"Architecture={query.InstallerArchitecture}",
+             }.Where(part => !part.EndsWith("="))
+         );
+     }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 489e6b5072d87ece3d5bea103976f0e808917f70..86f94ac49e80cdaa1573dc17e66e089c1dc66b0f 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -65,6 +65,50 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+     public WinGetPkgOperationHelper(WinGet manager)
+         : base(manager) { }
+ 
++    internal static string? GetEffectiveScope(IPackage package, InstallOptions options)
++    {
++        if (package.OverridenOptions.WinGet_DropArchAndScope)
++            return null;
++
++        return (package.OverridenOptions.Scope ?? options.InstallationScope) switch
++        {
++            PackageScope.User => PackageScope.User,
++            PackageScope.Machine => PackageScope.Machine,
++            _ => null,
++        };
++    }
++
++    internal static string? GetUpdateArchitectureOverride(IPackage package)
++    {
++        if (package.Name.Contains("64-bit") || package.Id.ToLower().Contains("x64"))
++            return Architecture.x64;
++
++        if (package.Name.Contains("32-bit") || package.Id.ToLower().Contains("x86"))
++            return Architecture.x86;
++
++        return null;
++    }
++
++    internal static string? GetEffectiveArchitecture(
++        IPackage package,
++        InstallOptions options,
++        bool forUpdate = false
++    )
++    {
++        if (package.OverridenOptions.WinGet_DropArchAndScope)
++            return null;
++
++        string architecture =
++            (forUpdate ? GetUpdateArchitectureOverride(package) : null) ?? options.Architecture;
++        return architecture switch
++        {
++            Architecture.x86 => Architecture.x86,
++            Architecture.x64 => Architecture.x64,
++            Architecture.arm64 => Architecture.arm64,
++            _ => null,
++        };
++    }
++
+     protected override IReadOnlyList<string> _getOperationParameters(
+         IPackage package,
+         InstallOptions options,
+@@ -99,18 +143,10 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         }
+ 
+         // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
+-        // WinGet_DropArchAndScope is set after an "update not applicable" result so the retry
+-        // lets WinGet choose a compatible installer instead of repeating the same constraints.
+-        if (!package.OverridenOptions.WinGet_DropArchAndScope)
++        // WinGet_DropArchAndScope is set after an "update not applicable" failure to retry without the scope/architecture constraints.
++        if (GetEffectiveScope(package, options) is { } scope)
+         {
+-            parameters.AddRange(
+-                (package.OverridenOptions.Scope ?? options.InstallationScope) switch
+-                {
+-                    PackageScope.User => ["--scope", "user"],
+-                    PackageScope.Machine => ["--scope", "machine"],
+-                    _ => [],
+-                }
+-            );
++            parameters.AddRange(["--scope", scope]);
+         }
+ 
+         if (
+@@ -142,14 +178,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+ 
+         if (operation is OperationType.Update)
+         {
+-            if (package.Name.Contains("64-bit") || package.Id.ToLower().Contains("x64"))
+-            {
+-                options.Architecture = Architecture.x64;
+-            }
+-            else if (package.Name.Contains("32-bit") || package.Id.ToLower().Contains("x86"))
+-            {
+-                options.Architecture = Architecture.x86;
+-            }
++            ApplyOperationOverrides(package, options, operation);
+             parameters.Add("--include-unknown");
+ 
+             if (!usePinget)
+@@ -193,20 +222,58 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             if (options.SkipHashCheck)
+                 parameters.Add("--ignore-security-hash");
+ 
+-            if (!package.OverridenOptions.WinGet_DropArchAndScope)
++            if (GetEffectiveArchitecture(package, options) is { } architecture)
+             {
+-                parameters.AddRange(
+-                    options.Architecture switch
+-                    {
+-                        Architecture.x86 => ["--architecture", "x86"],
+-                        Architecture.x64 => ["--architecture", "x64"],
+-                        Architecture.arm64 => ["--architecture", "arm64"],
+-                        _ => [],
+-                    }
+-                );
++                parameters.AddRange(["--architecture", architecture]);
++            }
++        }
++
++        ApplyElevationRequirements(package, options, operation);
++
++        if (!usePinget)
++        {
++            parameters.Add(WinGet.GetProxyArgument());
++        }
++
++        parameters.AddRange(
++            operation switch
++            {
++                OperationType.Update => options.CustomParameters_Update,
++                OperationType.Uninstall => options.CustomParameters_Uninstall,
++                _ => options.CustomParameters_Install,
+             }
++        );
++        return parameters;
++    }
++
++    /// <summary>
++    /// Consults the WinGet native installer metadata to detect packages that require (or
++    /// prohibit) elevation, and updates <c>package.OverridenOptions.RunAsAdministrator</c>
++    /// accordingly. Used by both the local execution path (via
++    /// <see cref="_getOperationParameters"/>) and the agent-broker path, so that the
++    /// requested elevation matches regardless of where the operation runs.
++    /// </summary>
++    public override void ApplyOperationOverrides(
++        IPackage package,
++        InstallOptions options,
++        OperationType operation
++    )
++    {
++        if (
++            operation is OperationType.Update
++            && GetUpdateArchitectureOverride(package) is { } updateArchitecture
++        )
++        {
++            options.Architecture = updateArchitecture;
+         }
++    }
+ 
++    public override void ApplyElevationRequirements(
++        IPackage package,
++        InstallOptions options,
++        OperationType operation
++    )
++    {
+         try
+         {
+             var installOptions = NativePackageHandler.GetInstallationOptions(
+@@ -343,14 +410,10 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             )
+             {
+                 var options = InstallOptionsFactory.LoadApplicable(package);
+-                bool hasScope =
+-                    (package.OverridenOptions.Scope ?? options.InstallationScope)
+-                    is PackageScope.User or PackageScope.Machine;
+-                bool hasArch =
+-                    options.Architecture
+-                    is Architecture.x86 or Architecture.x64 or Architecture.arm64;
+-
+-                if (hasScope || hasArch)
++                if (
++                    GetEffectiveScope(package, options) is not null
++                    || GetEffectiveArchitecture(package, options, forUpdate: true) is not null
++                )
+                 {
+                     Logger.Warn(
+                         $"Update for {package.Id} reported as not applicable; retrying without the scope/architecture constraints"
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
+index 2ffee7c5ea378b52a4a1877e2da6a21cc32284c5..e6466cad91757265d853aa1117387285df467837 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
+@@ -181,5 +181,17 @@ namespace UniGetUI.PackageEngine.Classes.Manager
+             IReadOnlyList<string> processOutput,
+             int returnCode
+         ) => throw new NotImplementedException();
++
++        public void ApplyElevationRequirements(
++            IPackage package,
++            InstallOptions options,
++            OperationType operation
++        ) => throw new NotImplementedException();
++
++        public void ApplyOperationOverrides(
++            IPackage package,
++            InstallOptions options,
++            OperationType operation
++        ) => throw new NotImplementedException();
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Helpers/BasePkgOperationHelper.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Helpers/BasePkgOperationHelper.cs
+index dea280dd500716bbcfc6b4d42e4698e86c2d961c..91d296399a77a6784ce7ecf9dd364c043e6db259 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Helpers/BasePkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Helpers/BasePkgOperationHelper.cs
+@@ -138,4 +138,23 @@ public abstract class BasePkgOperationHelper : IPackageOperationHelper
+ 
+         return _getOperationResult(package, operation, processOutput, returnCode);
+     }
++
++    /// <summary>
++    /// Default implementation: no manager-specific elevation requirements. Managers that
++    /// can detect that a package needs (or prohibits) elevation override this to update
++    /// <c>package.OverridenOptions.RunAsAdministrator</c> accordingly.
++    /// </summary>
++    public virtual void ApplyElevationRequirements(
++        IPackage package,
++        InstallOptions options,
++        OperationType operation
++    )
++    { }
++
++    public virtual void ApplyOperationOverrides(
++        IPackage package,
++        InstallOptions options,
++        OperationType operation
++    )
++    { }
+ }
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
+index 0e63c4cce574984662caae89a8ad61f057082076..8aa87e9275ad43c3134d2d0ffc235393db9db693 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
+@@ -21,6 +21,10 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         public const string PackageIdPlaceholder = "%PACKAGE%";
+         public const string PackageNamePlaceholder = "%NAME%";
+ 
++        private static int _savedGeneration;
++
++        public static int SavedGeneration => Volatile.Read(ref _savedGeneration);
++
+         public static bool IsIdentityScopedOptionsFile(string fileName) =>
+             StoragePath.IsIdentityScoped(fileName);
+ 
+@@ -236,6 +240,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
+                 }
+ 
+                 _optionsCache[key] = options.Copy();
++                Interlocked.Increment(ref _savedGeneration);
+ 
+                 string fileContents = options.AsJsonString();
+                 File.WriteAllText(filePath, fileContents);
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
+index 2583aa9359991138cef2eac1349e52ce5632d83e..e5388f3902770dd6c02a9310925647fdbbeb6f2c 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
+@@ -17,7 +17,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         /// Whether this PackageDetails instance has valid data or not.
+         /// To load valid data, make use of the `Load()` method
+         /// </summary>
+-        public bool IsPopulated { get; private set; }
++        public bool IsPopulated =>
++            _populated && _populatedGeneration == InstallOptionsFactory.SavedGeneration;
++
++        private const int MaxLoadAttempts = 3;
++        private bool _populated;
++        private int _populatedGeneration;
+ 
+         /// <summary>
+         /// The description of the package
+@@ -111,8 +116,20 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         {
+             try
+             {
+-                await Task.Run(() => Package.Manager.DetailsHelper.GetDetails(this));
+-                IsPopulated = true;
++                for (int attempt = 0; ; attempt++)
++                {
++                    int generation = InstallOptionsFactory.SavedGeneration;
++                    await Task.Run(() => Package.Manager.DetailsHelper.GetDetails(this));
++                    if (
++                        generation == InstallOptionsFactory.SavedGeneration
++                        || attempt == MaxLoadAttempts - 1
++                    )
++                    {
++                        _populatedGeneration = generation;
++                        _populated = true;
++                        break;
++                    }
++                }
+             }
+             catch (Exception ex)
+             {
+diff --git a/src/UniGetUI.PackageEngine.Tests/Infrastructure/Fakes/TestPackageOperationHelper.cs b/src/UniGetUI.PackageEngine.Tests/Infrastructure/Fakes/TestPackageOperationHelper.cs
+index 74a9c330791ecee54c535af09581d0fef4c56764..af6692ee5c9c2550f0f5a413d0c5c8bc6866540f 100644
+--- a/src/UniGetUI.PackageEngine.Tests/Infrastructure/Fakes/TestPackageOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Tests/Infrastructure/Fakes/TestPackageOperationHelper.cs
+@@ -14,6 +14,28 @@ public sealed class TestPackageOperationHelper(TestPackageManager manager)
+     public Func<IPackage, OperationType, IReadOnlyList<string>, int, OperationVeredict> ResultFactory { get; set; } =
+         static (_, _, _, returnCode) => returnCode == 0 ? OperationVeredict.Success : OperationVeredict.Failure;
+ 
++    public Action<IPackage, InstallOptions, OperationType>? ElevationRequirementsAction { get; set; }
++
++    public override void ApplyElevationRequirements(
++        IPackage package,
++        InstallOptions options,
++        OperationType operation
++    )
++    {
++        ElevationRequirementsAction?.Invoke(package, options, operation);
++    }
++
++    public Action<IPackage, InstallOptions, OperationType>? OperationOverridesAction { get; set; }
++
++    public override void ApplyOperationOverrides(
++        IPackage package,
++        InstallOptions options,
++        OperationType operation
++    )
++    {
++        OperationOverridesAction?.Invoke(package, options, operation);
++    }
++
+     protected override IReadOnlyList<string> _getOperationParameters(
+         IPackage package,
+         InstallOptions options,
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageDetailsLoadTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageDetailsLoadTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ad1d89805cd20f14486f5f3678fba7334b17fa6
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/PackageDetailsLoadTests.cs
+@@ -0,0 +1,126 @@
++using UniGetUI.Core.Data;
++using UniGetUI.PackageEngine.Enums;
++using UniGetUI.PackageEngine.PackageClasses;
++using UniGetUI.PackageEngine.Serializable;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++public class PackageDetailsLoadTests
++{
++    [Fact]
++    public async Task ConcurrentLoadsShareASingleFetch()
++    {
++        int fetches = 0;
++        var gate = new TaskCompletionSource();
++        var manager = new PackageManagerBuilder()
++            .ConfigureDetails(helper =>
++                helper.PopulateDetails = details =>
++                {
++                    Interlocked.Increment(ref fetches);
++                    gate.Task.Wait();
++                    details.Description = "Fetched once";
++                })
++            .Build();
++        var package = new PackageBuilder().WithManager(manager).WithId("Contoso.Test").Build();
++
++        Task first = package.Details.Load();
++        Task second = package.Details.Load();
++        gate.SetResult();
++        await Task.WhenAll(first, second);
++
++        Assert.Equal(1, fetches);
++        Assert.True(package.Details.IsPopulated);
++        Assert.Equal("Fetched once", package.Details.Description);
++    }
++
++    [Fact]
++    public async Task LoadRunsAgainOnceThePreviousLoadCompleted()
++    {
++        int fetches = 0;
++        var manager = new PackageManagerBuilder()
++            .ConfigureDetails(helper =>
++                helper.PopulateDetails = _ => Interlocked.Increment(ref fetches))
++            .Build();
++        var package = new PackageBuilder().WithManager(manager).WithId("Contoso.Test").Build();
++
++        await package.Details.Load();
++        await package.Details.Load();
++
++        Assert.Equal(2, fetches);
++    }
++
++    [Fact]
++    public async Task ALoadJoinedAfterAnOptionsSaveReturnsDetailsFetchedUnderTheNewOptions()
++    {
++        string testRoot = Path.Combine(Path.GetTempPath(), nameof(PackageDetailsLoadTests), Guid.NewGuid().ToString("N"));
++        CoreData.TEST_DataDirectoryOverride = Path.Combine(testRoot, "Data");
++        try
++        {
++            Directory.CreateDirectory(CoreData.UniGetUIInstallationOptionsDirectory);
++            int fetches = 0;
++            var firstFetchStarted = new TaskCompletionSource();
++            var releaseFirstFetch = new TaskCompletionSource();
++            var manager = new PackageManagerBuilder()
++                .ConfigureDetails(helper =>
++                    helper.PopulateDetails = details =>
++                    {
++                        int fetch = Interlocked.Increment(ref fetches);
++                        if (fetch == 1)
++                        {
++                            firstFetchStarted.SetResult();
++                            releaseFirstFetch.Task.Wait();
++                        }
++                        details.InstallerUrl = new Uri($"https://example.test/fetch-{fetch}.exe");
++                    })
++                .Build();
++            var package = new PackageBuilder().WithManager(manager).WithId("Contoso.Test").Build();
++
++            Task first = package.Details.Load();
++            await firstFetchStarted.Task;
++            InstallOptionsFactory.SaveForPackage(new InstallOptions { InstallationScope = PackageScope.Machine }, package);
++            Task joined = package.Details.Load();
++            releaseFirstFetch.SetResult();
++            await Task.WhenAll(first, joined);
++
++            Assert.Same(first, joined);
++            Assert.Equal(2, fetches);
++            Assert.Equal("https://example.test/fetch-2.exe", package.Details.InstallerUrl?.ToString());
++            Assert.True(package.Details.IsPopulated);
++        }
++        finally
++        {
++            CoreData.TEST_DataDirectoryOverride = null;
++            if (Directory.Exists(testRoot))
++                Directory.Delete(testRoot, recursive: true);
++        }
++    }
++
++    [Fact]
++    public async Task SavingInstallOptionsMarksLoadedDetailsAsStale()
++    {
++        string testRoot = Path.Combine(Path.GetTempPath(), nameof(PackageDetailsLoadTests), Guid.NewGuid().ToString("N"));
++        CoreData.TEST_DataDirectoryOverride = Path.Combine(testRoot, "Data");
++        try
++        {
++            Directory.CreateDirectory(CoreData.UniGetUIInstallationOptionsDirectory);
++            var manager = new PackageManagerBuilder().Build();
++            var package = new PackageBuilder().WithManager(manager).WithId("Contoso.Test").Build();
++
++            await package.Details.Load();
++            Assert.True(package.Details.IsPopulated);
++
++            InstallOptionsFactory.SaveForPackage(new InstallOptions { InstallationScope = PackageScope.Machine }, package);
++            Assert.False(package.Details.IsPopulated);
++
++            await package.Details.Load();
++            Assert.True(package.Details.IsPopulated);
++        }
++        finally
++        {
++            CoreData.TEST_DataDirectoryOverride = null;
++            if (Directory.Exists(testRoot))
++                Directory.Delete(testRoot, recursive: true);
++        }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index e16d6fd45dbf82b5541d46de53b32e28599d06f1..5fefa9ea11d67bf4b355ba321607e5e400d0f479 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -959,6 +959,299 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.Contains("utility", details.Tags);
+     }
+ 
++    [Fact]
++    public void PingetPackageDetailsProviderSelectsTheInstallerOfTheConfiguredScope()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        List<PackageQuery> queries = [];
++        var provider = new PingetPackageDetailsProvider(
++            query =>
++            {
++                queries.Add(query);
++                return CreateScopedPingetShowResult(query.InstallScope);
++            },
++            installerSizeResolver: _ => 1234,
++            installerPreferenceResolver: _ => new(PackageScope.Machine, Architecture.x64)
++        );
++
++        provider.LoadPackageDetails(details, new TestNativeTaskLogger());
++
++        PackageQuery query = Assert.Single(queries);
++        Assert.Equal(PackageScope.Machine, query.InstallScope);
++        Assert.Equal(Architecture.x64, query.InstallerArchitecture);
++        Assert.Equal("https://example.test/machine.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetPackageDetailsProviderRetriesWithoutPreferenceWhenItExcludesEveryInstaller()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        List<PackageQuery> queries = [];
++        var provider = new PingetPackageDetailsProvider(
++            query =>
++            {
++                queries.Add(query);
++                ShowResult result = CreateScopedPingetShowResult(null, [PackageScope.User]);
++                return query.InstallScope is null
++                    ? result
++                    : result with { SelectedInstaller = null };
++            },
++            installerSizeResolver: _ => 1234,
++            installerPreferenceResolver: _ => new(PackageScope.Machine, Architecture.x64)
++        );
++
++        provider.LoadPackageDetails(details, new TestNativeTaskLogger());
++
++        Assert.Equal(2, queries.Count);
++        Assert.Null(queries[1].InstallScope);
++        Assert.Null(queries[1].InstallerArchitecture);
++        Assert.Equal("https://example.test/user.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetPackageDetailsProviderDoesNotRetryWhenThePreferenceExcludedNothing()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        int lookups = 0;
++        var provider = new PingetPackageDetailsProvider(
++            _ =>
++            {
++                lookups++;
++                return CreatePingetShowResult() with { SelectedInstaller = null };
++            },
++            installerSizeResolver: _ => 1234,
++            installerPreferenceResolver: _ => new(PackageScope.Machine, Architecture.x64)
++        );
++
++        provider.LoadPackageDetails(details, new TestNativeTaskLogger());
++
++        Assert.Equal(1, lookups);
++    }
++
++    [Theory]
++    [InlineData(PackageScope.Machine, Architecture.x64, "https://example.test/x64-machine.exe")]
++    [InlineData(PackageScope.User, Architecture.x64, "https://example.test/x64-user.exe")]
++    [InlineData(PackageScope.Machine, Architecture.arm64, "https://example.test/arm64-machine.exe")]
++    public void PingetCliPackageDetailsProviderSelectsTheInstallerOfTheConfiguredPreference(
++        string scope,
++        string architecture,
++        string expectedUrl
++    )
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x64", "Scope": "user", "InstallerUrl": "https://example.test/x64-user.exe" },
++                { "Architecture": "arm64", "Scope": "machine", "InstallerUrl": "https://example.test/arm64-machine.exe" },
++                { "Architecture": "x64", "Scope": "machine", "InstallerUrl": "https://example.test/x64-machine.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(scope, architecture),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal(expectedUrl, details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderTreatsAnInstallerWithoutScopeAsMatching()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x64", "InstallerUrl": "https://example.test/x64-any.exe" },
++                { "Architecture": "arm64", "Scope": "machine", "InstallerUrl": "https://example.test/arm64-machine.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(PackageScope.Machine, Architecture.x64),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/x64-any.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderFallsBackWhenThePreferenceExcludesEveryInstaller()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x64", "Scope": "user", "InstallerUrl": "https://example.test/x64-user.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(PackageScope.Machine, Architecture.x86),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/x64-user.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderResolvesTheManifestRootScope()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Scope": "user",
++              "Installers": [
++                { "Architecture": "x64", "InstallerUrl": "https://example.test/x64-inherited-user.exe" },
++                { "Architecture": "x64", "Scope": "machine", "InstallerUrl": "https://example.test/x64-machine.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(PackageScope.Machine, Architecture.x64),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/x64-machine.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderSkipsInstallersThatNeedANewerWindows()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x86", "InstallerUrl": "https://example.test/x86.exe" },
++                { "Architecture": "x64", "MinimumOSVersion": "99.0.0.0", "InstallerUrl": "https://example.test/x64-future.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/x86.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderSkipsInstallersForAnotherPlatform()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x64", "Platform": ["Windows.Universal"], "InstallerUrl": "https://example.test/universal.exe" },
++                { "Architecture": "x64", "Platform": ["Windows.Desktop"], "InstallerUrl": "https://example.test/desktop.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(null, Architecture.x64),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/desktop.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Theory]
++    [InlineData("10.0.19045.0", "10.0.22000.0", false)]
++    [InlineData("10.0.22631.0", "10.0.22000.0", true)]
++    [InlineData("10.0.19045.0", null, true)]
++    [InlineData("10.0.19045.0", "10.0.19045", true)]
++    public void MatchesCurrentOsVersionComparesNumerically(
++        string currentOsVersion,
++        string? minimumOsVersion,
++        bool expected
++    )
++    {
++        Assert.Equal(
++            expected,
++            PingetPackageDetailsProvider.MatchesCurrentOsVersion(minimumOsVersion, currentOsVersion)
++        );
++    }
++
++    [Theory]
++    [InlineData("Contoso Tool 32-bit", "Contoso.Tool", false, Architecture.x64)]
++    [InlineData("Contoso Tool 32-bit", "Contoso.Tool", true, Architecture.x86)]
++    [InlineData("Contoso Tool", "Contoso.Tool.x64", true, Architecture.x64)]
++    [InlineData("Contoso Tool", "Contoso.Tool", true, Architecture.x64)]
++    public void GetEffectiveArchitectureAppliesTheUpdateOverrideOnlyForUpdates(
++        string name,
++        string id,
++        bool forUpdate,
++        string expected
++    )
++    {
++        var package = new PackageBuilder()
++            .WithManager(new WinGet())
++            .WithName(name)
++            .WithId(id)
++            .WithVersion("1.0.0")
++            .Build();
++        var options = new InstallOptions { Architecture = Architecture.x64 };
++
++        Assert.Equal(
++            expected,
++            WinGetPkgOperationHelper.GetEffectiveArchitecture(package, options, forUpdate)
++        );
++    }
++
++    [Theory]
++    [InlineData(OperationType.Update, Architecture.x86)]
++    [InlineData(OperationType.Install, Architecture.x64)]
++    public void ApplyOperationOverridesForcesThePackageArchitectureOnlyOnUpdate(
++        OperationType operation,
++        string expected
++    )
++    {
++        var manager = new WinGet();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool 32-bit")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++        var options = new InstallOptions { Architecture = Architecture.x64 };
++
++        manager.OperationHelper.ApplyOperationOverrides(package, options, operation);
++
++        Assert.Equal(expected, options.Architecture);
++    }
++
++    private static Package CreateContosoToolPackage() =>
++        new PackageBuilder()
++            .WithManager(new WinGet())
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++
+     [Fact]
+     public void TryGetInstallerUrlsCollectsEveryInstallerUrlWithoutDuplicates()
+     {
+-- 
+2.56.0
+
