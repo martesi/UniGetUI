@@ -168,6 +168,294 @@ public sealed class PowerShellManagerTests
         Assert.DoesNotContain("-Scope", parameters);
     }
 
+    [Fact]
+    public void GetParameters_UpdateKeepsUpdateModuleWhenIntegrityChecksAreNotSkipped()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            new InstallOptions(),
+            OperationType.Update
+        );
+
+        Assert.Contains("Update-Module", parameters);
+        Assert.DoesNotContain("Install-Module", parameters);
+        Assert.DoesNotContain("-SkipPublisherCheck", parameters);
+    }
+
+    [Fact]
+    public void GetParameters_UpdateRunsThroughInstallModuleWhenIntegrityChecksAreSkipped()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        Assert.Contains("Install-Module", parameters);
+        Assert.DoesNotContain("Update-Module", parameters);
+        Assert.Contains("-SkipPublisherCheck", parameters);
+        Assert.Contains("-Name", parameters);
+        Assert.Contains(package.Id, parameters);
+    }
+
+    [Fact]
+    public void GetParameters_UpdateThroughInstallModuleCarriesTheSelectedScope()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var options = new InstallOptions
+        {
+            SkipHashCheck = true,
+            InstallationScope = PackageScope.Machine,
+        };
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        Assert.Contains("-Scope", parameters);
+        Assert.Contains("AllUsers", parameters);
+    }
+
+    [Fact]
+    public void GetParameters_UpdateThroughInstallModuleOmitsScopeWhenNoneIsKnown()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        Assert.DoesNotContain("-Scope", parameters);
+        Assert.DoesNotContain("CurrentUser", parameters);
+    }
+
+    [Fact]
+    public void GetParameters_UpdateThroughInstallModuleKeepsTheInstalledRepository()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        int repositoryIndex = parameters.ToList().IndexOf("-Repository");
+        Assert.NotEqual(-1, repositoryIndex);
+        Assert.Contains(package.Source.Name, parameters[repositoryIndex + 1]);
+    }
+
+    [Fact]
+    public void GetStandaloneParameters_UpdateThroughInstallModuleQuotesTheRepository()
+    {
+        var manager = new PowerShell();
+        var package = Assert.Single(
+            PowerShell.ParseInstalledPackages(
+                ["Devolutions.PowerShell\t1.0.0\tInternal Modules"],
+                manager
+            )
+        );
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        var parameters = manager.OperationHelper.GetStandaloneParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        int repositoryIndex = parameters.ToList().IndexOf("-Repository");
+        Assert.NotEqual(-1, repositoryIndex);
+        Assert.Equal("'Internal Modules'", parameters[repositoryIndex + 1]);
+    }
+
+    [Fact]
+    public void GetParameters_UpdateThroughInstallModuleKeepsTheRepositoryRawForTheArgumentVector()
+    {
+        var manager = new PowerShell();
+        manager.Status.OperationCallArgs = LauncherVector;
+
+        var package = Assert.Single(
+            PowerShell.ParseInstalledPackages(
+                ["Devolutions.PowerShell\t1.0.0\tInternal Modules"],
+                manager
+            )
+        );
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        int repositoryIndex = parameters.ToList().IndexOf("-Repository");
+        Assert.NotEqual(-1, repositoryIndex);
+        Assert.Equal("Internal Modules", parameters[repositoryIndex + 1]);
+    }
+
+    private static readonly string[] LauncherVector =
+    [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        @"C:\App\Assets\Utilities\unigetui_ps_operation.ps1",
+        "tls12",
+    ];
+
+    [Fact]
+    public void GetStandaloneParameters_DoesNotRecordTheRoutingDecisionOnThePackage()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        manager.OperationHelper.GetStandaloneParameters(package, options, OperationType.Update);
+
+        Assert.False(package.OverridenOptions.PowerShell_UpdateThroughInstall);
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            ClobberFailureOutput,
+            1
+        );
+
+        Assert.Equal(OperationVeredict.Failure, veredict);
+        Assert.False(package.OverridenOptions.PowerShell_AllowClobber);
+    }
+
+    [Fact]
+    public void GetResult_ClearsTheRoutingDecisionSoItCannotLeakIntoALaterOperation()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+        Assert.True(package.OverridenOptions.PowerShell_UpdateThroughInstall);
+
+        manager.OperationHelper.GetResult(package, OperationType.Update, ["done"], 0);
+
+        Assert.False(package.OverridenOptions.PowerShell_UpdateThroughInstall);
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            ClobberFailureOutput,
+            1
+        );
+
+        Assert.Equal(OperationVeredict.Failure, veredict);
+    }
+
+    [Fact]
+    public void GetStandaloneParameters_UpdateThroughInstallModuleEscapesAQuotedRepository()
+    {
+        var manager = new PowerShell();
+        var package = Assert.Single(
+            PowerShell.ParseInstalledPackages(
+                ["Devolutions.PowerShell\t1.0.0\tBob's Modules"],
+                manager
+            )
+        );
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        var parameters = manager.OperationHelper.GetStandaloneParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        int repositoryIndex = parameters.ToList().IndexOf("-Repository");
+        Assert.NotEqual(-1, repositoryIndex);
+        Assert.Equal("'Bob''s Modules'", parameters[repositoryIndex + 1]);
+    }
+
+    [Fact]
+    public void GetParameters_UpdateThroughInstallModuleIgnoresAPinnedVersion()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var options = new InstallOptions { SkipHashCheck = true, Version = "1.0.0" };
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        Assert.DoesNotContain("-RequiredVersion", parameters);
+        Assert.DoesNotContain("1.0.0", parameters);
+    }
+
+    [Fact]
+    public void GetResult_RetriesWithAllowClobberOnAnUpdateRoutedThroughInstallModule()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        var options = new InstallOptions { SkipHashCheck = true };
+        manager.OperationHelper.GetParameters(package, options, OperationType.Update);
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            ClobberFailureOutput,
+            1
+        );
+
+        Assert.Equal(OperationVeredict.AutoRetry, veredict);
+        Assert.True(package.OverridenOptions.PowerShell_AllowClobber);
+
+        var parameters = manager.OperationHelper.GetParameters(
+            package,
+            options,
+            OperationType.Update
+        );
+
+        Assert.Contains("-AllowClobber", parameters);
+    }
+
+    [Fact]
+    public void GetResult_DoesNotRetryWithAllowClobberOnAPlainUpdate()
+    {
+        var manager = new PowerShell();
+        var package = BuildInstalledPackage(manager);
+
+        manager.OperationHelper.GetParameters(
+            package,
+            new InstallOptions(),
+            OperationType.Update
+        );
+
+        var veredict = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            ClobberFailureOutput,
+            1
+        );
+
+        Assert.Equal(OperationVeredict.Failure, veredict);
+        Assert.False(package.OverridenOptions.PowerShell_AllowClobber);
+    }
+
     [Theory]
     [InlineData(OperationType.Install)]
     [InlineData(OperationType.Update)]
