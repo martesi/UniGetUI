@@ -844,6 +844,155 @@ public sealed class WinGetManagerTests : IDisposable
     }
 
     [Fact]
+    public void TryGetInstallerUrlsCollectsEveryInstallerUrlWithoutDuplicates()
+    {
+        var package = CreatePingetQueryPackage();
+        var urls = PingetPackageDetailsProvider.TryGetInstallerUrls(
+            package,
+            null,
+            _ => CreatePingetShowResult(
+                installerUrls:
+                [
+                    "https://example.test/tool-x64.exe",
+                    "https://EXAMPLE.test/TOOL-X64.exe",
+                    "",
+                    "https://cdn.example.test/tool-arm64.exe",
+                ]
+            )
+        );
+
+        Assert.Equal(
+            ["https://example.test/tool-x64.exe", "https://cdn.example.test/tool-arm64.exe"],
+            urls
+        );
+    }
+
+    [Fact]
+    public void TryGetInstallerUrlsFallsBackToTheLatestManifestWhenTheVersionIsNotIndexed()
+    {
+        var package = CreatePingetQueryPackage();
+        List<string?> requestedVersions = [];
+
+        var urls = PingetPackageDetailsProvider.TryGetInstallerUrls(
+            package,
+            "9.9.9",
+            query =>
+            {
+                requestedVersions.Add(query.Version);
+                if (query.Version is not null)
+                    throw new InvalidOperationException("version not found in index");
+
+                return CreatePingetShowResult(installerUrls: ["https://example.test/latest.exe"]);
+            }
+        );
+
+        Assert.Equal(["9.9.9", null], requestedVersions);
+        Assert.Equal(["https://example.test/latest.exe"], urls);
+    }
+
+    [Fact]
+    public void TryGetInstallerUrlsReturnsNullWhenTheManifestHasNoInstaller()
+    {
+        var package = CreatePingetQueryPackage();
+
+        Assert.Null(
+            PingetPackageDetailsProvider.TryGetInstallerUrls(
+                package,
+                null,
+                _ => CreatePingetShowResult(installerUrls: [])
+            )
+        );
+    }
+
+    [Fact]
+    public void TryGetInstallerHostsForVersionRejectsAManifestOfAnotherVersion()
+    {
+        var package = CreatePingetQueryPackage();
+
+        Assert.Null(
+            PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
+                package,
+                "9.9.9",
+                _ => CreatePingetShowResult(installerUrls: ["https://example.test/latest.exe"])
+            )
+        );
+    }
+
+    [Fact]
+    public void TryGetInstallerHostsForVersionFallsBackToTheTrimmedMsixVersion()
+    {
+        var package = CreatePingetQueryPackage();
+
+        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
+            package,
+            "1.2.3.0",
+            _ => CreatePingetShowResult(installerUrls: ["https://example.test/tool.msixbundle"])
+        );
+
+        Assert.NotNull(hosts);
+        Assert.Equal(["example.test"], hosts.Order());
+    }
+
+    [Fact]
+    public void TryGetInstallerHostsForVersionDoesNotRetryWhenThereIsNothingToTrim()
+    {
+        var package = CreatePingetQueryPackage();
+        int lookups = 0;
+
+        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
+            package,
+            "9.9.9",
+            _ =>
+            {
+                lookups++;
+                return CreatePingetShowResult(installerUrls: ["https://example.test/tool.exe"]);
+            }
+        );
+
+        Assert.Null(hosts);
+        Assert.Equal(1, lookups);
+    }
+
+    [Theory]
+    [InlineData("2.7.11.0", "2.7.11")]
+    [InlineData("2.7.11.0.0", "2.7.11")]
+    [InlineData("1.0.0.0", "1")]
+    [InlineData("0.0.0.0", "0")]
+    [InlineData("2.7.11", null)]
+    [InlineData("2.7.0.11", null)]
+    [InlineData("1.2.3-beta.0", null)]
+    [InlineData("4", null)]
+    [InlineData("", null)]
+    public void TrimTrailingZeroSegmentsOnlyTrimsPlainDottedVersions(
+        string version,
+        string? expected
+    )
+    {
+        Assert.Equal(expected, PingetPackageDetailsProvider.TrimTrailingZeroSegments(version));
+    }
+
+    [Fact]
+    public void TryGetInstallerHostsForVersionReturnsTheHostsOfTheRequestedVersion()
+    {
+        var package = CreatePingetQueryPackage();
+
+        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
+            package,
+            "1.2.3",
+            _ => CreatePingetShowResult(
+                installerUrls:
+                [
+                    "https://example.test/tool-x64.exe",
+                    "https://cdn.example.test/tool-arm64.exe",
+                ]
+            )
+        );
+
+        Assert.NotNull(hosts);
+        Assert.Equal(["cdn.example.test", "example.test"], hosts.Order());
+    }
+
+    [Fact]
     public void PingetPackageDetailsProviderKeepsExistingDetailsWhenShowFails()
     {
         var manager = new WinGet();

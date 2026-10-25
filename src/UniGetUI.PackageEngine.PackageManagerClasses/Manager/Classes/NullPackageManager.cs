@@ -36,7 +36,6 @@ namespace UniGetUI.PackageEngine.Classes.Manager
         }
         public System.Text.Encoding OutputEncoding => System.Text.Encoding.UTF8;
 
-        public bool InstallerUrlFollowsPackageVersion => false;
 
         public string Id
         {
