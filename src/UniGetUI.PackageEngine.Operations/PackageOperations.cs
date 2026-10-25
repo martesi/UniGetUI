@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using UniGetUI.Core.Classes;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
@@ -98,6 +99,98 @@ namespace UniGetUI.PackageEngine.Operations
                 + "\nOverriden options: "
                 + Package.OverridenOptions.ToString();
         }
+
+        protected override async Task<OperationVeredict> PerformOperation()
+        {
+            // Observational stage marker only: structured progress starts as indeterminate
+            // with the role's stage label (e.g. "Installing..."). Re-reported on every
+            // attempt, so AutoRetry restarts also reset any previous speed. This changes
+            // nothing about execution, retries, elevation, proxy, or result handling.
+            ReportProgress(
+                Role switch
+                {
+                    OperationType.Install => OperationProgress.ForStage(
+                        OperationProgressStage.Installing
+                    ),
+                    OperationType.Update => OperationProgress.ForStage(
+                        OperationProgressStage.Updating
+                    ),
+                    OperationType.Uninstall => OperationProgress.ForStage(
+                        OperationProgressStage.Uninstalling
+                    ),
+                    _ => OperationProgress.Unknown,
+                }
+            );
+
+            {
+                if (!Package.Manager.Capabilities.SerializesOperations)
+                    return await PerformLocalOperation();
+
+                SemaphoreSlim gate = ManagerOperationGates.GetOrAdd(
+                    Package.Manager.Name,
+                    _ => new SemaphoreSlim(1, 1)
+                );
+                if (!await gate.WaitAsync(0))
+                {
+                    Line(
+                        CoreTools.Translate(
+                            "Waiting for another {0} operation to finish...",
+                            Package.Manager.DisplayName
+                        ),
+                        LineType.ProgressIndicator
+                    );
+                    IsWaitingForManager = true;
+                    try
+                    {
+                        await gate.WaitAsync(CancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return OperationVeredict.Canceled;
+                    }
+                    finally
+                    {
+                        IsWaitingForManager = false;
+                    }
+                }
+
+                try
+                {
+                    return await PerformLocalOperation();
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }
+
+
+        }
+
+        private async Task<OperationVeredict> PerformLocalOperation()
+        {
+            if (Package.Manager.OperationHelper is IManagedPackageOperationHelper managed)
+            {
+                try
+                {
+                    var result = await managed.TryPerformAsync(Package, Options, Role,
+                        message => Line(message, LineType.Information), ReportProgress, CancellationToken);
+                    if (result is not null)
+                        return result.Value;
+                    // Resolution may have pinned an initially unversioned request before fallback.
+                    PrepareProcessStartInfo();
+                }
+                catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
+                {
+                    return OperationVeredict.Canceled;
+                }
+            }
+            return await base.PerformOperation();
+        }
+
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> ManagerOperationGates =
+            new();
+
 
         protected sealed override void PrepareProcessStartInfo()
         {

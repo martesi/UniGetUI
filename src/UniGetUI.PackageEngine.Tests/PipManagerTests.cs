@@ -345,4 +345,140 @@ public sealed class PipManagerTests : IDisposable
         Assert.Equal(PackageScope.User, userScopedPackage.OverridenOptions.Scope);
         Assert.Equal(OperationVeredict.Failure, failureResult);
     }
+
+    [Theory]
+    [InlineData(OperationType.Install, OperationVeredict.AutoRetry, PackageScope.User)]
+    [InlineData(OperationType.Update, OperationVeredict.Failure, null)]
+    public void OperationHelperMovesOnlyNonUpdatesToTheUserSchemeOnARepeatedExternallyManagedFailure(
+        OperationType operation,
+        OperationVeredict expectedResult,
+        string? expectedScope
+    )
+    {
+        var manager = new Pip();
+        var package = new PackageBuilder().WithManager(manager).WithId("requests").Build();
+        string[] output = ["error: externally-managed-environment"];
+
+        var firstResult = manager.OperationHelper.GetResult(package, operation, output, 1);
+        var secondResult = manager.OperationHelper.GetResult(package, operation, output, 1);
+
+        Assert.Equal(OperationVeredict.AutoRetry, firstResult);
+        Assert.True(package.OverridenOptions.Pip_BreakSystemPackages);
+        Assert.Equal(expectedResult, secondResult);
+        Assert.Equal(expectedScope, package.OverridenOptions.Scope);
+    }
+
+    private static readonly string[] SharingViolationOutput =
+    [
+        "Attempting uninstall: botocore",
+        "ERROR: Could not install packages due to an OSError: [WinError 32] The process cannot access the file because it is being used by another process: 'C:\\Python314\\Lib\\site-packages\\botocore\\signers.py'",
+        "Consider using the `--user` option or check the permissions.",
+    ];
+
+    private static readonly string[] PermissionDeniedOutput =
+    [
+        "ERROR: Could not install packages due to an OSError: [WinError 5] Access is denied: 'C:\\Python314\\Lib\\site-packages\\requests'",
+        "Consider using the `--user` option or check the permissions.",
+    ];
+
+    [Theory]
+    [InlineData(OperationType.Install)]
+    [InlineData(OperationType.Update)]
+    public void OperationHelperDoesNotMoveToTheUserSchemeOnASharingViolation(
+        OperationType operation
+    )
+    {
+        var manager = new Pip();
+        var package = new PackageBuilder().WithManager(manager).WithId("boto3").Build();
+
+        var result = manager.OperationHelper.GetResult(
+            package,
+            operation,
+            SharingViolationOutput,
+            1
+        );
+
+        Assert.Equal(OperationVeredict.Failure, result);
+        Assert.Null(package.OverridenOptions.Scope);
+    }
+
+    [Fact]
+    public void OperationHelperDoesNotMoveAnUpdateToTheUserScheme()
+    {
+        var manager = new Pip();
+        var package = new PackageBuilder().WithManager(manager).WithId("requests").Build();
+
+        var result = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Update,
+            PermissionDeniedOutput,
+            1
+        );
+
+        Assert.Equal(OperationVeredict.Failure, result);
+        Assert.Null(package.OverridenOptions.Scope);
+    }
+
+    [Fact]
+    public void OperationHelperStillRetriesAnInstallInTheUserSchemeWhenAccessIsDenied()
+    {
+        var manager = new Pip();
+        var package = new PackageBuilder().WithManager(manager).WithId("requests").Build();
+
+        var result = manager.OperationHelper.GetResult(
+            package,
+            OperationType.Install,
+            PermissionDeniedOutput,
+            1
+        );
+
+        Assert.Equal(OperationVeredict.AutoRetry, result);
+        Assert.Equal(PackageScope.User, package.OverridenOptions.Scope);
+    }
+
+    [Fact]
+    public void PipSerializesItsOperations()
+    {
+        Assert.True(new Pip().Capabilities.SerializesOperations);
+    }
+
+    [Fact]
+    public async Task ResolveLatestVersionReportsAFailureWhenTheResolutionBudgetIsAlreadySpent()
+    {
+        Assert.True(PythonVersion.TryParse("3.12.0", out PythonVersion interpreter));
+
+        using HttpClient client = new(CoreTools.GenericHttpClientParameters);
+        using CancellationTokenSource budget = new();
+        await budget.CancelAsync();
+
+        Pip.VersionResolution resolution = await Pip.ResolveLatestVersionAsync(
+            client,
+            "requests",
+            interpreter,
+            budget.Token
+        );
+
+        Assert.True(resolution.Failed);
+        Assert.Null(resolution.Version);
+    }
+
+    [Fact]
+    public async Task ResolveLatestVersionKeepsServingLaterLookupsAfterASpentBudget()
+    {
+        Assert.True(PythonVersion.TryParse("3.12.0", out PythonVersion interpreter));
+
+        using HttpClient client = new(CoreTools.GenericHttpClientParameters);
+
+        for (int i = 0; i < 12; i++)
+        {
+            using CancellationTokenSource budget = new();
+            await budget.CancelAsync();
+
+            Pip.VersionResolution resolution = await Pip
+                .ResolveLatestVersionAsync(client, $"package-{i}", interpreter, budget.Token)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.True(resolution.Failed);
+        }
+    }
 }
