@@ -170,7 +170,6 @@ namespace UniGetUI.PackageEngine.Operations
                 }
             }
 
-
         }
 
         private async Task<OperationVeredict> PerformLocalOperation()
@@ -196,7 +195,6 @@ namespace UniGetUI.PackageEngine.Operations
 
         private static readonly ConcurrentDictionary<string, SemaphoreSlim> ManagerOperationGates =
             new();
-
 
         protected sealed override void PrepareProcessStartInfo()
         {

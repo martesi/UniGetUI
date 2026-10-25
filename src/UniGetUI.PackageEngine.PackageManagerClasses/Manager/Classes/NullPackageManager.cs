@@ -44,7 +44,6 @@ namespace UniGetUI.PackageEngine.Classes.Manager
         }
         public System.Text.Encoding OutputEncoding => System.Text.Encoding.UTF8;
 
-
         public string Id
         {
             get => string.IsNullOrWhiteSpace(Properties.Id) ? Properties.Name : Properties.Id;

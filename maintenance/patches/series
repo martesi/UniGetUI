@@ -62,3 +62,4 @@ backports/0570-refresh-the-winget-com-installed-index-before-listing-local-packa
 backports/0580-invalidate-a-manager-s-installed-package-caches-when-an-operation-succeeds.patch
 backports/0590-adapt-shared-backports-to-winui-startup-and-operations.patch
 backports/0600-validate-backport-update-branches-on-push.patch
+backports/0610-finish-backport-compatibility-and-regression-fixes.patch

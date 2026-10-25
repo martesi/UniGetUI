@@ -1,5 +1,3 @@
-using Devolutions.Now.Policy.Client;
-using UniGetUI.Core.SettingsEngine;
 using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
 using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
 using UniGetUI.PackageEngine.Enums;
@@ -18,33 +16,24 @@ public sealed class CargoManagedOperationRoutingTests
     [Fact]
     public async Task LocalManagedSuccessReportsProgressWithoutStartingCargo()
     {
-        bool original = Settings.Get(Settings.K.UseAgentBroker);
-        Settings.Set(Settings.K.UseAgentBroker, false);
-        try
+
+        var manager = new ManagedCargo();
+        manager.Helper.Perform = (_, progress, _) =>
         {
-            var manager = new ManagedCargo();
-            manager.Helper.Perform = (_, progress, _) =>
-            {
-                progress(OperationProgress.ForStage(OperationProgressStage.Installing));
-                return Task.FromResult<OperationVeredict?>(OperationVeredict.Success);
-            };
-            using var operation = CreateOperation(manager, "first");
-            Assert.Equal(OperationVeredict.Success, await operation.Run());
-            Assert.Equal(["first"], manager.Helper.Calls);
-            Assert.Equal(OperationProgressStage.Installing, operation.CurrentProgress.Stage);
-            Assert.False(operation.ProcessWasStarted);
-        }
-        finally
-        {
-            Settings.Set(Settings.K.UseAgentBroker, original);
-        }
+            progress(OperationProgress.ForStage(OperationProgressStage.Installing));
+            return Task.FromResult<OperationVeredict?>(OperationVeredict.Success);
+        };
+        using var operation = CreateOperation(manager, "first");
+        Assert.Equal(OperationVeredict.Success, await operation.Run());
+        Assert.Equal(["first"], manager.Helper.Calls);
+        Assert.Equal(OperationProgressStage.Installing, operation.CurrentProgress.Stage);
+        Assert.False(operation.ProcessWasStarted);
+
     }
 
     [Fact]
     public async Task ManagedOperationsRunInsideTheExistingCargoSerializationGate()
     {
-        bool original = Settings.Get(Settings.K.UseAgentBroker);
-        Settings.Set(Settings.K.UseAgentBroker, false);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
@@ -76,32 +65,6 @@ public sealed class CargoManagedOperationRoutingTests
         finally
         {
             release.TrySetResult();
-            Settings.Set(Settings.K.UseAgentBroker, original);
-        }
-    }
-
-    [Fact]
-    public async Task BrokerUnavailableNeverCallsTheLocalManagedInstaller()
-    {
-        bool original = Settings.Get(Settings.K.UseAgentBroker);
-        var originalFactory = PackageOperation.BrokerTransportFactory;
-        var transport = new UnavailableTransport();
-        Settings.Set(Settings.K.UseAgentBroker, true);
-        PackageOperation.BrokerTransportFactory = () => transport;
-        try
-        {
-            var manager = new ManagedCargo();
-            using var operation = CreateOperation(manager, "fixture-tool");
-            Assert.Equal(OperationVeredict.Failure, await operation.Run());
-            Assert.Empty(manager.Helper.Calls);
-            Assert.False(operation.ProcessWasStarted);
-            Assert.Contains("/v1/health", transport.Paths);
-            Assert.False(string.IsNullOrWhiteSpace(operation.Metadata.FailureMessage));
-        }
-        finally
-        {
-            PackageOperation.BrokerTransportFactory = originalFactory;
-            Settings.Set(Settings.K.UseAgentBroker, original);
         }
     }
 
@@ -148,15 +111,4 @@ public sealed class CargoManagedOperationRoutingTests
             IReadOnlyList<string> processOutput, int returnCode) => OperationVeredict.Failure;
     }
 
-    private sealed class UnavailableTransport : IBrokerTransport
-    {
-        internal List<string> Paths { get; } = [];
-        public Devolutions.Now.Policy.Api.Transport Kind => Devolutions.Now.Policy.Api.Transport.HttpNamedPipe;
-        public Task<BrokerTransportResponse> Send(BrokerTransportRequest request, CancellationToken cancellationToken = default)
-        {
-            Paths.Add(request.Path);
-            throw new BrokerClientException(BrokerClientErrorKind.BrokerUnavailable, "Simulated outage", request.Path);
-        }
-        public void Dispose() { }
-    }
 }

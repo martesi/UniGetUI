@@ -530,20 +530,22 @@ namespace UniGetUI.Core.Tools.Tests
         public void TestEnvVariableCreation()
         {
             const string ENV1 = "NONEXISTENTENVVARIABLE";
+            var target = OperatingSystem.IsWindows()
+                ? EnvironmentVariableTarget.User : EnvironmentVariableTarget.Process;
             Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.Process);
-            Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.User);
+            Environment.SetEnvironmentVariable(ENV1, null, target);
 
             ProcessStartInfo oldInfo = CoreTools.UpdateEnvironmentVariables();
             oldInfo.Environment.TryGetValue(ENV1, out string? result);
             Assert.Null(result);
 
-            Environment.SetEnvironmentVariable(ENV1, "randomval", EnvironmentVariableTarget.User);
+            Environment.SetEnvironmentVariable(ENV1, "randomval", target);
 
             ProcessStartInfo newInfo1 = CoreTools.UpdateEnvironmentVariables();
             newInfo1.Environment.TryGetValue(ENV1, out string? result2);
             Assert.Equal("randomval", result2);
 
-            Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.User);
+            Environment.SetEnvironmentVariable(ENV1, null, target);
             ProcessStartInfo newInfo2 = CoreTools.UpdateEnvironmentVariables();
             newInfo2.Environment.TryGetValue(ENV1, out string? result3);
             Assert.Null(result3);
@@ -554,7 +556,8 @@ namespace UniGetUI.Core.Tools.Tests
         {
             const string ENV = "TMP";
 
-            var expected = Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.User);
+            var expected = Environment.GetEnvironmentVariable(ENV, OperatingSystem.IsWindows()
+                ? EnvironmentVariableTarget.User : EnvironmentVariableTarget.Process);
 
             ProcessStartInfo info = CoreTools.UpdateEnvironmentVariables();
             info.Environment.TryGetValue(ENV, out string? result);
@@ -566,10 +569,11 @@ namespace UniGetUI.Core.Tools.Tests
         {
             const string ENV = "PATH";
 
-            var oldpath =
-                Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.Machine)
+            var oldpath = OperatingSystem.IsWindows()
+                ? Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.Machine)
                 + ";"
-                + Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.User);
+                + Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.User)
+                : Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.Process);
 
             ProcessStartInfo info = CoreTools.UpdateEnvironmentVariables();
             info.Environment.TryGetValue(ENV, out string? result);

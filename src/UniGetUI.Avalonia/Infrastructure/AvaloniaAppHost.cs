@@ -5,6 +5,7 @@ using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface;
+using UniGetUI.Shared;
 
 namespace UniGetUI.Avalonia.Infrastructure;
 
@@ -16,6 +17,9 @@ public static class AvaloniaAppHost
 
     public static void Run(string[] args)
     {
+        args = SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(args);
+        CoreData.SetSanitizedProcessArguments(args);
+
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             CrashHandler.ReportFatalException((Exception)e.ExceptionObject);
 

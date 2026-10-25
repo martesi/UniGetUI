@@ -30,8 +30,22 @@ internal sealed partial class CargoTrackingLock : IDisposable
 
     private static async Task<FileStream> OpenAsync(string path, CancellationToken cancellationToken)
     {
-        CargoConfiguration.RequireRegularPath(path);
-        FileStream stream = new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+        FileStream stream;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CargoConfiguration.RequireRegularPath(path);
+            try
+            {
+                stream = new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+                break;
+            }
+            catch (IOException ex) when ((ex.HResult & 0xFFFF) is 32 or 33)
+            {
+                // FileStream itself can contend with the native lock before flock is reached.
+                await Task.Delay(100, cancellationToken);
+            }
+        }
         try
         {
             while (true)

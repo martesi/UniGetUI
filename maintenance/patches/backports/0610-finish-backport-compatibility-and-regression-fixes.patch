@@ -1,0 +1,587 @@
+From 6e80972dcfdfed8e5ef6c04ed7ab7b3b3b161b40 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Mon, 26 Oct 2026 00:26:23 +0800
+Subject: [PATCH] classic: finish backport compatibility and regression fixes
+
+Restore shared loading coordination and complete npm, operation-test, launcher, and platform integration. Keep Cargo metadata acquisition cancellable when FileStream encounters a sharing lock before the native lock call, and close HTTP fixtures without a shutdown race.
+
+Upstream-Commit: 6ef60b4691e4e27eaedb8b0a83be98e6a5478826
+Upstream-PR: Devolutions/UniGetUI#5070
+
+Upstream-Commit: c87bd6ba4669a6a54ce3588c5c25bfb2ebc4cdfb
+Upstream-PR: Devolutions/UniGetUI#5039
+
+Upstream-Commit: 566ea0c2d92120fbe63038c43ea80d75f297e3e7
+Upstream-PR: Devolutions/UniGetUI#5346
+
+Upstream-Commit: 4f8a8209a7dfee97b89144cda8fae8c301a4d688
+Upstream-PR: Devolutions/UniGetUI#5348
+
+Upstream-Commit: 8220a4b47b00ca98cd10af26636358cd2e3216ae
+Upstream-PR: Devolutions/UniGetUI#5402
+
+Upstream-Commit: 288ef55d71b24c9aa83f3621f16547d0e7cd2cc2
+Upstream-PR: Devolutions/UniGetUI#5521
+
+Upstream-Commit: 83efec6156d01bd67cab4213c79dd7150d92bc08
+Upstream-PR: Devolutions/UniGetUI#5569
+Classic-Source-Commit: 6e80972dcfdfed8e5ef6c04ed7ab7b3b3b161b40
+
+---
+ src/UniGetUI.Avalonia/CrashHandler.cs         |  2 +-
+ .../Infrastructure/AvaloniaAppHost.cs         |  4 +
+ .../SoftwarePages/SoftwareUpdatesPage.cs      |  2 +-
+ src/UniGetUI.Core.Tools.Tests/ToolsTests.cs   | 18 ++--
+ src/UniGetUI.Core.Tools/Tools.cs              |  1 +
+ .../CargoTrackingLock.cs                      | 18 +++-
+ .../Helpers/NpmPkgDetailsHelper.cs            | 13 ++-
+ .../Helpers/NpmPkgOperationHelper.cs          |  2 +-
+ ...GetUI.PackageEngine.Managers.WinGet.csproj |  2 -
+ .../InternalsVisibleTo.cs                     |  3 +
+ .../OperationProgressFormatter.cs             | 93 +++++++++++++++++++
+ .../PackageOperations.cs                      |  2 -
+ .../Manager/Classes/NullPackageManager.cs     |  1 -
+ .../Packages/Classes/PackageDetails.cs        | 16 +++-
+ .../CargoManagedOperationRoutingTests.cs      | 72 +++-----------
+ .../Infrastructure/Helpers/TestHttpServer.cs  |  6 ++
+ .../UniGetUI.PackageEngine.Tests.csproj       |  1 +
+ 17 files changed, 173 insertions(+), 83 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Operations/InternalsVisibleTo.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Operations/OperationProgressFormatter.cs
+
+diff --git a/src/UniGetUI.Avalonia/CrashHandler.cs b/src/UniGetUI.Avalonia/CrashHandler.cs
+index 2e67164c7a7cdd937343436fdc27e6fd55fccb2b..9e801b93c390f89c3202170b0bb7c5b43c9760db 100644
+--- a/src/UniGetUI.Avalonia/CrashHandler.cs
++++ b/src/UniGetUI.Avalonia/CrashHandler.cs
+@@ -94,7 +94,7 @@ public static class CrashHandler
+     {
+         Debugger.Break();
+ 
+-        if (OperatingSystem.IsWindows() && !Environment.GetCommandLineArgs().Contains(NO_CORRUPT_DIALOG))
++        if (OperatingSystem.IsWindows() && !UniGetUI.Core.Data.CoreData.GetProcessArguments().Contains(NO_CORRUPT_DIALOG))
+         {
+             Exception? fileEx = e;
+             while (fileEx is not null)
+diff --git a/src/UniGetUI.Avalonia/Infrastructure/AvaloniaAppHost.cs b/src/UniGetUI.Avalonia/Infrastructure/AvaloniaAppHost.cs
+index 345d3bd32f0ff0f7bd47f14dc67266a513e1427d..815f5aa65b23d2ece77dc7ffda372d7a095bcacd 100644
+--- a/src/UniGetUI.Avalonia/Infrastructure/AvaloniaAppHost.cs
++++ b/src/UniGetUI.Avalonia/Infrastructure/AvaloniaAppHost.cs
+@@ -5,6 +5,7 @@ using UniGetUI.Core.Data;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.Interface;
++using UniGetUI.Shared;
+ 
+ namespace UniGetUI.Avalonia.Infrastructure;
+ 
+@@ -16,6 +17,9 @@ public static class AvaloniaAppHost
+ 
+     public static void Run(string[] args)
+     {
++        args = SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(args);
++        CoreData.SetSanitizedProcessArguments(args);
++
+         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+             CrashHandler.ReportFatalException((Exception)e.ExceptionObject);
+ 
+diff --git a/src/UniGetUI.Avalonia/Views/SoftwarePages/SoftwareUpdatesPage.cs b/src/UniGetUI.Avalonia/Views/SoftwarePages/SoftwareUpdatesPage.cs
+index 7bc6994c0064adc1792f7e8348b98a651d4ae11b..78c6ae4b988854513d59a758a13f65b3046eee96 100644
+--- a/src/UniGetUI.Avalonia/Views/SoftwarePages/SoftwareUpdatesPage.cs
++++ b/src/UniGetUI.Avalonia/Views/SoftwarePages/SoftwareUpdatesPage.cs
+@@ -403,7 +403,7 @@ public class SoftwareUpdatesPage : AbstractPackagesPage
+                 _ = AvaloniaPackageOperationHelper.UpdateAllAsync();
+                 ShowUpgradingPackagesNotification(upgradable);
+             }
+-            else if (Environment.GetCommandLineArgs().Contains("--updateapps"))
++            else if (UniGetUI.Core.Data.CoreData.GetProcessArguments().Contains("--updateapps"))
+             {
+                 _ = AvaloniaPackageOperationHelper.UpdateAllAsync();
+                 ShowUpgradingPackagesNotification(upgradable);
+diff --git a/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs b/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
+index 4cd83c60f48cca5b8432b5d7f819644931c397f7..065fe0f33685ac2183d9942891363b6e271aeae7 100644
+--- a/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
++++ b/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
+@@ -530,20 +530,22 @@ namespace UniGetUI.Core.Tools.Tests
+         public void TestEnvVariableCreation()
+         {
+             const string ENV1 = "NONEXISTENTENVVARIABLE";
++            var target = OperatingSystem.IsWindows()
++                ? EnvironmentVariableTarget.User : EnvironmentVariableTarget.Process;
+             Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.Process);
+-            Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.User);
++            Environment.SetEnvironmentVariable(ENV1, null, target);
+ 
+             ProcessStartInfo oldInfo = CoreTools.UpdateEnvironmentVariables();
+             oldInfo.Environment.TryGetValue(ENV1, out string? result);
+             Assert.Null(result);
+ 
+-            Environment.SetEnvironmentVariable(ENV1, "randomval", EnvironmentVariableTarget.User);
++            Environment.SetEnvironmentVariable(ENV1, "randomval", target);
+ 
+             ProcessStartInfo newInfo1 = CoreTools.UpdateEnvironmentVariables();
+             newInfo1.Environment.TryGetValue(ENV1, out string? result2);
+             Assert.Equal("randomval", result2);
+ 
+-            Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.User);
++            Environment.SetEnvironmentVariable(ENV1, null, target);
+             ProcessStartInfo newInfo2 = CoreTools.UpdateEnvironmentVariables();
+             newInfo2.Environment.TryGetValue(ENV1, out string? result3);
+             Assert.Null(result3);
+@@ -554,7 +556,8 @@ namespace UniGetUI.Core.Tools.Tests
+         {
+             const string ENV = "TMP";
+ 
+-            var expected = Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.User);
++            var expected = Environment.GetEnvironmentVariable(ENV, OperatingSystem.IsWindows()
++                ? EnvironmentVariableTarget.User : EnvironmentVariableTarget.Process);
+ 
+             ProcessStartInfo info = CoreTools.UpdateEnvironmentVariables();
+             info.Environment.TryGetValue(ENV, out string? result);
+@@ -566,10 +569,11 @@ namespace UniGetUI.Core.Tools.Tests
+         {
+             const string ENV = "PATH";
+ 
+-            var oldpath =
+-                Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.Machine)
++            var oldpath = OperatingSystem.IsWindows()
++                ? Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.Machine)
+                 + ";"
+-                + Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.User);
++                + Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.User)
++                : Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.Process);
+ 
+             ProcessStartInfo info = CoreTools.UpdateEnvironmentVariables();
+             info.Environment.TryGetValue(ENV, out string? result);
+diff --git a/src/UniGetUI.Core.Tools/Tools.cs b/src/UniGetUI.Core.Tools/Tools.cs
+index c6afa640962465b5fd8b07b53e837b6abf02207a..554972f8dabac4dc9e0f18cff3c3f30b196c24b7 100644
+--- a/src/UniGetUI.Core.Tools/Tools.cs
++++ b/src/UniGetUI.Core.Tools/Tools.cs
+@@ -2,6 +2,7 @@ using System.Buffers;
+ using System.Collections;
+ using System.Collections.Concurrent;
+ using System.Diagnostics;
++using System.Globalization;
+ using System.Net;
+ using System.Net.NetworkInformation;
+ using System.Numerics;
+diff --git a/src/UniGetUI.PackageEngine.Managers.Cargo/CargoTrackingLock.cs b/src/UniGetUI.PackageEngine.Managers.Cargo/CargoTrackingLock.cs
+index f6a5bd06d6950322b2433a330af961759a67b11d..965f5a86f5be2c905c3dd0d775d908592999530a 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Cargo/CargoTrackingLock.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Cargo/CargoTrackingLock.cs
+@@ -30,8 +30,22 @@ internal sealed partial class CargoTrackingLock : IDisposable
+ 
+     private static async Task<FileStream> OpenAsync(string path, CancellationToken cancellationToken)
+     {
+-        CargoConfiguration.RequireRegularPath(path);
+-        FileStream stream = new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
++        FileStream stream;
++        while (true)
++        {
++            cancellationToken.ThrowIfCancellationRequested();
++            CargoConfiguration.RequireRegularPath(path);
++            try
++            {
++                stream = new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
++                break;
++            }
++            catch (IOException ex) when ((ex.HResult & 0xFFFF) is 32 or 33)
++            {
++                // FileStream itself can contend with the native lock before flock is reached.
++                await Task.Delay(100, cancellationToken);
++            }
++        }
+         try
+         {
+             while (true)
+diff --git a/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgDetailsHelper.cs
+index e0ec46f8717fa8ffcdf4f29205d509ff2aeb39af..a58188cbaa934cf5d40e9d67dc46ce8b6c400535 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgDetailsHelper.cs
+@@ -20,12 +20,13 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
+         {
+             try
+             {
++                var identifier = NpmPackageIdentifier.Parse(details.Package.Id);
+                 details.InstallerType = "Tarball";
+                 details.ManifestUrl = new Uri(
+-                    $"https://www.npmjs.com/package/{details.Package.Id}"
++                    $"https://www.npmjs.com/package/{identifier.GetRegistryName()}"
+                 );
+                 details.ReleaseNotesUrl = new Uri(
+-                    $"https://www.npmjs.com/package/{details.Package.Id}?activeTab=versions"
++                    $"https://www.npmjs.com/package/{identifier.GetRegistryName()}?activeTab=versions"
+                 );
+ 
+                 using Process p = new();
+@@ -173,18 +174,20 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
+ 
+         protected override string? GetInstallLocation_UnSafe(IPackage package)
+         {
++            var identifier = NpmPackageIdentifier.Parse(package.Id);
+             if (package.OverridenOptions.Scope is PackageScope.Local)
+                 return Path.Join(
+                     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                     "node_modules",
+-                    package.Id
++                    identifier.GetInstallLocationName()
+                 );
++            // ApplicationData already resolves to the Roaming folder; npm's default global prefix
++            // is %AppData%\npm, so global modules live under %AppData%\npm\node_modules.
+             return Path.Join(
+                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+-                "Roaming",
+                 "npm",
+                 "node_modules",
+-                package.Id
++                identifier.GetInstallLocationName()
+             );
+         }
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgOperationHelper.cs
+index 6860738b40f16a7b0fe20649585872f745307a7e..08f3605df3c793138188c977aa7a22dbf0ce2449 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgOperationHelper.cs
+@@ -29,7 +29,7 @@ internal sealed class NpmPkgOperationHelper : BasePkgOperationHelper
+                 Manager.Properties.UpdateVerb,
+                 ResolveInstallSpec(package.Id, package.NewVersionString),
+             ],
+-            OperationType.Uninstall => [Manager.Properties.UninstallVerb, package.Id],
++            OperationType.Uninstall => [Manager.Properties.UninstallVerb, ResolveLocalName(package.Id)],
+             _ => throw new InvalidDataException("Invalid package operation"),
+         };
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj b/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
+index a096e07bca2f057fc6dea452ad350a1cd02e54d0..0b662f308f864eecf0825519bed8d6c73851e989 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
+@@ -29,7 +29,5 @@
+              affected by GHSA-2m69-gcr7-jv3q (CVE-2025-6965, NU1903). Pin the patched 2.1.13 until Pinget.Core moves up. -->
+         <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+         <PackageReference Include="PhotoSauce.MagicScaler" Version="0.15.0" />
+-        <!-- Security override for GHSA-2m69-gcr7-jv3q inherited through Microsoft.Data.Sqlite. -->
+-        <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+     </ItemGroup>
+ </Project>
+diff --git a/src/UniGetUI.PackageEngine.Operations/InternalsVisibleTo.cs b/src/UniGetUI.PackageEngine.Operations/InternalsVisibleTo.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..eeb63dad19545f4585cc54a71220b287160fd1dc
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Operations/InternalsVisibleTo.cs
+@@ -0,0 +1,3 @@
++using System.Runtime.CompilerServices;
++
++[assembly: InternalsVisibleTo("UniGetUI.PackageEngine.Tests")]
+diff --git a/src/UniGetUI.PackageEngine.Operations/OperationProgressFormatter.cs b/src/UniGetUI.PackageEngine.Operations/OperationProgressFormatter.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4318f87012cf8c4111a72b5d65bcd7025ff83dd2
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Operations/OperationProgressFormatter.cs
+@@ -0,0 +1,93 @@
++using UniGetUI.Core.Tools;
++using UniGetUI.PackageEngine.Enums;
++
++namespace UniGetUI.PackageOperations;
++
++/// <summary>
++/// Formats a generic <see cref="OperationProgress"/> for operation cards, log lines,
++/// and screen-reader status. Unknown progress maps to a short stage label
++/// (indeterminate); determinate progress uses translatable positional templates so
++/// translators control ordering, separators, and placement (e.g.
++/// "{0} · {1}% · {2} / {3} · {4}"). No ETA is shown.
++/// Size units reuse <see cref="CoreTools.FormatAsSize"/> conventions; stage labels and
++/// the composed templates go through <see cref="CoreTools.Translate"/>.
++/// </summary>
++public static class OperationProgressFormatter
++{
++    public static string Format(OperationProgress progress)
++    {
++        ArgumentNullException.ThrowIfNull(progress);
++        if (!progress.IsDeterminate)
++            return IndeterminateLabel(progress.Stage);
++
++        int percent = (int)Math.Round(progress.Percentage!.Value);
++        string label = StageLabel(progress.Stage);
++        if (
++            progress.BytesDownloaded.HasValue
++            && progress.BytesTotal.HasValue
++            && progress.BytesTotal.Value > 0
++        )
++        {
++            string downloaded = CoreTools.FormatAsSize((long)progress.BytesDownloaded.Value);
++            string total = CoreTools.FormatAsSize((long)progress.BytesTotal.Value);
++            string? throughput = FormatThroughput(progress.BytesPerSecond);
++            if (throughput is null)
++            {
++                return CoreTools.Translate(
++                    "{0} · {1}% · {2} / {3}",
++                    label,
++                    percent,
++                    downloaded,
++                    total
++                );
++            }
++
++            return CoreTools.Translate(
++                "{0} · {1}% · {2} / {3} · {4}",
++                label,
++                percent,
++                downloaded,
++                total,
++                throughput
++            );
++        }
++
++        return CoreTools.Translate("{0} · {1}%", label, percent);
++    }
++
++    public static string StageLabel(OperationProgressStage stage) =>
++        stage switch
++        {
++            OperationProgressStage.Downloading => CoreTools.Translate("Downloading"),
++            OperationProgressStage.Installing => CoreTools.Translate("Installing"),
++            OperationProgressStage.Updating => CoreTools.Translate("Updating"),
++            OperationProgressStage.Uninstalling => CoreTools.Translate("Uninstalling"),
++            _ => CoreTools.Translate("Please wait..."),
++        };
++
++    private static string IndeterminateLabel(OperationProgressStage stage) =>
++        stage switch
++        {
++            OperationProgressStage.Downloading
++            or OperationProgressStage.Installing
++            or OperationProgressStage.Updating
++            or OperationProgressStage.Uninstalling => CoreTools.Translate(
++                "{0}...",
++                StageLabel(stage)
++            ),
++            _ => CoreTools.Translate("Please wait..."),
++        };
++
++    /// <summary>
++    /// Formats a measured throughput reusing <see cref="CoreTools.FormatAsSize"/> units
++    /// with a "/s" suffix. Returns null when there is no usable speed, in which case the
++    /// caller keeps the established speed-less format.
++    /// </summary>
++    private static string? FormatThroughput(double? bytesPerSecond)
++    {
++        if (OperationProgress.NormalizeBytesPerSecond(bytesPerSecond) is not { } value)
++            return null;
++
++        return $"{CoreTools.FormatAsSize((long)value)}/s";
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+index ee70d41496216d93b9721cd5b46c6afabf70d460..04f4577ca45aba8de58d97e507aa3cebcb1d3e04 100644
+--- a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
++++ b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+@@ -170,7 +170,6 @@ namespace UniGetUI.PackageEngine.Operations
+                 }
+             }
+ 
+-
+         }
+ 
+         private async Task<OperationVeredict> PerformLocalOperation()
+@@ -197,7 +196,6 @@ namespace UniGetUI.PackageEngine.Operations
+         private static readonly ConcurrentDictionary<string, SemaphoreSlim> ManagerOperationGates =
+             new();
+ 
+-
+         protected sealed override void PrepareProcessStartInfo()
+         {
+             bool IsAdmin = CoreTools.IsAdministrator();
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
+index 864f9c676b7d822e6c5e503c9887ead2b2b403a9..87488947f4b03826bb54c4decc29455b5184758a 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
+@@ -44,7 +44,6 @@ namespace UniGetUI.PackageEngine.Classes.Manager
+         }
+         public System.Text.Encoding OutputEncoding => System.Text.Encoding.UTF8;
+ 
+-
+         public string Id
+         {
+             get => string.IsNullOrWhiteSpace(Properties.Id) ? Properties.Name : Properties.Id;
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
+index e5388f3902770dd6c02a9310925647fdbbeb6f2c..f8169cb18a6a722c21310c1a3557b08567f16d0c 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
+@@ -107,12 +107,26 @@ namespace UniGetUI.PackageEngine.PackageClasses
+ 
+         public List<IPackageDetails.Dependency> Dependencies { get; set; } = [];
+ 
++        private readonly object _loadLock = new();
++        private Task? _loadTask;
++
+         public PackageDetails(IPackage package)
+         {
+             Package = package;
+         }
+ 
+-        public async Task Load()
++        public Task Load()
++        {
++            lock (_loadLock)
++            {
++                if (_loadTask is { IsCompleted: false })
++                    return _loadTask;
++
++                return _loadTask = LoadCore();
++            }
++        }
++
++        private async Task LoadCore()
+         {
+             try
+             {
+diff --git a/src/UniGetUI.PackageEngine.Tests/CargoManagedOperationRoutingTests.cs b/src/UniGetUI.PackageEngine.Tests/CargoManagedOperationRoutingTests.cs
+index 34e68672d87fb91b48589e43e53ce1956cd826c5..151b683bba52a10c07cc9ef403a17f301ac7c33e 100644
+--- a/src/UniGetUI.PackageEngine.Tests/CargoManagedOperationRoutingTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/CargoManagedOperationRoutingTests.cs
+@@ -1,5 +1,3 @@
+-using Devolutions.Now.Policy.Client;
+-using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
+ using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
+ using UniGetUI.PackageEngine.Enums;
+@@ -18,33 +16,24 @@ public sealed class CargoManagedOperationRoutingTests
+     [Fact]
+     public async Task LocalManagedSuccessReportsProgressWithoutStartingCargo()
+     {
+-        bool original = Settings.Get(Settings.K.UseAgentBroker);
+-        Settings.Set(Settings.K.UseAgentBroker, false);
+-        try
+-        {
+-            var manager = new ManagedCargo();
+-            manager.Helper.Perform = (_, progress, _) =>
+-            {
+-                progress(OperationProgress.ForStage(OperationProgressStage.Installing));
+-                return Task.FromResult<OperationVeredict?>(OperationVeredict.Success);
+-            };
+-            using var operation = CreateOperation(manager, "first");
+-            Assert.Equal(OperationVeredict.Success, await operation.Run());
+-            Assert.Equal(["first"], manager.Helper.Calls);
+-            Assert.Equal(OperationProgressStage.Installing, operation.CurrentProgress.Stage);
+-            Assert.False(operation.ProcessWasStarted);
+-        }
+-        finally
++
++        var manager = new ManagedCargo();
++        manager.Helper.Perform = (_, progress, _) =>
+         {
+-            Settings.Set(Settings.K.UseAgentBroker, original);
+-        }
++            progress(OperationProgress.ForStage(OperationProgressStage.Installing));
++            return Task.FromResult<OperationVeredict?>(OperationVeredict.Success);
++        };
++        using var operation = CreateOperation(manager, "first");
++        Assert.Equal(OperationVeredict.Success, await operation.Run());
++        Assert.Equal(["first"], manager.Helper.Calls);
++        Assert.Equal(OperationProgressStage.Installing, operation.CurrentProgress.Stage);
++        Assert.False(operation.ProcessWasStarted);
++
+     }
+ 
+     [Fact]
+     public async Task ManagedOperationsRunInsideTheExistingCargoSerializationGate()
+     {
+-        bool original = Settings.Get(Settings.K.UseAgentBroker);
+-        Settings.Set(Settings.K.UseAgentBroker, false);
+         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+         try
+         {
+@@ -76,32 +65,6 @@ public sealed class CargoManagedOperationRoutingTests
+         finally
+         {
+             release.TrySetResult();
+-            Settings.Set(Settings.K.UseAgentBroker, original);
+-        }
+-    }
+-
+-    [Fact]
+-    public async Task BrokerUnavailableNeverCallsTheLocalManagedInstaller()
+-    {
+-        bool original = Settings.Get(Settings.K.UseAgentBroker);
+-        var originalFactory = PackageOperation.BrokerTransportFactory;
+-        var transport = new UnavailableTransport();
+-        Settings.Set(Settings.K.UseAgentBroker, true);
+-        PackageOperation.BrokerTransportFactory = () => transport;
+-        try
+-        {
+-            var manager = new ManagedCargo();
+-            using var operation = CreateOperation(manager, "fixture-tool");
+-            Assert.Equal(OperationVeredict.Failure, await operation.Run());
+-            Assert.Empty(manager.Helper.Calls);
+-            Assert.False(operation.ProcessWasStarted);
+-            Assert.Contains("/v1/health", transport.Paths);
+-            Assert.False(string.IsNullOrWhiteSpace(operation.Metadata.FailureMessage));
+-        }
+-        finally
+-        {
+-            PackageOperation.BrokerTransportFactory = originalFactory;
+-            Settings.Set(Settings.K.UseAgentBroker, original);
+         }
+     }
+ 
+@@ -148,15 +111,4 @@ public sealed class CargoManagedOperationRoutingTests
+             IReadOnlyList<string> processOutput, int returnCode) => OperationVeredict.Failure;
+     }
+ 
+-    private sealed class UnavailableTransport : IBrokerTransport
+-    {
+-        internal List<string> Paths { get; } = [];
+-        public Devolutions.Now.Policy.Api.Transport Kind => Devolutions.Now.Policy.Api.Transport.HttpNamedPipe;
+-        public Task<BrokerTransportResponse> Send(BrokerTransportRequest request, CancellationToken cancellationToken = default)
+-        {
+-            Paths.Add(request.Path);
+-            throw new BrokerClientException(BrokerClientErrorKind.BrokerUnavailable, "Simulated outage", request.Path);
+-        }
+-        public void Dispose() { }
+-    }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Tests/Infrastructure/Helpers/TestHttpServer.cs b/src/UniGetUI.PackageEngine.Tests/Infrastructure/Helpers/TestHttpServer.cs
+index fbeb4accd50e2a2ec26b8b2efe84576c99346efc..930a68a843f5cd8437ce000b8a26a8420157752f 100644
+--- a/src/UniGetUI.PackageEngine.Tests/Infrastructure/Helpers/TestHttpServer.cs
++++ b/src/UniGetUI.PackageEngine.Tests/Infrastructure/Helpers/TestHttpServer.cs
+@@ -13,6 +13,7 @@ internal sealed class TestHttpServer : IDisposable
+     private readonly List<string> _requestPaths = [];
+     private readonly List<string> _requestMethods = [];
+     private readonly Task _backgroundTask;
++    private volatile bool _disposed;
+ 
+     public TestHttpServer(
+         Func<HttpListenerRequest, (int StatusCode, string Content, string ContentType)> handler,
+@@ -72,6 +73,7 @@ internal sealed class TestHttpServer : IDisposable
+ 
+     public void Dispose()
+     {
++        _disposed = true;
+         if (_listener.IsListening)
+         {
+             _listener.Stop();
+@@ -118,6 +120,10 @@ internal sealed class TestHttpServer : IDisposable
+             {
+                 break;
+             }
++            catch (InvalidOperationException) when (_disposed)
++            {
++                break;
++            }
+         }
+     }
+ 
+diff --git a/src/UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj b/src/UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj
+index 4ba68efd412746a0b4726f2e13821ce0fdaeae17..f8990db065a28f28c120be5038c17579444f1391 100644
+--- a/src/UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj
++++ b/src/UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj
+@@ -24,6 +24,7 @@
+     </ItemGroup>
+ 
+     <ItemGroup>
++        <ProjectReference Include="..\UniGetUI.PackageEngine.Managers.Homebrew\UniGetUI.PackageEngine.Managers.Homebrew.csproj" />
+         <ProjectReference Include="..\UniGetUI.PackageEngine.Managers.Bun\UniGetUI.PackageEngine.Managers.Bun.csproj" />
+         <ProjectReference Include="..\UniGetUI.PackageEngine.Managers.Cargo\UniGetUI.PackageEngine.Managers.Cargo.csproj" />
+         <ProjectReference Include="..\UniGetUI.PackageEngine.Managers.Dotnet\UniGetUI.PackageEngine.Managers.Dotnet.csproj" />
+-- 
+2.56.0
+

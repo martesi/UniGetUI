@@ -403,7 +403,7 @@ public class SoftwareUpdatesPage : AbstractPackagesPage
                 _ = AvaloniaPackageOperationHelper.UpdateAllAsync();
                 ShowUpgradingPackagesNotification(upgradable);
             }
-            else if (Environment.GetCommandLineArgs().Contains("--updateapps"))
+            else if (UniGetUI.Core.Data.CoreData.GetProcessArguments().Contains("--updateapps"))
             {
                 _ = AvaloniaPackageOperationHelper.UpdateAllAsync();
                 ShowUpgradingPackagesNotification(upgradable);
