@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
@@ -11,7 +13,7 @@ using UniGetUI.PackageEngine.PackageClasses;
 
 namespace UniGetUI.PackageEngine.Managers.WingetManager;
 
-internal sealed class WinGetCliHelper : IWinGetManagerHelper
+internal sealed partial class WinGetCliHelper : IWinGetManagerHelper
 {
     private readonly WinGet Manager;
     private readonly string _cliExecutablePath;
@@ -268,6 +270,80 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
 
     public IReadOnlyList<Package> FindPackages_UnSafe(string query)
     {
+        if (query.Length == 0)
+        {
+            return GetSourcesForBrowse()
+                .SelectMany(source => SearchPackages(query, source, SearchLimits.MaxEmptyQueryResultsPerSource))
+                .ToArray();
+        }
+
+        return SearchPackages(query, null, MAX_SEARCH_RESULTS);
+    }
+
+    private List<IManagerSource> GetSourcesForBrowse()
+    {
+        using var _cliLock = WinGet.AcquireCliLock();
+        List<IManagerSource> sources = [];
+        using Process p = new()
+        {
+            StartInfo = new()
+            {
+                FileName = _cliExecutablePath,
+                Arguments = Manager.Status.ExecutableCallArgs + " source export",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+            },
+        };
+
+        IProcessTaskLogger logger = Manager.TaskLogger.CreateNew(LoggableTaskType.ListSources, p);
+
+        if (CoreTools.IsAdministrator())
+        {
+            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
+            logger.AddToStdErr(
+                $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
+            );
+        }
+
+        p.Start();
+
+        foreach (string name in ParseExportedSourceNames(ReadOutputLines(p, logger)))
+        {
+            sources.Add(Manager.SourcesHelper.Factory.GetSourceOrDefault(name));
+        }
+
+        logger.AddToStdErr(p.StandardError.ReadToEnd());
+        p.WaitForExit();
+        logger.Close(p.ExitCode);
+        return sources;
+    }
+
+    internal static IEnumerable<string> ParseExportedSourceNames(IEnumerable<string> outputLines)
+    {
+        foreach (string line in outputLines)
+        {
+            string? name;
+            try
+            {
+                name = JsonSerializer.Deserialize(line, WinGetCliJsonContext.Default.WinGetExportedSource)?.Name;
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                yield return name;
+            }
+        }
+    }
+
+    private List<Package> SearchPackages(string query, IManagerSource? source, int count)
+    {
         using var _cliLock = WinGet.AcquireCliLock();
         List<Package> Packages = [];
         using Process p = new()
@@ -279,7 +355,11 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
                     Manager.Status.ExecutableCallArgs
                     + " search \""
                     + query
-                    + "\"  --accept-source-agreements "
+                    + "\""
+                    + (source is null ? "" : " --source \"" + source.Name + "\"")
+                    + " --count "
+                    + count
+                    + " --accept-source-agreements "
                     + WinGet.GetProxyArgument(),
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -301,7 +381,7 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
 
         p.Start();
 
-        Packages.AddRange(ParseFoundPackages(Manager, ReadOutputLines(p, logger)));
+        Packages.AddRange(ParseFoundPackages(Manager, ReadOutputLines(p, logger), source));
 
         logger.AddToStdErr(p.StandardError.ReadToEnd());
         p.WaitForExit();
@@ -312,7 +392,8 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
 
     internal static IReadOnlyList<Package> ParseFoundPackages(
         WinGet manager,
-        IEnumerable<string> outputLines
+        IEnumerable<string> outputLines,
+        IManagerSource? queriedSource = null
     )
     {
         List<Package> packages = [];
@@ -333,7 +414,7 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
 
                 IManagerSource source =
                     sourceName.Length == 0
-                        ? manager.DefaultSource
+                        ? queriedSource ?? manager.DefaultSource
                         : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
 
                 packages.Add(new Package(name, id, version, source, manager));
@@ -507,4 +588,9 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
         logger.Close(p.ExitCode);
         return sources;
     }
+
+    internal sealed record WinGetExportedSource(string? Name);
+
+    [JsonSerializable(typeof(WinGetExportedSource))]
+    internal sealed partial class WinGetCliJsonContext : JsonSerializerContext { }
 }

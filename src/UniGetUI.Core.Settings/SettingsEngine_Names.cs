@@ -114,6 +114,7 @@ public static partial class Settings
         Test6,
         Test7_Legacy,
         Unset,
+        ExcludedSearchManagers,
     };
 
     public static string ResolveKey(K key)

@@ -58,6 +58,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
 
         protected readonly ConcurrentDictionary<long, IPackage> PackageReference;
 
+        private readonly ConcurrentDictionary<long, bool> _rememberedSelection = new();
+
         /// <summary>
         /// Fires when a block of packages (one package or more) is added or removed to the loader
         /// </summary>
@@ -183,13 +185,15 @@ namespace UniGetUI.PackageEngine.PackageLoader
                 LastLoadReportedFailures = false;
                 StartedLoading?.Invoke(this, EventArgs.Empty);
 
+                RememberSelectionState();
+
                 // Clear packages only after signaling the load started, so the UI shows the
                 // loading state instead of briefly flashing the "no packages found" message.
                 PackageReference.Clear();
                 IsLoaded = false;
                 InvokePackagesChangedEvent(false, [], []);
 
-                if (REQUIRES_INTERNET)
+                if (REQUIRES_INTERNET && WillQueryAnyManager())
                 {
                     await CoreTools.WaitForInternetConnection();
                 }
@@ -235,7 +239,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
                                     }
 
                                     toAdd.Add(package);
-                                    await AddPackage(package);
+                                    await AddPackage(package, restoreSelection: true);
                                 }
 
                                 InvokePackagesChangedEvent(true, toAdd, []);
@@ -304,6 +308,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
             InvokePackagesChangedEvent(false, [], []);
         }
 
+        protected virtual bool WillQueryAnyManager() => true;
+
         /// <summary>
         /// Loads the packages from the given manager
         /// </summary>
@@ -343,12 +349,25 @@ namespace UniGetUI.PackageEngine.PackageLoader
             return ALLOW_MULTIPLE_PACKAGE_VERSIONS ? package.GetVersionedHash() : package.GetHash();
         }
 
-        protected async Task AddPackage(IPackage package)
+        private void RememberSelectionState()
+        {
+            _rememberedSelection.Clear();
+            foreach (var entry in PackageReference)
+            {
+                _rememberedSelection[entry.Key] = entry.Value.IsChecked;
+            }
+        }
+
+        protected async Task AddPackage(IPackage package, bool restoreSelection = false)
         {
             if (Contains(package))
                 return;
 
-            package.IsChecked = PACKAGES_CHECKED_BY_DEFAULT;
+            package.IsChecked =
+                restoreSelection
+                && _rememberedSelection.TryGetValue(HashPackage(package), out bool wasChecked)
+                    ? wasChecked
+                    : PACKAGES_CHECKED_BY_DEFAULT;
             await WhenAddingPackage(package);
             PackageReference.TryAdd(HashPackage(package), package);
         }
