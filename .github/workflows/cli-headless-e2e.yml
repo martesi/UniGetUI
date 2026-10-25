@@ -1,6 +1,8 @@
 name: CLI Headless E2E
 
 on:
+  push:
+    branches: [ "backport/**-updates" ]
   pull_request:
     branches: [ "main" ]
     paths:
