@@ -437,8 +437,15 @@ namespace UniGetUI.Core.Tools.Tests
         [InlineData("\"Hello; World\"", "Hello World")]
         [InlineData("'Hello; World'", "Hello World")]
         [InlineData("query\";start cmd.exe", "querystart cmd.exe")]
-        [InlineData("query;start /B program.exe", "querystart B program.exe")]
-        [InlineData(";&|<>%\"e'~?/\\`", "e")]
+        [InlineData("query;start /B program.exe", "querystart /B program.exe")]
+        [InlineData(";&|<>%\"e'~?\\`", "e")]
+        [InlineData("@babel/core", "@babel/core")]
+        [InlineData("query$(calc)", "querycalc")]
+        [InlineData("query${env:PATH}", "queryenv:PATH")]
+        [InlineData("query#comment", "querycomment")]
+        [InlineData("query!PATH!", "queryPATH")]
+        [InlineData("query^calc", "querycalc")]
+        [InlineData("query[char]65", "querychar65")]
         public void TestSafeQueryString(string query, string expected)
         {
             Assert.Equal(CoreTools.EnsureSafeQueryString(query), expected);

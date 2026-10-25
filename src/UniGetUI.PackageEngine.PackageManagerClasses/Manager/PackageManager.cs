@@ -39,10 +39,16 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         }
         public IManagerLogger TaskLogger { get; }
         public IReadOnlyList<ManagerDependency> Dependencies { get; protected set; } = [];
+        public virtual System.Text.Encoding OutputEncoding => System.Text.Encoding.UTF8;
+
         public virtual bool InstallerUrlFollowsPackageVersion => false;
         public IMultiSourceHelper SourcesHelper { get; protected set; } = new NullSourceHelper();
         public IPackageDetailsHelper DetailsHelper { get; protected set; } = null!;
         public IPackageOperationHelper OperationHelper { get; protected set; } = null!;
+
+        public virtual bool CommandLineIsShellInterpreted => false;
+
+        public virtual bool IdentifiersAreQuotedOnCommandLine => false;
 
         public virtual int? CompareVersions(string versionA, string versionB)
         {
@@ -75,6 +81,17 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
             out string callArguments
         );
         protected abstract void _loadManagerVersion(out string version);
+
+        /// <summary>
+        /// The argument vector that precedes the operation parameters, for managers whose command
+        /// line must be built with <see cref="System.Diagnostics.ProcessStartInfo.ArgumentList"/>
+        /// instead of a single concatenated string. An empty vector selects the concatenated
+        /// <see cref="ManagerStatus.ExecutableCallArgs"/> path.
+        /// </summary>
+        protected virtual IReadOnlyList<string> _getOperationCallArgs(
+            string executablePath,
+            string callArguments
+        ) => [];
 
         protected virtual void _performPreInitializationSteps() { }
 
@@ -117,6 +134,8 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
                 }
 
                 Logger.ImportantInfo($"{Name} is enabled and was found on {path}");
+
+                Status.OperationCallArgs = _getOperationCallArgs(path, callArguments);
 
                 // Load manager version
                 _loadManagerVersion(out string version);

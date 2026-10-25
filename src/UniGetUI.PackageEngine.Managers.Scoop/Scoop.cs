@@ -21,6 +21,23 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
 {
     public class Scoop : PackageManager
     {
+        public override bool CommandLineIsShellInterpreted => true;
+
+        /// <summary>
+        /// Scoop is addressed as "bucket/app", so the source name becomes part of the specifier
+        /// that reaches the command line. The base helpers validate the package identifier; the
+        /// bucket name comes from whatever is already installed and is checked here.
+        /// </summary>
+        internal static string RequireSafePackageSpec(string spec)
+        {
+            if (!CoreTools.IsValidPackageIdentifier(spec))
+                throw new InvalidOperationException(
+                    $"Refusing to build a Scoop command line for \"{spec}\": it is not a valid package specifier."
+                );
+
+            return spec;
+        }
+
         public static string[] FALSE_PACKAGE_IDS = ["No", "WARN"];
         public static string[] FALSE_PACKAGE_VERSIONS =
         [
@@ -522,6 +539,27 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
             found = _found;
             callArguments =
                 $"-NoProfile -ExecutionPolicy Bypass -Command \"{executable.Replace(" ", "` ")}\" ";
+        }
+
+        protected override IReadOnlyList<string> _getOperationCallArgs(
+            string executablePath,
+            string callArguments
+        )
+        {
+            var (found, executable) = GetExecutableFile();
+            if (!found)
+                return [];
+
+            // Whether this shell can run a script file at all is the thing in question, and a
+            // machine policy or endpoint protection can refuse it. The bundled launcher is used as
+            // the canary so the answer is cached once per shell instead of probing scoop itself.
+            if (!CoreTools.PowerShellLauncherWorks(executablePath, CoreData.PowerShellOperationLauncher))
+            {
+                Logger.Warn("Not using -File for Scoop operations; falling back to -Command");
+                return [];
+            }
+
+            return ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable];
         }
 
         protected override void _loadManagerVersion(out string version)

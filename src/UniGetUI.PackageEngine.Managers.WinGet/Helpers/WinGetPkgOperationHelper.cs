@@ -18,12 +18,22 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
     public static string GetIdNamePiece(IPackage package)
     {
         if (!package.Id.EndsWith("…"))
-            return $"--id \"{package.Id.TrimEnd('…')}\" --exact";
+            return $"--id {Selector(package.Id.TrimEnd('…'), "identifier")} --exact";
 
         if (!package.Name.EndsWith("…"))
-            return $"--name \"{package.Name}\" --exact";
+            return $"--name {Selector(package.Name, "name")} --exact";
 
-        return $"--id \"{package.Id.TrimEnd('…')}\"";
+        return $"--id {Selector(package.Id.TrimEnd('…'), "identifier")}";
+    }
+
+    private static string Selector(string value, string description)
+    {
+        if (!CoreTools.IsOptionSafeIdentifier(value, quotedByTheSink: true))
+            throw new InvalidOperationException(
+                $"Refusing to build a WinGet command line for the package {description} \"{value}\": it would be read as a command-line option."
+            );
+
+        return CoreTools.EscapeCommandLineArgument(value);
     }
 
     public WinGetPkgOperationHelper(WinGet manager)
@@ -83,11 +93,15 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             && package.OverridenOptions.WinGet_SpecifyVersion is not false
         )
         {
-            parameters.AddRange(["--version", $"\"{package.VersionString}\""]);
+            parameters.AddRange(
+                ["--version", CoreTools.EscapeCommandLineArgument(package.VersionString)]
+            );
         }
         else if (operation is OperationType.Install && options.Version != "")
         {
-            parameters.AddRange(["--version", $"\"{options.Version}\""]);
+            parameters.AddRange(
+                ["--version", CoreTools.EscapeCommandLineArgument(options.Version)]
+            );
         }
 
         if (usePinget && operation is OperationType.Update)

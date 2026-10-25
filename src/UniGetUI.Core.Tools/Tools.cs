@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -630,20 +632,43 @@ namespace UniGetUI.Core.Tools
         /// <returns>The safe version of the query</returns>
         public static string EnsureSafeQueryString(string query)
         {
-            return query
-                .Replace(";", string.Empty)
-                .Replace("&", string.Empty)
-                .Replace("|", string.Empty)
-                .Replace(">", string.Empty)
-                .Replace("<", string.Empty)
-                .Replace("%", string.Empty)
-                .Replace("\"", string.Empty)
-                .Replace("~", string.Empty)
-                .Replace("?", string.Empty)
-                .Replace("/", string.Empty)
-                .Replace("'", string.Empty)
-                .Replace("\\", string.Empty)
-                .Replace("`", string.Empty);
+            StringBuilder builder = new();
+            foreach (char character in query)
+            {
+                if (char.IsControl(character))
+                    continue;
+
+                if (
+                    character
+                    is ';'
+                        or '&'
+                        or '|'
+                        or '>'
+                        or '<'
+                        or '%'
+                        or '"'
+                        or '~'
+                        or '?'
+                        or '\''
+                        or '\\'
+                        or '`'
+                        or '$'
+                        or '('
+                        or ')'
+                        or '{'
+                        or '}'
+                        or '['
+                        or ']'
+                        or '#'
+                        or '!'
+                        or '^'
+                )
+                    continue;
+
+                builder.Append(character);
+            }
+
+            return builder.ToString();
         }
 
         /// <summary>
@@ -1108,6 +1133,286 @@ namespace UniGetUI.Core.Tools
                 return "_";
 
             return _reservedDeviceNames.Contains(trimmed.Split('.')[0]) ? $"_{trimmed}" : trimmed;
+        }
+
+        public const int MaxPackageVersionLength = 128;
+        public const int MaxPackageIdentifierLength = 256;
+
+        private static readonly SearchValues<char> _commandLineSensitiveCharacters =
+            SearchValues.Create(";&|$`()[]{}<>'\"%!^#\r\n\t\v\f ");
+
+        public static bool IsCommandLineInertValue(string value) =>
+            !value.AsSpan().ContainsAny(_commandLineSensitiveCharacters);
+
+        /// <summary>
+        /// Whether a package identifier can be placed on any command line without being read as an
+        /// option or splitting into further arguments. Quoting is not enough on its own: a quoted
+        /// argument still binds as an option when it starts with a dash. Applies to every manager,
+        /// including those whose command line is not interpreted by a shell.
+        /// </summary>
+        public static bool IsOptionSafeIdentifier(string identifier, bool quotedByTheSink = false)
+        {
+            if (identifier.Length is 0)
+                return false;
+
+            if (identifier[0] is '-' or '/')
+                return false;
+
+            foreach (char character in identifier)
+            {
+                if (char.IsControl(character))
+                    return false;
+
+                // Whitespace only splits an identifier into further arguments where the sink emits
+                // it bare. WinGet quotes it, and its Add/Remove-programs identifiers legitimately
+                // contain spaces, for example "ARP\Machine\X86\Microsoft Copilot".
+                if (!quotedByTheSink && char.IsWhiteSpace(character))
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Whether a value can be placed on a command line without being read as an option. Unlike
+        /// an identifier it may contain spaces, because the sinks that accept such values quote
+        /// them; WinGet publishes versions such as "2021 Update".
+        /// </summary>
+        public static bool IsOptionSafeValue(string value)
+        {
+            if (value.Length is 0)
+                return true;
+
+            if (value[0] is '-' or '/')
+                return false;
+
+            foreach (char character in value)
+            {
+                if (char.IsControl(character))
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Starts a process and closes its standard input straight away, for callers that have
+        /// nothing to write to it.
+        /// <para>
+        /// The PowerShell shims that ship with npm and Scoop pipe $input to the real program
+        /// whenever $MyInvocation.ExpectingInput is set, which it is whenever standard input is
+        /// not a console - a redirected pipe, or one inherited from a parent that has none of its
+        /// own, as in the headless daemon. Enumerating $input does not return until that pipe is
+        /// closed, so a shim invoked with the pipe left open never runs at all. Closing it makes
+        /// the pipeline enumerate empty and the shim run immediately.
+        /// </para>
+        /// </summary>
+        public static void StartAndCloseStandardInput(Process process)
+        {
+            process.Start();
+
+            if (process.StartInfo.RedirectStandardInput)
+            {
+                process.StandardInput.Close();
+            }
+        }
+
+        private static readonly SearchValues<char> _processNameSensitiveCharacters =
+            SearchValues.Create("\"%!&|<>^");
+
+        /// <summary>
+        /// Whether a process image name can be placed inside a quoted argument of a command string
+        /// that cmd.exe will parse, as the exported installation script does.
+        /// <para>
+        /// A double quote ends the quoting, and cmd expands %NAME% before it parses the command,
+        /// inside double quotes included, so an expansion whose value carries a quote and a
+        /// separator injects further commands. Delayed expansion of !NAME! is off by default but a
+        /// user can enable it. The remaining separators are inert inside intact quoting and are
+        /// refused as insurance; none of them, nor a leading option marker, is usable in a real
+        /// image name anyway.
+        /// </para>
+        /// </summary>
+        public static bool IsSafeProcessImageName(string name)
+        {
+            if (name.Length is 0)
+                return false;
+
+            if (name[0] is '-' or '/')
+                return false;
+
+            foreach (char character in name)
+            {
+                if (char.IsControl(character))
+                    return false;
+            }
+
+            return !name.AsSpan().ContainsAny(_processNameSensitiveCharacters);
+        }
+
+        public static bool IsValidPackageVersion(string version)
+        {
+            if (version.Length is 0 or > MaxPackageVersionLength)
+                return false;
+
+            if (!char.IsAsciiLetterOrDigit(version[0]))
+                return false;
+
+            foreach (char character in version)
+            {
+                if (
+                    !char.IsAsciiLetterOrDigit(character)
+                    && character is not ('.' or '_' or '+' or '-' or '~' or ':')
+                )
+                    return false;
+            }
+
+            return true;
+        }
+
+        public static bool IsValidPackageIdentifier(string identifier)
+        {
+            if (identifier.Length is 0 or > MaxPackageIdentifierLength)
+                return false;
+
+            if (identifier[0] is '@')
+            {
+                if (identifier.Length < 2 || !char.IsLetterOrDigit(identifier[1]))
+                    return false;
+            }
+            else if (!char.IsLetterOrDigit(identifier[0]))
+            {
+                return false;
+            }
+
+            foreach (char character in identifier)
+            {
+                if (
+                    !char.IsLetterOrDigit(character)
+                    && character
+                        is not ('.' or '_' or '+' or '-' or '~' or ':' or '@' or '/' or '^' or '*' or '=')
+                )
+                    return false;
+            }
+
+            return true;
+        }
+
+        private const string LauncherProbeMarker = "UNIGETUI_LAUNCHER_OK";
+
+        private const int LauncherProbeTimeout = 20000;
+
+        private static readonly ConcurrentDictionary<string, bool> _launcherProbeCache = new();
+
+        /// <summary>
+        /// Runs the operation launcher once to confirm it can actually execute before the manager
+        /// commits to the -File launch path. A machine-wide execution policy overrides the
+        /// -ExecutionPolicy argument, and antivirus or a broken deployment can block the script
+        /// too, so the mechanism is verified rather than assumed. Callers fall back to the
+        /// concatenated -Command form when this returns false.
+        /// </summary>
+        public static bool PowerShellLauncherWorks(string powerShellPath, string launcherPath)
+        {
+            if (!File.Exists(launcherPath))
+                return false;
+
+            return _launcherProbeCache.GetOrAdd(
+                $"{powerShellPath}|{launcherPath}",
+                _ => ProbePowerShellLauncher(powerShellPath, launcherPath)
+            );
+        }
+
+        private static bool ProbePowerShellLauncher(string powerShellPath, string launcherPath)
+        {
+            try
+            {
+                using Process process = new();
+                process.StartInfo.FileName = powerShellPath;
+                foreach (
+                    string argument in new[]
+                    {
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        launcherPath,
+                        "plain",
+                        "Write-Output",
+                        LauncherProbeMarker,
+                    }
+                )
+                {
+                    process.StartInfo.ArgumentList.Add(argument);
+                }
+
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.CreateNoWindow = true;
+                process.Start();
+
+                // Both pipes have to be drained while waiting, not before: reading to the end first
+                // blocks until the child closes the stream, which makes the timeout unreachable,
+                // and leaving the other pipe unread deadlocks the child once it fills.
+                Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+                if (!process.WaitForExit(LauncherProbeTimeout))
+                {
+                    Logger.Warn(
+                        "The PowerShell operation launcher probe timed out; falling back to -Command"
+                    );
+                    try
+                    {
+                        process.Kill(true);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
+                    {
+                        // The process ended between the wait and the kill.
+                    }
+
+                    return false;
+                }
+
+                Task reads = Task.WhenAll(stdout, stderr);
+                reads.ContinueWith(
+                    completed => _ = completed.Exception,
+                    TaskContinuationOptions.OnlyOnFaulted
+                );
+
+                string output = reads.Wait(LauncherProbeTimeout) ? stdout.Result : "";
+
+                bool works = process.ExitCode is 0 && output.Contains(LauncherProbeMarker);
+                if (!works)
+                    Logger.Warn(
+                        $"The PowerShell operation launcher could not be executed (exit {process.ExitCode}); falling back to -Command"
+                    );
+
+                return works;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("The PowerShell operation launcher probe failed");
+                Logger.Warn(ex);
+                return false;
+            }
+        }
+
+        public static string EscapePowerShellSingleQuoted(string value)
+        {
+            StringBuilder builder = new();
+            builder.Append('\'');
+            foreach (char character in value)
+            {
+                if (character is '"' || char.IsControl(character))
+                    continue;
+
+                if (character is '\'')
+                    builder.Append('\'');
+
+                builder.Append(character);
+            }
+            builder.Append('\'');
+            return builder.ToString();
         }
 
         public static string EscapeCommandLineArgument(string argument)

@@ -20,6 +20,10 @@ namespace UniGetUI.PackageEngine.Classes.Manager
         public ManagerCapabilities Capabilities { get; }
         public ManagerStatus Status { get; }
 
+        public bool CommandLineIsShellInterpreted => false;
+
+        public bool IdentifiersAreQuotedOnCommandLine => false;
+
         public int? CompareVersions(string versionA, string versionB)
         {
             var parsedA = CoreTools.VersionStringToStruct(versionA);
@@ -30,6 +34,10 @@ namespace UniGetUI.PackageEngine.Classes.Manager
 
             return parsedA.CompareTo(parsedB);
         }
+        public System.Text.Encoding OutputEncoding => System.Text.Encoding.UTF8;
+
+        public bool InstallerUrlFollowsPackageVersion => false;
+
         public string Id
         {
             get => string.IsNullOrWhiteSpace(Properties.Id) ? Properties.Name : Properties.Id;
@@ -156,6 +164,12 @@ namespace UniGetUI.PackageEngine.Classes.Manager
 
     internal sealed class NullPkgOperationHelper : IPackageOperationHelper
     {
+        public IReadOnlyList<string> GetStandaloneParameters(
+            IPackage package,
+            InstallOptions options,
+            OperationType operation
+        ) => GetParameters(package, options, operation);
+
         public IReadOnlyList<string> GetParameters(
             IPackage package,
             InstallOptions options,

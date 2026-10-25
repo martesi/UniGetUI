@@ -76,6 +76,28 @@ public abstract class AbstractProcessOperation : AbstractOperation
         _requiresUACCache = true;
     }
 
+    /// <summary>
+    /// Sets the command line as a vector of arguments so that .NET performs the quoting each
+    /// argument needs, instead of concatenating them into a single string that the target has to
+    /// take apart again.
+    /// </summary>
+    protected void SetArgumentVector(IReadOnlyList<string> arguments)
+    {
+        process.StartInfo.Arguments = string.Empty;
+        process.StartInfo.ArgumentList.Clear();
+        foreach (string argument in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+    }
+
+    /// <summary>
+    /// The elevator's own arguments, as a vector. <see cref="CoreData.ElevatorArgs"/> holds at most
+    /// a couple of fixed flags (for example "-A" for sudo with an askpass helper).
+    /// </summary>
+    protected static IReadOnlyList<string> ElevatorArgumentPrefix() =>
+        CoreData.ElevatorArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
     protected void RedirectWinGetTempFolder()
     {
         string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
@@ -95,12 +117,17 @@ public abstract class AbstractProcessOperation : AbstractOperation
             throw new InvalidOperationException("RedirectStandardError must be set to true");
         if (process.StartInfo.FileName == "lol")
             throw new InvalidOperationException("StartInfo.FileName has not been set");
-        if (process.StartInfo.Arguments == "lol")
+        if (process.StartInfo.Arguments == "lol" && process.StartInfo.ArgumentList.Count is 0)
             throw new InvalidOperationException("StartInfo.Arguments has not been set");
 
         Line($"Executing process with StartInfo:", LineType.VerboseDetails);
         Line($" - FileName: \"{process.StartInfo.FileName.Trim()}\"", LineType.VerboseDetails);
-        Line($" - Arguments: \"{process.StartInfo.Arguments.Trim()}\"", LineType.VerboseDetails);
+        Line(
+            process.StartInfo.ArgumentList.Count > 0
+                ? $" - Arguments: {string.Join(" ", process.StartInfo.ArgumentList.Select(argument => $"[{argument}]"))}"
+                : $" - Arguments: \"{process.StartInfo.Arguments.Trim()}\"",
+            LineType.VerboseDetails
+        );
         Line($"Start Time: \"{DateTime.Now}\"", LineType.VerboseDetails);
 
         // An empty FileName means elevation was required but no elevator (UniGetUI Elevator/GSudo) is available
@@ -125,9 +152,9 @@ public abstract class AbstractProcessOperation : AbstractOperation
         if (!Settings.Get(Settings.K.DisableNewProcessLineHandler))
         {
             await process.StandardInput.WriteLineAsync("\r\n\r\n\r\n\r\n");
-            process.StandardInput.Close();
         }
-        // process.BeginOutputReadLine();
+
+        process.StandardInput.Close();
         try
         {
             process.BeginErrorReadLine();
