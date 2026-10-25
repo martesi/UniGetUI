@@ -1050,11 +1050,65 @@ namespace UniGetUI.Core.Tools
             return LanguageEngine?.Locale ?? "Unset/Unknown";
         }
 
-        private static readonly HashSet<char> _illegalPathChars = Path.GetInvalidFileNameChars()
-            .ToHashSet();
+        private static readonly HashSet<char> _illegalPathChars = BuildIllegalPathChars();
 
-        public static string MakeValidFileName(string name) =>
-            string.Concat(name.Where(x => !_illegalPathChars.Contains(x)));
+        private static HashSet<char> BuildIllegalPathChars()
+        {
+            HashSet<char> characters = new(Path.GetInvalidFileNameChars());
+
+            foreach (char character in @"""<>|:*?\/")
+                characters.Add(character);
+
+            for (char character = (char)0; character < (char)32; character++)
+                characters.Add(character);
+
+            return characters;
+        }
+
+        private static readonly HashSet<string> _reservedDeviceNames = BuildReservedDeviceNames();
+
+        private static HashSet<string> BuildReservedDeviceNames()
+        {
+            HashSet<string> names = new(StringComparer.OrdinalIgnoreCase)
+            {
+                "CON",
+                "PRN",
+                "AUX",
+                "NUL",
+            };
+
+            for (int index = 0; index <= 9; index++)
+            {
+                names.Add($"COM{index}");
+                names.Add($"LPT{index}");
+            }
+
+            foreach (char superscript in "\u00b9\u00b2\u00b3")
+            {
+                names.Add($"COM{superscript}");
+                names.Add($"LPT{superscript}");
+            }
+
+            return names;
+        }
+
+        public static string MakeValidFileName(string name)
+        {
+            string sanitized = string.Concat(name.Where(x => !_illegalPathChars.Contains(x)));
+
+            if (sanitized.Length is 0)
+                return sanitized;
+
+            if (sanitized.All(character => character is '.' || char.IsWhiteSpace(character)))
+                return "_";
+
+            string trimmed = sanitized.TrimEnd('.', ' ');
+
+            if (trimmed.Length is 0)
+                return "_";
+
+            return _reservedDeviceNames.Contains(trimmed.Split('.')[0]) ? $"_{trimmed}" : trimmed;
+        }
 
         public static string EscapeCommandLineArgument(string argument)
         {
