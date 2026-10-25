@@ -216,12 +216,10 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
 
         if (CoreTools.IsAdministrator())
         {
-            string winGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string winGetTemp = AppPaths.RedirectTempToElevatedDirectory(process.StartInfo);
             logger.AddToStdErr(
                 $"[WARN] Redirecting %TEMP% folder to {winGetTemp}, since UniGetUI was run as admin"
             );
-            process.StartInfo.Environment["TEMP"] = winGetTemp;
-            process.StartInfo.Environment["TMP"] = winGetTemp;
         }
 
         process.Start();
