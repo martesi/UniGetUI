@@ -37,6 +37,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
 
         public bool LastLoadReportedFailures { get; private set; }
 
+        public bool HasPendingInitialLoad => !IsLoaded && !LastLoadReportedFailures;
+
         public DateTime? LastLoadFinishedUtc { get; private set; }
 
         private TaskCompletionSource? _loadCompletion;
@@ -155,6 +157,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
         public virtual async Task ReloadPackages()
         {
             TaskCompletionSource? completion = null;
+            int current_identifier = 0;
+            bool finishWasAnnounced = false;
             try
             {
                 if (DISABLE_RELOAD)
@@ -170,7 +174,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
                 }
 
                 LoadOperationIdentifier = new Random().Next();
-                int current_identifier = LoadOperationIdentifier;
+                current_identifier = LoadOperationIdentifier;
                 completion = new TaskCompletionSource(
                     TaskCreationOptions.RunContinuationsAsynchronously
                 );
@@ -254,14 +258,32 @@ namespace UniGetUI.PackageEngine.PackageLoader
                 {
                     LastLoadFinishedUtc = DateTime.UtcNow;
                     IsLoaded = true;
+                    finishWasAnnounced = true;
                     InvokeFinishedLoadingEvent();
                 }
             }
             catch (Exception ex)
             {
                 Logger.Error(ex);
-                LastLoadReportedFailures = true;
-                IsLoading = false;
+
+                if (
+                    !finishWasAnnounced
+                    && completion is not null
+                    && LoadOperationIdentifier == current_identifier
+                )
+                {
+                    LastLoadReportedFailures = true;
+                    IsLoading = false;
+
+                    try
+                    {
+                        InvokeFinishedLoadingEvent();
+                    }
+                    catch (Exception announceEx)
+                    {
+                        Logger.Error(announceEx);
+                    }
+                }
             }
             finally
             {

@@ -208,4 +208,89 @@ public sealed class PackageLoaderPipelineTests
         Assert.False(isLoadingWhenFinished);
         Assert.True(isLoadedWhenFinished);
     }
+
+    [Fact]
+    public async Task ReloadPackages_SettlesAndAnnouncesCompletion_WhenTheLoadFails()
+    {
+        var manager = new PackageManagerBuilder()
+            .WithInstalledPackages(testManager =>
+            [
+                new PackageBuilder()
+                    .WithManager(testManager)
+                    .WithId("Contoso.Tool")
+                    .WithVersion("1.0.0")
+                    .Build(),
+            ])
+            .Build();
+        TestPackageLoader? loaderReference = null;
+        Task? waitTakenDuringLoad = null;
+        var loader = new TestPackageLoader(
+            [manager],
+            isPackageValid: _ =>
+            {
+                waitTakenDuringLoad = loaderReference!.WaitForCurrentLoadAsync();
+                throw new InvalidOperationException("the load blew up");
+            }
+        );
+        loaderReference = loader;
+        var recorder = new LoaderEventRecorder(loader);
+
+        await loader.ReloadPackages();
+
+        Assert.Equal(1, recorder.FinishedLoadingCount);
+        Assert.False(loader.IsLoading);
+        Assert.True(loader.LastLoadReportedFailures);
+        Assert.False(loader.HasPendingInitialLoad);
+        Assert.NotNull(waitTakenDuringLoad);
+        Assert.True(waitTakenDuringLoad.IsCompleted);
+    }
+
+    [Fact]
+    public async Task ReloadPackages_AnnouncesCompletionOnce_WhenAFinishedLoadingSubscriberThrows()
+    {
+        var manager = new PackageManagerBuilder().Build();
+        var loader = new TestPackageLoader([manager], loadPackages: _ => []);
+        var recorder = new LoaderEventRecorder(loader);
+        loader.FinishedLoading += (_, _) => throw new InvalidOperationException("the subscriber blew up");
+
+        await loader.ReloadPackages();
+
+        Assert.Equal(1, recorder.FinishedLoadingCount);
+        Assert.True(loader.IsLoaded);
+        Assert.NotNull(loader.LastLoadFinishedUtc);
+        Assert.False(loader.LastLoadReportedFailures);
+    }
+
+    [Fact]
+    public async Task ReloadPackages_LeavesAQueuedReloadUntouched_WhenAFinishedLoadingSubscriberThrows()
+    {
+        using var release = new ManualResetEventSlim(true);
+        var manager = new PackageManagerBuilder().Build();
+        var loader = new TestPackageLoader(
+            [manager],
+            loadPackages: _ =>
+            {
+                release.Wait();
+                return [];
+            }
+        );
+
+        Task? queued = null;
+        loader.FinishedLoading += (_, _) =>
+        {
+            if (queued is not null) return;
+            release.Reset();
+            queued = loader.ReloadPackages();
+        };
+        loader.FinishedLoading += (_, _) => throw new InvalidOperationException("the subscriber blew up");
+
+        await loader.ReloadPackages();
+
+        Assert.NotNull(queued);
+        Assert.True(loader.IsLoading);
+        Assert.False(loader.LastLoadReportedFailures);
+
+        release.Set();
+        await queued;
+    }
 }
