@@ -1,3 +1,4 @@
+using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
 using UniGetUI.PackageEngine.Enums;
@@ -90,6 +91,7 @@ internal sealed class ChocolateyPkgOperationHelper : BasePkgOperationHelper
         string output_string = string.Join("\n", processOutput);
         if (
             package.OverridenOptions.RunAsAdministrator != true
+            && !Settings.Get(Settings.K.ProhibitElevation)
             && (
                 output_string.Contains("Run as administrator")
                 || output_string.Contains("The requested operation requires elevation")
@@ -100,6 +102,8 @@ internal sealed class ChocolateyPkgOperationHelper : BasePkgOperationHelper
                     "WARNING: Unable to create shortcut. Error captured was Unable to save shortcut"
                 )
                 || output_string.Contains("access denied")
+                || output_string.Contains("requires Administrative permissions")
+                || output_string.Contains("run from elevated prompt")
             )
         )
         {
