@@ -1,0 +1,109 @@
+From 0170f2d51448c85eb2cbcf81aea4bb5bd058b23a Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:36:51 +0800
+Subject: [PATCH] backport: Discard updates whose offered version is not newer
+ than the installed one (#5462)
+
+Upstream-Commit: 01c3e431b634e63d3b18400ef24fd7e9ad61200a
+Upstream-PR: Devolutions/UniGetUI#5462
+Classic-Source-Commit: 0170f2d51448c85eb2cbcf81aea4bb5bd058b23a
+
+---
+ .../UpgradablePackagesLoader.cs               | 12 ++++
+ .../UpgradablePackagesLoaderTests.cs          | 57 +++++++++++++++++++
+ 2 files changed, 69 insertions(+)
+
+diff --git a/src/UniGetUI.PackageEngine.PackageLoader/UpgradablePackagesLoader.cs b/src/UniGetUI.PackageEngine.PackageLoader/UpgradablePackagesLoader.cs
+index 8a59541cf058ab6101fd6b7b44f804dbf4af5a6b..a7978bbcd2f6021fbf53b0bf65680ca89cb66a16 100644
+--- a/src/UniGetUI.PackageEngine.PackageLoader/UpgradablePackagesLoader.cs
++++ b/src/UniGetUI.PackageEngine.PackageLoader/UpgradablePackagesLoader.cs
+@@ -36,6 +36,18 @@ namespace UniGetUI.PackageEngine.PackageLoader
+             if (package.VersionString == package.NewVersionString)
+                 return false;
+ 
++            if (
++                package.NormalizedNewVersion != default
++                && package.Manager.CompareVersions(package.VersionString, package.NewVersionString)
++                    is >= 0
++            )
++            {
++                Logger.Info(
++                    $"Ignoring package {package.Id} because the offered version {package.NewVersionString} is not newer than the installed version {package.VersionString}."
++                );
++                return false;
++            }
++
+             if (package.NewerVersionIsInstalled())
+             {
+                 Logger.Info(
+diff --git a/src/UniGetUI.PackageEngine.Tests/UpgradablePackagesLoaderTests.cs b/src/UniGetUI.PackageEngine.Tests/UpgradablePackagesLoaderTests.cs
+index cad7918f16d2f7ade70bc6d1141cc26c2dfec256..793d0c5c03142872db3feafc00a53fd9b439b6ff 100644
+--- a/src/UniGetUI.PackageEngine.Tests/UpgradablePackagesLoaderTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/UpgradablePackagesLoaderTests.cs
+@@ -166,6 +166,63 @@ public sealed class UpgradablePackagesLoaderTests : IDisposable
+         Assert.True(await loader.EvaluatePackageAsync(package));
+     }
+ 
++    [Fact]
++    public async Task EvaluatePackageAsync_RejectsOlderOfferedVersionWithoutTheInstalledList()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        _ = new InstalledPackagesLoader([manager]);
++        _ = new DiscoverablePackagesLoader([manager]);
++        var loader = new TestUpgradablePackagesLoader([manager]);
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Daum.PotPlayer")
++            .WithVersion("260819")
++            .WithNewVersion("210428")
++            .Build();
++
++        Assert.False(await loader.EvaluatePackageAsync(package));
++    }
++
++    [Theory]
++    [InlineData("stable")]
++    [InlineData("latest")]
++    [InlineData("2.0.0_rc1")]
++    public async Task EvaluatePackageAsync_KeepsUpdatesWhoseOfferedVersionCannotBeParsed(string newVersion)
++    {
++        var manager = new PackageManagerBuilder().Build();
++        _ = new InstalledPackagesLoader([manager]);
++        _ = new DiscoverablePackagesLoader([manager]);
++        var loader = new TestUpgradablePackagesLoader([manager]);
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("org.contoso.Flatpak")
++            .WithVersion("3.2.1")
++            .WithNewVersion(newVersion)
++            .Build();
++
++        Assert.True(await loader.EvaluatePackageAsync(package));
++    }
++
++    [Fact]
++    public async Task EvaluatePackageAsync_KeepsUpdatesWhenTheInstalledVersionIsUnknown()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        _ = new InstalledPackagesLoader([manager]);
++        _ = new DiscoverablePackagesLoader([manager]);
++        var loader = new TestUpgradablePackagesLoader([manager]);
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Unversioned")
++            .WithVersion("Unknown")
++            .WithNewVersion("210428")
++            .Build();
++
++        Assert.True(await loader.EvaluatePackageAsync(package));
++    }
++
+     [Fact]
+     public async Task ApplyWhenAddingPackageAsync_UpdatesDiscoverableAndInstalledTags()
+     {
+-- 
+2.56.0
+

@@ -1,0 +1,78 @@
+From c1086315cc38ac1efd3f2c5f2dfd260f64147838 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:47:53 +0800
+Subject: [PATCH] backport: Refresh the WinGet COM installed index before
+ listing local packages (#5585)
+
+Upstream-Commit: 7a42c589d4fffc7ec5af5fd4a1cced8c7ce2d03e
+Upstream-PR: Devolutions/UniGetUI#5585
+Classic-Source-Commit: c1086315cc38ac1efd3f2c5f2dfd260f64147838
+
+---
+ .../ClientHelpers/NativeWinGetHelper.cs       | 29 +++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+index 4130dfeeb68b47de71845665d56cdbac0bd1542f..4984c48d931c610c08b0dcf8bafe1b98ee6d4613 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -1,6 +1,7 @@
+ using System.Runtime.ExceptionServices;
+ using System.Runtime.InteropServices;
+ using Microsoft.Management.Deployment;
++using Microsoft.Win32;
+ using UniGetUI.Core.Classes;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.Tools;
+@@ -24,6 +25,9 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+     private readonly Func<WinGet, IWinGetManagerHelper> _systemCliHelperFactory;
+     private readonly Func<IReadOnlyList<CatalogPackage>>? _localPackagesProvider;
+     private readonly IPingetPackageDetailsProvider _pingetPackageDetailsProvider;
++    private const string UserUninstallKeyPath =
++        @"Software\Microsoft\Windows\CurrentVersion\Uninstall";
++    private const string InstalledIndexInvalidationValueName = "UniGetUI.InstalledIndexInvalidation";
+     private int _activeLocalPackageQueries;
+     private ExceptionDispatchInfo? _lastActivationException;
+ 
+@@ -585,6 +589,7 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+         try
+         {
+             logger.Log("OtherTask: GetWinGetLocalPackages");
++            InvalidateInstalledIndexCache(logger);
+             var availableCatalogs = GetReachableLocalCatalogReferences(logger);
+             PackageCatalogReference installedSearchCatalogRef = CreateLocalCompositeCatalog(
+                 availableCatalogs,
+@@ -633,6 +638,30 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+         }
+     }
+ 
++    private static void InvalidateInstalledIndexCache(INativeTaskLogger logger)
++    {
++        try
++        {
++            using RegistryKey? uninstallKey = Registry.CurrentUser.OpenSubKey(
++                UserUninstallKeyPath,
++                writable: true
++            );
++            if (uninstallKey is null)
++            {
++                logger.Log("No per-user uninstall key found; skipping WinGet installed index invalidation");
++                return;
++            }
++
++            uninstallKey.SetValue(InstalledIndexInvalidationValueName, Environment.ProcessId);
++            uninstallKey.DeleteValue(InstalledIndexInvalidationValueName, throwOnMissingValue: false);
++        }
++        catch (Exception ex)
++        {
++            logger.Error($"Could not invalidate the WinGet installed index: {ex.Message}");
++            Logger.Warn($"Could not invalidate the WinGet installed index: {ex.Message}");
++        }
++    }
++
+     private IReadOnlyList<PackageCatalogReference> GetReachableLocalCatalogReferences(
+         INativeTaskLogger logger
+     )
+-- 
+2.56.0
+

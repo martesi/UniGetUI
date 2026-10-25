@@ -101,6 +101,7 @@ public static partial class Settings
         UseClassicMode,
         DisableInstallerHostChangeWarning,
         BunPreferLatestVersions,
+        DisablePipHttpUpdateCheck,
         RedactUsernameInLog,
         DisableReleaseNotesOnUpdate,
         LastKnownBuildNumber,
@@ -113,6 +114,7 @@ public static partial class Settings
         Test6,
         Test7_Legacy,
         Unset,
+        ExcludedSearchManagers,
     };
 
     public static string ResolveKey(K key)
@@ -216,6 +218,7 @@ public static partial class Settings
             K.UseClassicMode => "UseClassicMode",
             K.DisableInstallerHostChangeWarning => "DisableInstallerHostChangeWarning",
             K.BunPreferLatestVersions => "BunPreferLatestVersions",
+            K.DisablePipHttpUpdateCheck => "DisablePipHttpUpdateCheck",
             K.RedactUsernameInLog => "RedactUsernameInLog",
             K.DisableReleaseNotesOnUpdate => "DisableReleaseNotesOnUpdate",
             K.LastKnownBuildNumber => "LastKnownBuildNumber",
@@ -227,6 +230,7 @@ public static partial class Settings
             K.Test5 => "ª",
             K.Test6 => "VeryVeryLongTestSettingEntrySoTheClassCanReallyBeStressedOut",
             K.Test7_Legacy => "LegacyBoolSetting",
+            K.ExcludedSearchManagers => "ExcludedSearchManagers",
             K.Unset => throw new InvalidDataException("Setting key was unset!"),
             _ => throw new KeyNotFoundException(
                 $"The settings key {key} was not found on the ResolveKey map"

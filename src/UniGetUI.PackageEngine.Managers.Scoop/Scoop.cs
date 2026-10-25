@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text.RegularExpressions;
 using UniGetUI.Core.Classes;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
@@ -21,6 +20,23 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
 {
     public class Scoop : PackageManager
     {
+        public override bool CommandLineIsShellInterpreted => true;
+
+        /// <summary>
+        /// Scoop is addressed as "bucket/app", so the source name becomes part of the specifier
+        /// that reaches the command line. The base helpers validate the package identifier; the
+        /// bucket name comes from whatever is already installed and is checked here.
+        /// </summary>
+        internal static string RequireSafePackageSpec(string spec)
+        {
+            if (!CoreTools.IsValidPackageIdentifier(spec))
+                throw new InvalidOperationException(
+                    $"Refusing to build a Scoop command line for \"{spec}\": it is not a valid package specifier."
+                );
+
+            return spec;
+        }
+
         public static string[] FALSE_PACKAGE_IDS = ["No", "WARN"];
         public static string[] FALSE_PACKAGE_VERSIONS =
         [
@@ -32,6 +48,9 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
             "removed",
             "removed,",
         ];
+
+        internal const string UntruncatedTableOutput =
+            " | Format-Table -AutoSize | Out-String -Width 4096";
 
         private const int VersionProbeTimeout = 20_000;
         private const int StreamDrainTimeout = 5_000;
@@ -232,42 +251,35 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
             }
 
             List<Package> packages = [];
-            bool dashesPassed = false;
-            foreach (string line in lines)
+            IReadOnlyList<int>? columns = null;
+            foreach (string rawLine in lines)
             {
-                if (!dashesPassed)
-                {
-                    if (line.Contains("---"))
-                    {
-                        dashesPassed = true;
-                    }
+                string line = ScoopTable.StripAnsiSequences(rawLine);
 
+                if (columns is null)
+                {
+                    columns = ScoopTable.ReadColumnStarts(line);
                     continue;
                 }
 
-                if (string.IsNullOrWhiteSpace(line))
-                {
-                    continue;
-                }
-
-                string[] elements = Regex
-                    .Replace(line, " {2,}", " ")
-                    .Trim()
-                    .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (elements.Length < 3)
+                if (columns.Count < 3 || string.IsNullOrWhiteSpace(line))
                 {
                     continue;
                 }
 
-                for (int i = 0; i < elements.Length; i++)
+                string id = ScoopTable.ReadColumn(line, columns, 0);
+                string version = ScoopTable.ReadColumn(line, columns, 1);
+                string newVersion = ScoopTable.ReadColumn(line, columns, 2);
+
+                if (id.Length is 0 || version.Length is 0 || newVersion.Length is 0)
                 {
-                    elements[i] = elements[i].Trim();
+                    continue;
                 }
 
                 if (
-                    FALSE_PACKAGE_IDS.Contains(elements[0])
-                    || FALSE_PACKAGE_VERSIONS.Contains(elements[1])
-                    || FALSE_PACKAGE_VERSIONS.Contains(elements[2])
+                    FALSE_PACKAGE_IDS.Contains(id)
+                    || FALSE_PACKAGE_VERSIONS.Contains(version)
+                    || FALSE_PACKAGE_VERSIONS.Contains(newVersion)
                 )
                 {
                     continue;
@@ -275,7 +287,7 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
 
                 if (
                     installedPackageMap.TryGetValue(
-                        elements[0] + "." + elements[1],
+                        id + "." + version,
                         out IPackage? installedPackage
                     )
                 )
@@ -283,10 +295,10 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                     OverridenInstallationOptions options = new(installedPackage.OverridenOptions.Scope);
                     packages.Add(
                         new Package(
-                            CoreTools.FormatAsName(elements[0]),
-                            elements[0],
-                            elements[1],
-                            elements[2],
+                            CoreTools.FormatAsName(id),
+                            id,
+                            version,
+                            newVersion,
                             installedPackage.Source,
                             this,
                             options
@@ -301,68 +313,49 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
         internal IReadOnlyList<Package> ParseInstalledPackages(IEnumerable<string> lines)
         {
             List<Package> packages = [];
-            bool dashesPassed = false;
-            foreach (string line in lines)
+            IReadOnlyList<int>? columns = null;
+            foreach (string rawLine in lines)
             {
-                if (!dashesPassed)
-                {
-                    if (line.Contains("---"))
-                    {
-                        dashesPassed = true;
-                    }
+                string line = ScoopTable.StripAnsiSequences(rawLine);
 
+                if (columns is null)
+                {
+                    columns = ScoopTable.ReadColumnStarts(line);
                     continue;
                 }
 
-                if (string.IsNullOrWhiteSpace(line))
-                {
-                    continue;
-                }
-
-                string[] elements = Regex
-                    .Replace(line, " {2,}", " ")
-                    .Trim()
-                    .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (elements.Length < 3)
+                if (columns.Count < 3 || string.IsNullOrWhiteSpace(line))
                 {
                     continue;
                 }
 
-                if (elements[2].Contains(":\\"))
+                string id = ScoopTable.ReadColumn(line, columns, 0);
+                string version = ScoopTable.ReadColumn(line, columns, 1);
+                string source = ScoopTable.ReadColumn(line, columns, 2);
+                string info = columns.Count > 4 ? ScoopTable.ReadColumn(line, columns, 4) : "";
+
+                if (id.Length is 0 || version.Length is 0)
                 {
-                    var path = Regex.Match(
-                        line,
-                        "[A-Za-z]:(?:[\\\\\\/][^\\\\\\/\\n]+)+(?:.json|…)"
-                    );
-                    if (!string.IsNullOrEmpty(path.Value))
-                    {
-                        elements[2] = path.Value;
-                    }
+                    continue;
                 }
 
-                for (int i = 0; i < elements.Length; i++)
-                {
-                    elements[i] = elements[i].Trim();
-                }
-
-                if (
-                    FALSE_PACKAGE_IDS.Contains(elements[0])
-                    || FALSE_PACKAGE_VERSIONS.Contains(elements[1])
-                )
+                if (FALSE_PACKAGE_IDS.Contains(id) || FALSE_PACKAGE_VERSIONS.Contains(version))
                 {
                     continue;
                 }
 
                 OverridenInstallationOptions options = new(
-                    line.Contains("Global install") ? PackageScope.Global : PackageScope.User
+                    info.Contains("Global install") ? PackageScope.Global : PackageScope.User
                 );
 
                 packages.Add(
                     new Package(
-                        CoreTools.FormatAsName(elements[0]),
-                        elements[0],
-                        elements[1],
-                        SourcesHelper.Factory.GetSourceOrDefault(elements[2]),
+                        CoreTools.FormatAsName(id),
+                        id,
+                        version,
+                        source.Length is 0
+                            ? Properties.DefaultSource
+                            : SourcesHelper.Factory.GetSourceOrDefault(source),
                         this,
                         options
                     )
@@ -429,7 +422,8 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = Status.ExecutablePath,
-                    Arguments = Status.ExecutableCallArgs + " status -l",
+                    Arguments =
+                        Status.ExecutableCallArgs + " status -l" + UntruncatedTableOutput,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -446,16 +440,21 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
         }
 
         protected override IReadOnlyList<Package> GetInstalledPackages_UnSafe() =>
-            TaskRecycler<IReadOnlyList<Package>>.RunOrAttach(_getInstalledPackages_UnSafe, 15);
+            TaskRecycler<IReadOnlyList<Package>>.RunOrAttach(
+                _getInstalledPackages_UnSafe,
+                InstalledPackagesGeneration,
+                15
+            );
 
-        private IReadOnlyList<Package> _getInstalledPackages_UnSafe()
+        private IReadOnlyList<Package> _getInstalledPackages_UnSafe(long installedPackagesGeneration)
         {
             using Process p = new()
             {
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = Status.ExecutablePath,
-                    Arguments = Status.ExecutableCallArgs + " list",
+                    Arguments =
+                        Status.ExecutableCallArgs + " list" + UntruncatedTableOutput,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -522,6 +521,27 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
             found = _found;
             callArguments =
                 $"-NoProfile -ExecutionPolicy Bypass -Command \"{executable.Replace(" ", "` ")}\" ";
+        }
+
+        protected override IReadOnlyList<string> _getOperationCallArgs(
+            string executablePath,
+            string callArguments
+        )
+        {
+            var (found, executable) = GetExecutableFile();
+            if (!found)
+                return [];
+
+            // Whether this shell can run a script file at all is the thing in question, and a
+            // machine policy or endpoint protection can refuse it. The bundled launcher is used as
+            // the canary so the answer is cached once per shell instead of probing scoop itself.
+            if (!CoreTools.PowerShellLauncherWorks(executablePath, CoreData.PowerShellOperationLauncher))
+            {
+                Logger.Warn("Not using -File for Scoop operations; falling back to -Command");
+                return [];
+            }
+
+            return ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable];
         }
 
         protected override void _loadManagerVersion(out string version)

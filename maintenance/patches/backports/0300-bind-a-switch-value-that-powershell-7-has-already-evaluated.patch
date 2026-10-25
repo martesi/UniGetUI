@@ -1,0 +1,202 @@
+From f2bba19584ff258bd0d1f4f7c6edc4b7596ec590 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:33:42 +0800
+Subject: [PATCH] backport: Bind a switch value that PowerShell 7 has already
+ evaluated (#5391)
+
+Upstream-Commit: 5b220c6ae1f6bd08e6b78c95d3b5478b625346ff
+Upstream-PR: Devolutions/UniGetUI#5391
+Classic-Source-Commit: f2bba19584ff258bd0d1f4f7c6edc4b7596ec590
+
+---
+ .../Utilities/unigetui_ps_operation.ps1       |  20 +++-
+ .../PowerShellOperationLauncherTests.cs       | 111 ++++++++++++++++--
+ 2 files changed, 116 insertions(+), 15 deletions(-)
+
+diff --git a/src/SharedAssets/Assets/Utilities/unigetui_ps_operation.ps1 b/src/SharedAssets/Assets/Utilities/unigetui_ps_operation.ps1
+index 26a219708e2b7464b866864d76dfeefcc73982e3..104a28f9387c7caa6ce5648110f47b66d156e73c 100644
+--- a/src/SharedAssets/Assets/Utilities/unigetui_ps_operation.ps1
++++ b/src/SharedAssets/Assets/Utilities/unigetui_ps_operation.ps1
+@@ -77,17 +77,25 @@ for ($i = 2; $i -lt $args.Count; $i++)
+ {
+     $item = [string]$args[$i]
+ 
+-    # powershell.exe splits "-Switch:$false" into "-Switch" and the literal text "$false" before
+-    # this script runs, and splatting cannot bind that text to a switch. Such a pair is turned
+-    # into a real boolean and bound by name through a hashtable, which does accept one.
++    # powershell.exe and pwsh.exe both split "-Switch:$false" into "-Switch" and a second argument 
++    # before this script runs, but Windows PowerShell 5.x (powershell.exe) passes the literal text
++    # "$false" while PowerShell 7 (pwsh.exe) has already turned it into a bool. Splatting cannot 
++    # bind either of them to a switch, so either is converted back into a real boolean and bound
++    # by name through a hashtable, which does accept one.
+     if ($item -match '^-([A-Za-z][A-Za-z0-9_]*)$' -and ($i + 1) -lt $args.Count)
+     {
+         $switchName = $Matches[1]
+-        $next = [string]$args[$i + 1]
++        $raw = $args[$i + 1]
++        $next = [string]$raw
+ 
+-        if (($next -eq '$false' -or $next -eq '$true') -and (Test-IsSwitchParameter $switchName))
++        $boolValue =
++            if ($raw -is [bool]) { $raw }
++            elseif ($next -in '$true', '$false') { $next -eq '$true' }
++            else { $null }
++
++        if ($null -ne $boolValue -and (Test-IsSwitchParameter $switchName))
+         {
+-            $named[$switchName] = ($next -eq '$true')
++            $named[$switchName] = $boolValue
+             $i++
+             continue
+         }
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShellOperationLauncherTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShellOperationLauncherTests.cs
+index 08568e42d67c3b4566274fc6c1eb5aa4c071e3dc..98eb5388b6de7fee59421431f40d007dc0121b6a 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShellOperationLauncherTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShellOperationLauncherTests.cs
+@@ -5,9 +5,9 @@ using UniGetUI.Core.Tools;
+ namespace UniGetUI.PackageEngine.Tests;
+ 
+ /// <summary>
+-/// Drives the checked-in operation launcher through the real powershell.exe using the same
+-/// ArgumentList mechanism the app uses, so the -File launch path is verified end to end rather
+-/// than only in theory.
++/// Drives the checked-in operation launcher through the real PowerShell hosts (powershell.exe
++/// & pwsh.exe) using the same ArgumentList mechanism the app uses, so the -File launch path is
++/// verified end to end rather than only in theory. 
+ /// </summary>
+ public sealed class PowerShellOperationLauncherTests
+ {
+@@ -48,13 +48,22 @@ public sealed class PowerShellOperationLauncherTests
+             "powershell.exe"
+         );
+ 
++    private static string? PowerShell7Path()
++    {
++        (bool found, string path) = CoreTools.Which("pwsh.exe");
++        return found ? path : null;
++    }
++
+     private sealed record Result(int ExitCode, string StdOut, string StdErr);
+ 
+-    private static Result Run(params string[] operationParameters)
++    private static Result Run(params string[] operationParameters) =>
++        RunWith(PowerShellPath(), operationParameters);
++
++    private static Result RunWith(string powerShellPath, params string[] operationParameters)
+     {
+         var startInfo = new ProcessStartInfo
+         {
+-            FileName = PowerShellPath(),
++            FileName = powerShellPath,
+             UseShellExecute = false,
+             RedirectStandardOutput = true,
+             RedirectStandardError = true,
+@@ -116,10 +125,11 @@ public sealed class PowerShellOperationLauncherTests
+         Assert.Empty(result.StdErr.Trim());
+     }
+ 
+-    // powershell.exe splits "-Confirm:$false" into "-Confirm" and the literal text "$false"
+-    // before the launcher runs, and splatting cannot bind that text to a switch. The launcher
+-    // converts the pair back into a real boolean; without that, the operation silently fails
+-    // with "a positional parameter cannot be found".
++    // Windows PowerShell 5.x splits "-Confirm:$false" into "-Confirm" and the literal text
++    // "$false" before the launcher runs, and splatting cannot bind that text to a switch. The
++    // launcher converts the pair back into a real boolean; without that, the operation silently
++    // fails with "a positional parameter cannot be found". PowerShell 7 splits the same pair but
++    // hands over a real boolean instead, which is covered separately below.
+     [Fact]
+     public void TheColonSwitchSyntaxTheHelpersEmitIsAccepted()
+     {
+@@ -169,6 +179,89 @@ public sealed class PowerShellOperationLauncherTests
+         }
+     }
+ 
++    [Fact]
++    public void TheColonSwitchSyntaxTheHelpersEmitIsAcceptedUnderPowerShell7()
++    {
++        string? powerShell7 = PowerShell7Path();
++        if (powerShell7 is null)
++            return;
++
++        string target = Path.Combine(
++            Path.GetTempPath(),
++            $"unigetui_confirm_pwsh_{Guid.NewGuid():N}.txt"
++        );
++
++        try
++        {
++            var result = RunWith(
++                powerShell7,
++                "plain",
++                "New-Item",
++                "-Path",
++                target,
++                "-ItemType",
++                "File",
++                "-Force",
++                "-Confirm:$false"
++            );
++
++            Assert.DoesNotContain("positional parameter", result.StdErr);
++            Assert.Equal(0, result.ExitCode);
++            Assert.True(File.Exists(target), "The cmdlet did not run with -Confirm:$false bound.");
++        }
++        finally
++        {
++            File.Delete(target);
++        }
++    }
++
++    [Fact]
++    public void APlainSwitchWithoutAValueStillBindsUnderPowerShell7()
++    {
++        string? powerShell7 = PowerShell7Path();
++        if (powerShell7 is null)
++            return;
++
++        string target = Path.Combine(
++            Path.GetTempPath(),
++            $"unigetui_force_pwsh_{Guid.NewGuid():N}.txt"
++        );
++
++        try
++        {
++            var result = RunWith(
++                powerShell7,
++                "plain",
++                "New-Item",
++                "-Path",
++                target,
++                "-ItemType",
++                "File",
++                "-Force"
++            );
++
++            Assert.Equal(0, result.ExitCode);
++            Assert.True(File.Exists(target));
++        }
++        finally
++        {
++            File.Delete(target);
++        }
++    }
++
++    [Fact]
++    public void ABooleanLookingStringIsStillPassedAsDataUnderPowerShell7()
++    {
++        string? powerShell7 = PowerShell7Path();
++        if (powerShell7 is null)
++            return;
++
++        var result = RunWith(powerShell7, "plain", "Write-Output", "$false");
++
++        Assert.Equal(0, result.ExitCode);
++        Assert.Contains("$false", result.StdOut);
++    }
++
+     [Fact]
+     public void AStatementSeparatorInAnArgumentIsTreatedAsData()
+     {
+-- 
+2.56.0
+

@@ -1,0 +1,438 @@
+From 59c2152b064f5c5837d2abc56d9914be90cf857d Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:34:58 +0800
+Subject: [PATCH] backport: Retry a WinGet update against the local identifier
+ when the listed id resolves to nothing (#5427)
+
+Upstream-Commit: b05342b9df7fc0114a64125f5e39d05d2487b735
+Upstream-PR: Devolutions/UniGetUI#5427
+Classic-Source-Commit: 59c2152b064f5c5837d2abc56d9914be90cf857d
+
+---
+ .../OverridenInstallationOptions.cs           |   5 +-
+ .../ClientHelpers/NativePackageHandler.cs     |  38 ++++
+ .../ClientHelpers/NativeWinGetHelper.cs       |   8 +
+ .../Helpers/WinGetPkgOperationHelper.cs       |  43 +++-
+ .../WinGetManagerTests.cs                     | 215 ++++++++++++++++++
+ 5 files changed, 307 insertions(+), 2 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+index 3346cd6426d607b96a8a0760b363f006dff74555..c2993f1a2a992fbbafc29650a994c79c4397e9c1 100644
+--- a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
++++ b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+@@ -8,6 +8,9 @@ public struct OverridenInstallationOptions
+     public bool? WinGet_SpecifyVersion = null;
+     public bool Pip_BreakSystemPackages = false;
+     public bool WinGet_DropArchAndScope = false;
++    public bool WinGet_UseLocalIdentifier = false;
++    public bool Cargo_DoNotUseBinstall = false;
++    public bool Cargo_CustomInstallPathRequested = false;
+ 
+     public OverridenInstallationOptions(string? scope = null, bool? runAsAdministrator = null)
+     {
+@@ -17,6 +20,6 @@ public struct OverridenInstallationOptions
+ 
+     public override string ToString()
+     {
+-        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope}>";
++        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope};WG_UseLocalId={WinGet_UseLocalIdentifier};Cargo_DoNotUseBinstall={Cargo_DoNotUseBinstall};Cargo_CustomInstallPath={Cargo_CustomInstallPathRequested}>";
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativePackageHandler.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativePackageHandler.cs
+index cc0498505865de7f11b9d26bca1e2d9e2264e275..45e8095b336d314b052014b5ca702b7598bdd69c 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativePackageHandler.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativePackageHandler.cs
+@@ -16,6 +16,7 @@ public static class NativePackageHandler
+         new();
+     private static ConcurrentDictionary<long, PackageInstallerInfo> __nativeInstallers_Uninstall =
+         new();
++    private static readonly ConcurrentDictionary<long, string> __localIdentifiers = new();
+ 
+     /// <summary>
+     /// Get (cache or load) the native package for the given package, if any;
+@@ -50,6 +51,42 @@ public static class NativePackageHandler
+         __nativePackages[package.GetHash()] = catalogPackage;
+     }
+ 
++    internal static void AddLocalIdentifier(IPackage package, string? localIdentifier)
++    {
++        if (string.IsNullOrWhiteSpace(localIdentifier))
++        {
++            __localIdentifiers.TryRemove(package.GetHash(), out _);
++            return;
++        }
++
++        __localIdentifiers[package.GetHash()] = localIdentifier;
++    }
++
++    internal static string? GetLocalIdentifier(IPackage package)
++    {
++        if (__localIdentifiers.TryGetValue(package.GetHash(), out string? cached))
++            return cached;
++
++        string? localIdentifier;
++        try
++        {
++            localIdentifier = GetPackage(package)?.InstalledVersion?.Id;
++        }
++        catch (Exception ex)
++        {
++            Logger.Warn(
++                $"Could not read the local identifier of package {package.Id}: {ex.GetType().Name}: {ex.Message}"
++            );
++            return null;
++        }
++
++        if (string.IsNullOrWhiteSpace(localIdentifier))
++            return null;
++
++        AddLocalIdentifier(package, localIdentifier);
++        return localIdentifier;
++    }
++
+     /// <summary>
+     /// Get (cached or load) the native package details for the given package, if any;
+     /// </summary>
+@@ -125,6 +162,7 @@ public static class NativePackageHandler
+     public static void Clear()
+     {
+         __nativePackages.Clear();
++        __localIdentifiers.Clear();
+         __nativeDetails.Clear();
+         __nativeInstallers_Install.Clear();
+         __nativeInstallers_Uninstall.Clear();
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+index d1d5bc68cfbb81a0b41e507f1edb532e82091809..be8d05dff0cf64a97a6b3444961cc5ec43ed95d9 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -373,6 +373,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     continue;
+ 
+                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
++                NativePackageHandler.AddLocalIdentifier(
++                    UniGetUIPackage,
++                    nativePackage.InstalledVersion?.Id
++                );
+                 packages.Add(UniGetUIPackage);
+                 logger.Log(
+                     $"Found package {nativePackage.Name} {nativePackage.Id} on source {source.Name}, from version {version} to version {nativePackage.DefaultInstallVersion.Version}"
+@@ -442,6 +446,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     ),
+                 };
+                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
++                NativePackageHandler.AddLocalIdentifier(
++                    UniGetUIPackage,
++                    nativePackage.InstalledVersion?.Id
++                );
+                 packages.Add(UniGetUIPackage);
+             }
+             catch (Exception ex)
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 6a7562d09f08ba1a0454c5ee4289726dc09d3573..dee2c13b505dcbf56dfa963439399bf409dbb283 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -26,6 +26,31 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         return $"--id {Selector(package.Id.TrimEnd('…'), "identifier")}";
+     }
+ 
++    private static string GetSelectorPiece(IPackage package)
++    {
++        if (
++            package.OverridenOptions.WinGet_UseLocalIdentifier
++            && GetFallbackIdentifier(package) is { } localIdentifier
++        )
++            return $"--id {Selector(localIdentifier, "local identifier")} --exact";
++
++        return GetIdNamePiece(package);
++    }
++
++    private static bool OperationIsBrokered(IPackage package) =>
++        Settings.Get(Settings.K.UseAgentBroker) && !package.Source.IsVirtualManager;
++
++    private static string? GetFallbackIdentifier(IPackage package)
++    {
++        string? localIdentifier = NativePackageHandler.GetLocalIdentifier(package);
++        if (localIdentifier is null || localIdentifier == package.Id)
++            return null;
++
++        return CoreTools.IsOptionSafeIdentifier(localIdentifier, quotedByTheSink: true)
++            ? localIdentifier
++            : null;
++    }
++
+     private static string Selector(string value, string description)
+     {
+         if (!CoreTools.IsOptionSafeIdentifier(value, quotedByTheSink: true))
+@@ -62,7 +87,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             },
+         ];
+ 
+-        parameters.AddRange(GetIdNamePiece(package).Split(" "));
++        parameters.AddRange(GetSelectorPiece(package).Split(" "));
+         if (!package.Source.IsVirtualManager)
+         {
+             parameters.AddRange(["--source", package.Source.Name]);
+@@ -387,6 +412,22 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             return OperationVeredict.AutoRetry;
+         }
+ 
++        if (
++            uintCode is 0x8A150014
++            && operation is OperationType.Update or OperationType.Uninstall
++            && !package.OverridenOptions.WinGet_UseLocalIdentifier
++            && !OperationIsBrokered(package)
++            && GetFallbackIdentifier(package) is { } localIdentifier
++        )
++        {
++            Logger.Warn(
++                $"WinGet found no installed package matching {package.Id}; retrying the {operation} "
++                + $"against the local identifier {localIdentifier} (issue #5413)"
++            );
++            package.OverridenOptions.WinGet_UseLocalIdentifier = true;
++            return OperationVeredict.AutoRetry;
++        }
++
+         return OperationVeredict.Failure;
+     }
+ 
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index cc9e57ddab21c2c4a086322f252293be98edbfc8..e16d6fd45dbf82b5541d46de53b32e28599d06f1 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -39,11 +39,13 @@ public sealed class WinGetManagerTests : IDisposable
+         Settings.SetValue(Settings.K.ProxyURL, "");
+         Settings.SetValue(Settings.K.WinGetCliToolPreference, "");
+         Settings.SetValue(Settings.K.WinGetComApiPolicy, "");
++        Settings.Set(Settings.K.UseAgentBroker, false);
+     }
+ 
+     public void Dispose()
+     {
+         SetNoPackagesHaveBeenLoaded(false);
++        NativePackageHandler.Clear();
+         WinGetHelper.Instance = null!;
+         CoreData.TEST_DataDirectoryOverride = null;
+         if (Directory.Exists(_testRoot))
+@@ -1534,6 +1536,219 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.False(package.OverridenOptions.WinGet_DropArchAndScope);
+     }
+ 
++    private const string NodeJsLocalIdentifier =
++        @"ARP\Machine\X64\{9292CBD9-B395-42D4-8847-C0E8004C6F25}";
++
++    private static Package BuildNodeJsPackage(WinGet manager, string id) =>
++        new PackageBuilder()
++            .WithManager(manager)
++            .WithId(id)
++            .WithVersion("24.12.0")
++            .WithNewVersion("26.7.0")
++            .Build();
++
++    [Fact]
++    public void WinGetUpdateRetriesWithTheLocalIdentifierWhenNoInstalledPackageMatches()
++    {
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS");
++        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
++
++        var firstAttempt = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Update
++        );
++        Assert.Contains("\"OpenJS.NodeJS\"", firstAttempt);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A150014)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
++        Assert.True(package.OverridenOptions.WinGet_UseLocalIdentifier);
++
++        var retryAttempt = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Update
++        );
++        Assert.Contains($"\"{NodeJsLocalIdentifier}\"", retryAttempt);
++        Assert.DoesNotContain("\"OpenJS.NodeJS\"", retryAttempt);
++        Assert.Contains("--exact", retryAttempt);
++    }
++
++    [Fact]
++    public void WinGetUninstallRetriesWithTheLocalIdentifierWhenNoInstalledPackageMatches()
++    {
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS.Uninstall");
++        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Uninstall,
++            [],
++            unchecked((int)0x8A150014)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
++
++        var retryAttempt = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Uninstall
++        );
++        Assert.Contains($"\"{NodeJsLocalIdentifier}\"", retryAttempt);
++    }
++
++    [Fact]
++    public void WinGetUpdateDoesNotRetryWithTheLocalIdentifierASecondTime()
++    {
++        var manager = new WinGet();
++        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS.Twice");
++        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
++        package.OverridenOptions.WinGet_UseLocalIdentifier = true;
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A150014)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++    }
++
++    [Fact]
++    public void WinGetUpdateDoesNotRetryWhenTheLocalIdentifierIsUnknown()
++    {
++        var manager = new WinGet();
++        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS.Unknown");
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A150014)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.False(package.OverridenOptions.WinGet_UseLocalIdentifier);
++    }
++
++    [Fact]
++    public void WinGetUpdateDoesNotRetryWhenThePackageIsAlreadyIdentifiedLocally()
++    {
++        var manager = new WinGet();
++        var package = BuildNodeJsPackage(manager, NodeJsLocalIdentifier);
++        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A150014)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.False(package.OverridenOptions.WinGet_UseLocalIdentifier);
++    }
++
++    [Fact]
++    public void WinGetBrokeredUpdateIsNotRetriedBecauseTheRequestWouldBeIdentical()
++    {
++        var manager = new WinGet();
++        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS.Brokered");
++        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
++
++        bool originalSetting = Settings.Get(Settings.K.UseAgentBroker);
++        Settings.Set(Settings.K.UseAgentBroker, true);
++        try
++        {
++            var veredict = manager.OperationHelper.GetResult(
++                package,
++                OperationType.Update,
++                [],
++                unchecked((int)0x8A150014)
++            );
++
++            OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++            Assert.False(package.OverridenOptions.WinGet_UseLocalIdentifier);
++        }
++        finally
++        {
++            Settings.Set(Settings.K.UseAgentBroker, originalSetting);
++        }
++    }
++
++    [Fact]
++    public void WinGetUpdateDoesNotRetryWhenTheLocalIdentifierWouldBeReadAsAnOption()
++    {
++        var manager = new WinGet();
++        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS.Unsafe");
++        NativePackageHandler.AddLocalIdentifier(package, "--source");
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A150014)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.False(package.OverridenOptions.WinGet_UseLocalIdentifier);
++    }
++
++    [Fact]
++    public void WinGetUpdateUsesTheLocalIdentifierFromTheLatestListing()
++    {
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS.Relisted");
++        NativePackageHandler.AddLocalIdentifier(
++            package,
++            @"ARP\Machine\X64\{00000000-0000-0000-0000-000000000000}"
++        );
++        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
++        package.OverridenOptions.WinGet_UseLocalIdentifier = true;
++
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Update
++        );
++
++        Assert.Contains($"\"{NodeJsLocalIdentifier}\"", parameters);
++        Assert.DoesNotContain(
++            "\"ARP\\Machine\\X64\\{00000000-0000-0000-0000-000000000000}\"",
++            parameters
++        );
++    }
++
++    [Fact]
++    public void WinGetInstallDoesNotRetryWithTheLocalIdentifier()
++    {
++        var manager = new WinGet();
++        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS.Install");
++        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Install,
++            [],
++            unchecked((int)0x8A150014)
++        );
++
++        OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
++        Assert.False(package.OverridenOptions.WinGet_UseLocalIdentifier);
++    }
++
+     [Fact]
+     public void WinGetUpdateNotApplicableViaPingetRetriesWithoutScopeAndArchitecture()
+     {
+-- 
+2.56.0
+

@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
@@ -11,7 +13,7 @@ using UniGetUI.PackageEngine.PackageClasses;
 
 namespace UniGetUI.PackageEngine.Managers.WingetManager;
 
-internal sealed class WinGetCliHelper : IWinGetManagerHelper
+internal sealed partial class WinGetCliHelper : IWinGetManagerHelper
 {
     private readonly WinGet Manager;
     private readonly string _cliExecutablePath;
@@ -63,93 +65,86 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
 
         if (CoreTools.IsAdministrator())
         {
-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
             logger.AddToStdErr(
                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
             );
-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
-            p.StartInfo.Environment["TMP"] = WinGetTemp;
         }
 
         p.Start();
 
-        string OldLine = "";
-        int IdIndex = -1;
-        int VersionIndex = -1;
-        int NewVersionIndex = -1;
-        int SourceIndex = -1;
-        bool DashesPassed = false;
+        Packages.AddRange(ParseAvailableUpdates(Manager, ReadOutputLines(p, logger)));
+
+        logger.AddToStdErr(p.StandardError.ReadToEnd());
+        p.WaitForExit();
+        logger.Close(p.ExitCode);
+
+        return Packages;
+    }
+
+    private static IEnumerable<string> ReadOutputLines(Process p, IProcessTaskLogger logger)
+    {
         string? line;
         while ((line = p.StandardOutput.ReadLine()) is not null)
         {
             logger.AddToStdOut(line);
+            yield return line;
+        }
+    }
 
-            if (line.Contains("have pins"))
+    internal static IReadOnlyList<Package> ParseAvailableUpdates(
+        WinGet manager,
+        IEnumerable<string> outputLines
+    )
+    {
+        List<Package> packages = [];
+
+        foreach (
+            WinGetTable table in WinGetTableLayout.ReadTables(
+                outputLines.Where(line => !line.Contains("have pins"))
+            )
+        )
+        {
+            WinGetTableLayout layout = table.Layout;
+            if (layout.ColumnCount < 4)
             {
                 continue;
             }
 
-            if (!DashesPassed && line.Contains("---"))
+            foreach (string line in table.Rows)
             {
-                string HeaderPrefix = OldLine.Contains("SearchId") ? "Search" : "";
-                string HeaderSuffix = OldLine.Contains("SearchId") ? "Header" : "";
-                IdIndex = OldLine.IndexOf(HeaderPrefix + "Id", StringComparison.InvariantCulture);
-                VersionIndex = OldLine.IndexOf(
-                    HeaderPrefix + "Version",
-                    StringComparison.InvariantCulture
-                );
-                NewVersionIndex = OldLine.IndexOf(
-                    "Available" + HeaderSuffix,
-                    StringComparison.InvariantCulture
-                );
-                SourceIndex = OldLine.IndexOf(
-                    HeaderPrefix + "Source",
-                    StringComparison.InvariantCulture
-                );
-                DashesPassed = true;
-            }
-            else if (line.Trim() == "")
-            {
-                DashesPassed = false;
-            }
-            else if (
-                DashesPassed
-                && IdIndex > 0
-                && VersionIndex > 0
-                && NewVersionIndex > 0
-                && IdIndex < VersionIndex
-                && VersionIndex < NewVersionIndex
-                && NewVersionIndex < line.Length
-            )
-            {
-                int offset = 0; // Account for non-unicode character length
-                while (line[IdIndex - offset - 1] != ' ' || offset > (IdIndex - 5))
+                if (!layout.IsRowReaching(line, WinGetTableLayout.AvailableColumn))
                 {
-                    offset++;
+                    continue;
                 }
 
-                string name = line[..(IdIndex - offset)].Trim();
-                string id = line[(IdIndex - offset)..].Trim().Split(' ')[0];
-                string version = line[(VersionIndex - offset)..(NewVersionIndex - offset)].Trim();
+                string name = layout.GetCell(line, WinGetTableLayout.NameColumn);
+                string id = layout.GetCell(line, WinGetTableLayout.IdColumn);
+                string version = layout.GetCell(line, WinGetTableLayout.VersionColumn);
+
                 string newVersion;
-                if (SourceIndex != -1)
-                {
-                    newVersion = line[(NewVersionIndex - offset)..(SourceIndex - offset)].Trim();
-                }
-                else
-                {
-                    newVersion = line[(NewVersionIndex - offset)..].Trim().Split(' ')[0];
-                }
-
                 IManagerSource source;
-                if (SourceIndex == -1 || SourceIndex >= line.Length)
+                if (layout.HasSourceColumn)
                 {
-                    source = Manager.DefaultSource;
+                    newVersion = layout.GetCell(
+                        line,
+                        WinGetTableLayout.AvailableColumn,
+                        layout.LastColumn
+                    );
+                    string sourceName = layout.GetCell(line, layout.LastColumn);
+                    source =
+                        sourceName.Length == 0
+                            ? manager.DefaultSource
+                            : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
                 }
                 else
                 {
-                    string sourceName = line[(SourceIndex - offset)..].Trim().Split(' ')[0];
-                    source = Manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+                    newVersion = layout.GetCell(
+                        line,
+                        WinGetTableLayout.AvailableColumn,
+                        layout.ColumnCount
+                    );
+                    source = manager.DefaultSource;
                 }
 
                 // Restore the version we last upgraded to when WinGet reports it as unknown (#5158).
@@ -157,11 +152,17 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
                 if (versionUnknown)
                     version = WinGetPkgOperationHelper.GetLastInstalledVersion(id);
 
-                var package = new Package(name, id, version, newVersion, source, Manager);
-                // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
-                if (versionUnknown || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
+                var package = new Package(name, id, version, newVersion, source, manager)
                 {
-                    Packages.Add(package);
+                    InstalledVersionIsUnverified = versionUnknown,
+                };
+                // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
+                if (
+                    versionUnknown
+                    || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package)
+                )
+                {
+                    packages.Add(package);
                 }
                 else
                 {
@@ -170,14 +171,9 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
                     );
                 }
             }
-            OldLine = line;
         }
 
-        logger.AddToStdErr(p.StandardError.ReadToEnd());
-        p.WaitForExit();
-        logger.Close(p.ExitCode);
-
-        return Packages;
+        return packages;
     }
 
     public IReadOnlyList<Package> GetInstalledPackages_UnSafe()
@@ -208,104 +204,15 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
 
         if (CoreTools.IsAdministrator())
         {
-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
             logger.AddToStdErr(
                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
             );
-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
-            p.StartInfo.Environment["TMP"] = WinGetTemp;
         }
 
         p.Start();
 
-        string OldLine = "";
-        int IdIndex = -1;
-        int VersionIndex = -1;
-        int SourceIndex = -1;
-        int NewVersionIndex = -1;
-        bool DashesPassed = false;
-        string? line;
-        while ((line = p.StandardOutput.ReadLine()) is not null)
-        {
-            try
-            {
-                logger.AddToStdOut(line);
-                if (!DashesPassed && line.Contains("---"))
-                {
-                    string HeaderPrefix = OldLine.Contains("SearchId") ? "Search" : "";
-                    string HeaderSuffix = OldLine.Contains("SearchId") ? "Header" : "";
-                    IdIndex = OldLine.IndexOf(
-                        HeaderPrefix + "Id",
-                        StringComparison.InvariantCulture
-                    );
-                    VersionIndex = OldLine.IndexOf(
-                        HeaderPrefix + "Version",
-                        StringComparison.InvariantCulture
-                    );
-                    NewVersionIndex = OldLine.IndexOf(
-                        "Available" + HeaderSuffix,
-                        StringComparison.InvariantCulture
-                    );
-                    SourceIndex = OldLine.IndexOf(
-                        HeaderPrefix + "Source",
-                        StringComparison.InvariantCulture
-                    );
-                    DashesPassed = true;
-                }
-                else if (
-                    DashesPassed
-                    && IdIndex > 0
-                    && VersionIndex > 0
-                    && IdIndex < VersionIndex
-                    && VersionIndex < line.Length
-                )
-                {
-                    int offset = 0; // Account for non-unicode character length
-                    while (
-                        ((IdIndex - offset) <= line.Length && line[IdIndex - offset - 1] != ' ')
-                        || offset > (IdIndex - 5)
-                    )
-                    {
-                        offset++;
-                    }
-
-                    string name = line[..(IdIndex - offset)].Trim();
-                    string id = line[(IdIndex - offset)..].Trim().Split(' ')[0];
-                    if (NewVersionIndex == -1 && SourceIndex != -1)
-                    {
-                        NewVersionIndex = SourceIndex;
-                    }
-                    else if (NewVersionIndex == -1 && SourceIndex == -1)
-                    {
-                        NewVersionIndex = line.Length - 1;
-                    }
-
-                    string version = line[(VersionIndex - offset)..(NewVersionIndex - offset)]
-                        .Trim();
-
-                    IManagerSource source;
-                    if (SourceIndex == -1 || (SourceIndex - offset) >= line.Length)
-                    {
-                        source = Manager.GetLocalSource(id); // Load Winget Local Sources
-                    }
-                    else
-                    {
-                        string sourceName = line[(SourceIndex - offset)..]
-                            .Trim()
-                            .Split(' ')[0]
-                            .Trim();
-                        source = Manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
-                    }
-                    version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(id, version);
-                    Packages.Add(new Package(name, id, version, source, Manager));
-                }
-                OldLine = line;
-            }
-            catch (Exception e)
-            {
-                Logger.Error(e);
-            }
-        }
+        Packages.AddRange(ParseInstalledPackages(Manager, ReadOutputLines(p, logger)));
 
         logger.AddToStdErr(p.StandardError.ReadToEnd());
         p.WaitForExit();
@@ -314,7 +221,128 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
         return Packages;
     }
 
+    internal static IReadOnlyList<Package> ParseInstalledPackages(
+        WinGet manager,
+        IEnumerable<string> outputLines
+    )
+    {
+        List<Package> packages = [];
+
+        foreach (WinGetTable table in WinGetTableLayout.ReadTables(outputLines))
+        {
+            WinGetTableLayout layout = table.Layout;
+            foreach (string line in table.Rows)
+            {
+                try
+                {
+                    string name = layout.GetCell(line, WinGetTableLayout.NameColumn);
+                    string id = layout.GetCell(line, WinGetTableLayout.IdColumn);
+                    string version = layout.GetCell(line, WinGetTableLayout.VersionColumn);
+
+                    string sourceName =
+                        layout.HasSourceColumn
+                            ? layout.GetCell(line, layout.LastColumn)
+                            : "";
+
+                    IManagerSource source =
+                        sourceName.Length == 0
+                            ? manager.GetLocalSource(id) // Load Winget Local Sources
+                            : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+
+                    bool versionUnknown = WinGetPkgOperationHelper.IsUnknownVersion(version);
+                    version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(id, version);
+                    packages.Add(
+                        new Package(name, id, version, source, manager)
+                        {
+                            InstalledVersionIsUnverified = versionUnknown,
+                        }
+                    );
+                }
+                catch (Exception e)
+                {
+                    Logger.Error(e);
+                }
+            }
+        }
+
+        return packages;
+    }
+
     public IReadOnlyList<Package> FindPackages_UnSafe(string query)
+    {
+        if (query.Length == 0)
+        {
+            return GetSourcesForBrowse()
+                .SelectMany(source => SearchPackages(query, source, SearchLimits.MaxEmptyQueryResultsPerSource))
+                .ToArray();
+        }
+
+        return SearchPackages(query, null, MAX_SEARCH_RESULTS);
+    }
+
+    private List<IManagerSource> GetSourcesForBrowse()
+    {
+        using var _cliLock = WinGet.AcquireCliLock();
+        List<IManagerSource> sources = [];
+        using Process p = new()
+        {
+            StartInfo = new()
+            {
+                FileName = _cliExecutablePath,
+                Arguments = Manager.Status.ExecutableCallArgs + " source export",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+            },
+        };
+
+        IProcessTaskLogger logger = Manager.TaskLogger.CreateNew(LoggableTaskType.ListSources, p);
+
+        if (CoreTools.IsAdministrator())
+        {
+            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
+            logger.AddToStdErr(
+                $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
+            );
+        }
+
+        p.Start();
+
+        foreach (string name in ParseExportedSourceNames(ReadOutputLines(p, logger)))
+        {
+            sources.Add(Manager.SourcesHelper.Factory.GetSourceOrDefault(name));
+        }
+
+        logger.AddToStdErr(p.StandardError.ReadToEnd());
+        p.WaitForExit();
+        logger.Close(p.ExitCode);
+        return sources;
+    }
+
+    internal static IEnumerable<string> ParseExportedSourceNames(IEnumerable<string> outputLines)
+    {
+        foreach (string line in outputLines)
+        {
+            string? name;
+            try
+            {
+                name = JsonSerializer.Deserialize(line, WinGetCliJsonContext.Default.WinGetExportedSource)?.Name;
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                yield return name;
+            }
+        }
+    }
+
+    private List<Package> SearchPackages(string query, IManagerSource? source, int count)
     {
         using var _cliLock = WinGet.AcquireCliLock();
         List<Package> Packages = [];
@@ -327,7 +355,11 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
                     Manager.Status.ExecutableCallArgs
                     + " search \""
                     + query
-                    + "\"  --accept-source-agreements "
+                    + "\""
+                    + (source is null ? "" : " --source \"" + source.Name + "\"")
+                    + " --count "
+                    + count
+                    + " --accept-source-agreements "
                     + WinGet.GetProxyArgument(),
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -341,76 +373,55 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
 
         if (CoreTools.IsAdministrator())
         {
-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
             logger.AddToStdErr(
                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
             );
-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
-            p.StartInfo.Environment["TMP"] = WinGetTemp;
         }
 
         p.Start();
 
-        string OldLine = "";
-        int IdIndex = -1;
-        int VersionIndex = -1;
-        int SourceIndex = -1;
-        bool DashesPassed = false;
-        string? line;
-        while ((line = p.StandardOutput.ReadLine()) is not null)
-        {
-            logger.AddToStdOut(line);
-            if (!DashesPassed && line.Contains("---"))
-            {
-                string HeaderPrefix = OldLine.Contains("SearchId") ? "Search" : "";
-                IdIndex = OldLine.IndexOf(HeaderPrefix + "Id", StringComparison.InvariantCulture);
-                VersionIndex = OldLine.IndexOf(
-                    HeaderPrefix + "Version",
-                    StringComparison.InvariantCulture
-                );
-                SourceIndex = OldLine.IndexOf(
-                    HeaderPrefix + "Source",
-                    StringComparison.InvariantCulture
-                );
-                DashesPassed = true;
-            }
-            else if (
-                DashesPassed
-                && IdIndex > 0
-                && VersionIndex > 0
-                && IdIndex < VersionIndex
-                && VersionIndex < line.Length
-            )
-            {
-                int offset = 0; // Account for non-unicode character length
-                while (line[IdIndex - offset - 1] != ' ' || offset > (IdIndex - 5))
-                {
-                    offset++;
-                }
-
-                string name = line[..(IdIndex - offset)].Trim();
-                string id = line[(IdIndex - offset)..].Trim().Split(' ')[0];
-                string version = line[(VersionIndex - offset)..].Trim().Split(' ')[0];
-                IManagerSource source;
-                if (SourceIndex == -1 || SourceIndex >= line.Length)
-                {
-                    source = Manager.DefaultSource;
-                }
-                else
-                {
-                    string sourceName = line[(SourceIndex - offset)..].Trim().Split(' ')[0];
-                    source = Manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
-                }
-                Packages.Add(new Package(name, id, version, source, Manager));
-            }
-            OldLine = line;
-        }
+        Packages.AddRange(ParseFoundPackages(Manager, ReadOutputLines(p, logger), source));
 
         logger.AddToStdErr(p.StandardError.ReadToEnd());
         p.WaitForExit();
         logger.Close(p.ExitCode);
 
         return Packages;
+    }
+
+    internal static IReadOnlyList<Package> ParseFoundPackages(
+        WinGet manager,
+        IEnumerable<string> outputLines,
+        IManagerSource? queriedSource = null
+    )
+    {
+        List<Package> packages = [];
+
+        foreach (WinGetTable table in WinGetTableLayout.ReadTables(outputLines))
+        {
+            WinGetTableLayout layout = table.Layout;
+            foreach (string line in table.Rows)
+            {
+                string name = layout.GetCell(line, WinGetTableLayout.NameColumn);
+                string id = layout.GetCell(line, WinGetTableLayout.IdColumn);
+                string version = layout.GetCell(line, WinGetTableLayout.VersionColumn);
+
+                string sourceName =
+                    layout.HasSourceColumn
+                        ? layout.GetCell(line, layout.LastColumn)
+                        : "";
+
+                IManagerSource source =
+                    sourceName.Length == 0
+                        ? queriedSource ?? manager.DefaultSource
+                        : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+
+                packages.Add(new Package(name, id, version, source, manager));
+            }
+        }
+
+        return packages;
     }
 
     public void GetPackageDetails_UnSafe(IPackageDetails details)
@@ -473,12 +484,10 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
         );
         if (CoreTools.IsAdministrator())
         {
-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
             Logger.Warn(
                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
             );
-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
-            p.StartInfo.Environment["TMP"] = WinGetTemp;
         }
         p.Start();
 
@@ -531,12 +540,10 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
         IProcessTaskLogger logger = Manager.TaskLogger.CreateNew(LoggableTaskType.FindPackages, p);
         if (CoreTools.IsAdministrator())
         {
-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
             Logger.Warn(
                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
             );
-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
-            p.StartInfo.Environment["TMP"] = WinGetTemp;
         }
         p.Start();
 
@@ -581,4 +588,9 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
         logger.Close(p.ExitCode);
         return sources;
     }
+
+    internal sealed record WinGetExportedSource(string? Name);
+
+    [JsonSerializable(typeof(WinGetExportedSource))]
+    internal sealed partial class WinGetCliJsonContext : JsonSerializerContext { }
 }

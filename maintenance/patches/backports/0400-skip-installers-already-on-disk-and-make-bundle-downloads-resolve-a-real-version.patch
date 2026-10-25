@@ -1,0 +1,1146 @@
+From 45c4d730763c35f9896f828fafad93f2ff6ba382 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:37:45 +0800
+Subject: [PATCH] backport: Skip installers already on disk and make bundle
+ downloads resolve a real version (#5469)
+
+Upstream-Commit: b1eb136a7af34babc511576d47235489c62f6596
+Upstream-PR: Devolutions/UniGetUI#5469
+Classic-Source-Commit: 45c4d730763c35f9896f828fafad93f2ff6ba382
+
+---
+ .../IPackageDetails.cs                        |   6 +
+ .../Helpers/BunPkgDetailsHelper.cs            |   1 +
+ .../Helpers/CargoPkgDetailsHelper.cs          |   8 +-
+ .../BaseNuGetDetailsHelper.cs                 |  70 ++--
+ .../Internal/NuGetManifestLoader.cs           |  67 ++--
+ .../Helpers/NpmPkgDetailsHelper.cs            |   1 +
+ .../Helpers/PipPkgDetailsHelper.cs            |   1 +
+ .../Helpers/ScoopPkgDetailsHelper.cs          |   2 +
+ .../PingetPackageDetailsProvider.cs           |   1 +
+ .../PublishedInstallerHash.cs                 | 136 ++++++++
+ .../Packages/Classes/PackageDetails.cs        |   6 +
+ .../Packages/Package.cs                       |  48 +--
+ .../Fakes/TestPackageDetailsHelper.cs         |   1 +
+ .../InstallerFileNameTests.cs                 | 304 ++++++++++++++++++
+ .../NuGetManifestLoaderTests.cs               |  21 ++
+ .../NuGetV3ClientTests.cs                     |  23 ++
+ .../PublishedInstallerHashTests.cs            |  95 ++++++
+ 17 files changed, 719 insertions(+), 72 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Operations/PublishedInstallerHash.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/InstallerFileNameTests.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/PublishedInstallerHashTests.cs
+
+diff --git a/src/UniGetUI.PackageEngine.Interfaces/IPackageDetails.cs b/src/UniGetUI.PackageEngine.Interfaces/IPackageDetails.cs
+index 607d4b35c0552d385b0db2232cebecfcf4d90420..1f1c1a753c2cec7cb61c6e9b395d399e7d3a2c6f 100644
+--- a/src/UniGetUI.PackageEngine.Interfaces/IPackageDetails.cs
++++ b/src/UniGetUI.PackageEngine.Interfaces/IPackageDetails.cs
+@@ -43,6 +43,12 @@ namespace UniGetUI.PackageEngine.Interfaces
+         /// </summary>
+         public Uri? LicenseUrl { get; set; }
+ 
++        /// <summary>
++        /// The version of the package the installer URL points at, as reported by the
++        /// loaded manifest. Null when the manager does not report it.
++        /// </summary>
++        public string? Version { get; set; }
++
+         /// <summary>
+         /// A URL pointing to the installer of the package
+         /// </summary>
+diff --git a/src/UniGetUI.PackageEngine.Managers.Bun/Helpers/BunPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Bun/Helpers/BunPkgDetailsHelper.cs
+index 59de3d4ddb5b8b6ee6e48b217f86eb859cbaa476..a5ad4978c4a5a4e51ed0379462a2d6496088932e 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Bun/Helpers/BunPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Bun/Helpers/BunPkgDetailsHelper.cs
+@@ -47,6 +47,7 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
+                 logger.AddToStdOut(strContents);
+                 JsonObject? contents = JsonNode.Parse(strContents) as JsonObject;
+ 
++                details.Version = contents?["version"]?.ToString();
+                 details.License = contents?["license"]?.ToString();
+                 details.Description = contents?["description"]?.ToString();
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.Cargo/Helpers/CargoPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Cargo/Helpers/CargoPkgDetailsHelper.cs
+index dc8b5ecdc509994ddf2bfe927c5642b985738590..5cb7fd971f30034f12a71db0bf227bba7978c387 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Cargo/Helpers/CargoPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Cargo/Helpers/CargoPkgDetailsHelper.cs
+@@ -44,12 +44,14 @@ internal sealed class CargoPkgDetailsHelper(Cargo manager) : BasePkgDetailsHelpe
+         var categories = manifest.categories?.Select(c => c.category) ?? [];
+         details.Tags = [.. keywords, .. categories];
+ 
+-        var versionData = manifest.versions.FirstOrDefault(v =>
+-            v.num == details.Package.VersionString
+-        );
++        var versionData = details.Package.HasConcreteVersion
++            ? manifest.versions.FirstOrDefault(v => v.num == details.Package.VersionString)
++            : manifest.versions.FirstOrDefault(v => v.num == manifest.crate.max_stable_version)
++                ?? manifest.versions.FirstOrDefault(v => v.num == manifest.crate.newest_version);
+ 
+         if (versionData is not null)
+         {
++            details.Version = versionData.num;
+             details.Author = versionData.published_by?.name;
+             details.License = versionData.license;
+             details.InstallerUrl = new Uri(
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGetDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGetDetailsHelper.cs
+index 9f8c90d8da75e8cafaf91c2bc837b139d63ffd28..f3a73f4ab8a22e48e5999a7e7bf750b50a06eaef 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGetDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGetDetailsHelper.cs
+@@ -22,21 +22,25 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             var logger = Manager.TaskLogger.CreateNew(LoggableTaskType.LoadPackageDetails);
+             try
+             {
++                string version = ResolveDetailsVersion(details.Package);
++                details.Version = version;
++
+                 if (NuGetLocalFeed.TryGetDirectory(details.Package.Source, out string directory))
+                 {
+-                    logger.Close(GetDetailsLocal(details, directory, logger) ? 0 : 1);
++                    logger.Close(GetDetailsLocal(details, directory, version, logger) ? 0 : 1);
+                     return;
+                 }
+ 
+                 if (NuGetV3ServiceIndex.IsV3Source(details.Package.Source))
+                 {
+-                    logger.Close(GetDetailsV3(details, logger) ? 0 : 1);
++                    logger.Close(GetDetailsV3(details, version, logger) ? 0 : 1);
+                     return;
+                 }
+ 
+-                details.ManifestUrl = NuGetManifestLoader.GetManifestUrl(details.Package);
++                details.ManifestUrl = NuGetManifestLoader.GetManifestUrl(details.Package, version);
+                 string? PackageManifestContents = NuGetManifestLoader.GetManifestContent(
+-                    details.Package
++                    details.Package,
++                    version
+                 );
+                 logger.Log(PackageManifestContents);
+ 
+@@ -240,20 +244,17 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+         private static bool GetDetailsLocal(
+             IPackageDetails details,
+             string directory,
++            string version,
+             INativeTaskLogger logger
+         )
+         {
+             IPackage package = details.Package;
+-            LocalNuGetPackage? local = NuGetLocalFeed.Find(
+-                directory,
+-                package.Id,
+-                package.VersionString
+-            );
++            LocalNuGetPackage? local = NuGetLocalFeed.Find(directory, package.Id, version);
+ 
+             if (local is null)
+             {
+                 logger.Error(
+-                    $"No package file for {package.Id} version {package.VersionString} was found "
++                    $"No package file for {package.Id} version {version} was found "
+                         + $"on source {package.Source.Name} at Directory={directory}"
+                 );
+                 return false;
+@@ -303,7 +304,11 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             return true;
+         }
+ 
+-        private static bool GetDetailsV3(IPackageDetails details, INativeTaskLogger logger)
++        private static bool GetDetailsV3(
++            IPackageDetails details,
++            string version,
++            INativeTaskLogger logger
++        )
+         {
+             IPackage package = details.Package;
+             NuGetV3ServiceIndex? index = NuGetV3ServiceIndex.Resolve(package.Source);
+@@ -317,10 +322,10 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             }
+ 
+             details.ManifestUrl =
+-                NuGetV3Client.GetRegistrationLeafUrl(index, package.Id, package.VersionString)
+-                ?? NuGetV3Client.GetNuspecUrl(index, package.Id, package.VersionString);
++                NuGetV3Client.GetRegistrationLeafUrl(index, package.Id, version)
++                ?? NuGetV3Client.GetNuspecUrl(index, package.Id, version);
+ 
+-            V3CatalogEntry? entry = GetOrFetchCatalogEntry(package, index);
++            V3CatalogEntry? entry = GetOrFetchCatalogEntry(package, index, version);
+             if (entry is null)
+             {
+                 logger.Error(
+@@ -356,7 +361,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             Uri? installerUrl =
+                 Uri.TryCreate(entry.PackageContent, UriKind.Absolute, out Uri? packageContent)
+                     ? packageContent
+-                    : NuGetV3Client.GetPackageContentUrl(index, package.Id, package.VersionString);
++                    : NuGetV3Client.GetPackageContentUrl(index, package.Id, version);
+             details.InstallerUrl = installerUrl;
+ 
+             if (entry.PackageSize > 0)
+@@ -392,10 +397,12 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+ 
+         private static V3CatalogEntry? GetOrFetchCatalogEntry(
+             IPackage package,
+-            NuGetV3ServiceIndex index
++            NuGetV3ServiceIndex index,
++            string? version = null
+         )
+         {
+-            long hash = package.GetVersionedHash();
++            version ??= package.VersionString;
++            long hash = NuGetManifestLoader.GetCacheKey(package, version);
+             if (BaseNuGet.V3Entries.TryGetValue(hash, out V3CatalogEntry? cached))
+             {
+                 Logger.Debug(
+@@ -404,11 +411,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+                 return cached;
+             }
+ 
+-            V3CatalogEntry? entry = NuGetV3Client.GetCatalogEntry(
+-                index,
+-                package.Id,
+-                package.VersionString
+-            );
++            V3CatalogEntry? entry = NuGetV3Client.GetCatalogEntry(index, package.Id, version);
+ 
+             if (entry is not null)
+                 BaseNuGet.V3Entries[hash] = entry;
+@@ -416,6 +419,29 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             return entry;
+         }
+ 
++        private string ResolveDetailsVersion(IPackage package)
++        {
++            if (package.HasConcreteVersion)
++                return package.VersionString;
++
++            try
++            {
++                IReadOnlyList<string> versions = GetInstallableVersions_UnSafe(package);
++                return NuGetV3Client.SelectHighestVersion(versions, includePreRelease: false)
++                    ?? NuGetV3Client.SelectHighestVersion(versions, includePreRelease: true)
++                    ?? package.VersionString;
++            }
++            catch (Exception ex)
++            {
++                Logger.Warn(
++                    $"Could not resolve the newest version of package {package.Id} on manager "
++                        + $"{package.Manager.Name}, the listed version will be used instead"
++                );
++                Logger.Warn(ex);
++                return package.VersionString;
++            }
++        }
++
+         private static string? FirstNonEmpty(params string?[] values)
+         {
+             foreach (string? value in values)
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/Internal/NuGetManifestLoader.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/Internal/NuGetManifestLoader.cs
+index 4c8ce2c68c5cbb24fae619b76803fbafc9b8ed81..b3d3532bd85aff8aa18e2de334d00b8bac75d5de 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/Internal/NuGetManifestLoader.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/Internal/NuGetManifestLoader.cs
+@@ -8,15 +8,32 @@ namespace UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal
+ {
+     internal static class NuGetManifestLoader
+     {
++        /// <summary>
++        /// Cache key for the manifest and catalog caches. Reproduces the shape of
++        /// IPackage.GetVersionedHash() so that an entry cached for a concrete package is
++        /// reused when another package resolves to that same version, and so that a package
++        /// whose listed version is a placeholder does not share one slot across versions.
++        /// </summary>
++        /// <param name="package">A valid Package object</param>
++        /// <param name="version">The version to key on; the package's own when omitted</param>
++        /// <returns>A cache key</returns>
++        public static long GetCacheKey(IPackage package, string? version = null)
++        {
++            return CoreTools.HashStringAsLong(
++                $"{package.Manager.Name}\\{package.Source.AsString_DisplayName}\\{package.Id}\\{version ?? package.VersionString}"
++            );
++        }
++
+         /// <summary>
+         /// Returns the URL to the manifest of a NuGet-based package
+         /// </summary>
+         /// <param name="package">A valid Package object</param>
++        /// <param name="version">The version to address; the package's own when omitted</param>
+         /// <returns>A Uri object</returns>
+-        public static Uri GetManifestUrl(IPackage package)
++        public static Uri GetManifestUrl(IPackage package, string? version = null)
+         {
+             return new Uri(
+-                $"{package.Source.Url}/Packages(Id='{package.Id}',Version='{package.VersionString}')"
++                $"{package.Source.Url}/Packages(Id='{package.Id}',Version='{version ?? package.VersionString}')"
+             );
+         }
+ 
+@@ -53,10 +70,13 @@ namespace UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal
+         /// Returns the contents of the manifest of a NuGet-based package
+         /// </summary>
+         /// <param name="package">The package for which to obtain the manifest</param>
++        /// <param name="version">The version to fetch; the package's own when omitted</param>
+         /// <returns>A string containing the contents of the manifest</returns>
+-        public static string? GetManifestContent(IPackage package)
++        public static string? GetManifestContent(IPackage package, string? version = null)
+         {
+-            if (BaseNuGet.Manifests.TryGetValue(package.GetVersionedHash(), out string? manifest))
++            version ??= package.VersionString;
++            long cacheKey = GetCacheKey(package, version);
++            if (BaseNuGet.Manifests.TryGetValue(cacheKey, out string? manifest))
+             {
+                 Logger.Debug(
+                     $"Loading cached NuGet manifest for package {package.Id} on manager {package.Manager.Name}"
+@@ -64,41 +84,31 @@ namespace UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal
+                 return manifest;
+             }
+ 
+-            string? PackageManifestContent = "";
+-            string PackageManifestUrl = GetManifestUrl(package).ToString();
++            string PackageManifestUrl = GetManifestUrl(package, version).ToString();
+ 
+             try
+             {
+                 using (HttpClient client = new(CoreTools.GenericHttpClientParameters))
+                 {
+                     client.DefaultRequestHeaders.UserAgent.ParseAdd(CoreData.UserAgentString);
+-                    HttpResponseMessage response = client
+-                        .GetAsync(PackageManifestUrl)
+-                        .GetAwaiter()
+-                        .GetResult();
+-                    if (!response.IsSuccessStatusCode && package.VersionString.EndsWith(".0"))
+-                    {
+-                        response = client
+-                            .GetAsync(new Uri(PackageManifestUrl.ToString().Replace(".0')", "')")))
+-                            .GetAwaiter()
+-                            .GetResult();
+-                    }
++                    using var initialRequest = new HttpRequestMessage(
++                        HttpMethod.Get,
++                        PackageManifestUrl
++                    );
++                    using HttpResponseMessage initialResponse = client.Send(initialRequest);
+ 
+-                    if (!response.IsSuccessStatusCode)
++                    if (!initialResponse.IsSuccessStatusCode && version.EndsWith(".0"))
+                     {
+-                        Logger.Warn(
+-                            $"Failed to download the {package.Manager.Name} manifest at Url={PackageManifestUrl.ToString()} with status code {response.StatusCode}"
++                        using var fallbackRequest = new HttpRequestMessage(
++                            HttpMethod.Get,
++                            new Uri(PackageManifestUrl.ToString().Replace(".0')", "')"))
+                         );
+-                        return null;
++                        using HttpResponseMessage fallbackResponse = client.Send(fallbackRequest);
++                        return CacheManifestContent(cacheKey, package, PackageManifestUrl, fallbackResponse);
+                     }
+ 
+-                    PackageManifestContent = response
+-                        .Content.ReadAsStringAsync()
+-                        .GetAwaiter()
+-                        .GetResult();
++                    return CacheManifestContent(cacheKey, package, PackageManifestUrl, initialResponse);
+                 }
+-                BaseNuGet.Manifests[package.GetHash()] = PackageManifestContent;
+-                return PackageManifestContent;
+             }
+             catch (Exception e)
+             {
+@@ -111,6 +121,7 @@ namespace UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal
+         }
+ 
+         private static string? CacheManifestContent(
++            long cacheKey,
+             IPackage package,
+             string packageManifestUrl,
+             HttpResponseMessage response
+@@ -125,7 +136,7 @@ namespace UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal
+             }
+ 
+             string packageManifestContent = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+-            BaseNuGet.Manifests[package.GetVersionedHash()] = packageManifestContent;
++            BaseNuGet.Manifests[cacheKey] = packageManifestContent;
+             return packageManifestContent;
+         }
+     }
+diff --git a/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgDetailsHelper.cs
+index d9d10ac280605c464f5dd3804f5613aedf693704..e0ec46f8717fa8ffcdf4f29205d509ff2aeb39af 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Npm/Helpers/NpmPkgDetailsHelper.cs
+@@ -59,6 +59,7 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
+                 logger.AddToStdOut(strContents);
+                 JsonObject? contents = JsonNode.Parse(strContents) as JsonObject;
+ 
++                details.Version = contents?["version"]?.ToString();
+                 details.License = contents?["license"]?.ToString();
+                 details.Description = contents?["description"]?.ToString();
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgDetailsHelper.cs
+index fa8dd9da06f977786c1f7dc10a5d831b164f3b27..961d69ca5d063081b1a3116d2ad25e6f09d62c8d 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgDetailsHelper.cs
+@@ -33,6 +33,7 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+ 
+             if (contents?["info"] is JsonObject info)
+             {
++                details.Version = info["version"]?.ToString();
+                 details.Description = info["summary"]?.ToString();
+                 details.Author = info["author"]?.ToString();
+                 details.Publisher = info["maintainer"]?.ToString();
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgDetailsHelper.cs
+index 86b234fa513ca9a01450fef769e35f5404889060..cc457c499268fefce9df3a65c41cbb7609decddf 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgDetailsHelper.cs
+@@ -98,6 +98,8 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                 details.Description = contents["description"]?.ToString();
+             }
+ 
++            details.Version = contents["version"]?.ToString();
++
+             // Load installer type
+             if (contents["innsetup"]?.ToString() == "true")
+                 details.InstallerType = "Inno Setup (" + CoreTools.Translate("extracted") + ")";
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
+index 2240b54ff3b169e5714cc5a551496b6ff99d522d..0061ab2f4f7550f3deffa6196352968af4110794 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
+@@ -406,6 +406,7 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
+         Manifest manifest = result.Manifest;
+         Installer? installer = result.SelectedInstaller ?? manifest.Installers.FirstOrDefault();
+ 
++        SetIfPresent(value => details.Version = value, manifest.Version);
+         SetIfMissing(value => details.Author = value, details.Author, manifest.Author);
+         SetIfMissing(
+             value => details.Description = value,
+diff --git a/src/UniGetUI.PackageEngine.Operations/PublishedInstallerHash.cs b/src/UniGetUI.PackageEngine.Operations/PublishedInstallerHash.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..30e0e198bfe56a3b9d34c829be01721bb7f11976
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Operations/PublishedInstallerHash.cs
+@@ -0,0 +1,136 @@
++using System.Security.Cryptography;
++
++namespace UniGetUI.PackageEngine.Operations;
++
++internal enum PublishedHashAlgorithm
++{
++    Md5,
++    Sha1,
++    Sha256,
++    Sha384,
++    Sha512,
++}
++
++internal readonly record struct PublishedInstallerHash(
++    PublishedHashAlgorithm Algorithm,
++    byte[] Digest
++)
++{
++    private static readonly Dictionary<string, PublishedHashAlgorithm> _algorithmsByName = new(
++        StringComparer.OrdinalIgnoreCase
++    )
++    {
++        ["md5"] = PublishedHashAlgorithm.Md5,
++        ["sha1"] = PublishedHashAlgorithm.Sha1,
++        ["sha256"] = PublishedHashAlgorithm.Sha256,
++        ["sha384"] = PublishedHashAlgorithm.Sha384,
++        ["sha512"] = PublishedHashAlgorithm.Sha512,
++    };
++
++    private static readonly Dictionary<int, PublishedHashAlgorithm> _algorithmsByDigestLength =
++        new()
++        {
++            [16] = PublishedHashAlgorithm.Md5,
++            [20] = PublishedHashAlgorithm.Sha1,
++            [32] = PublishedHashAlgorithm.Sha256,
++            [48] = PublishedHashAlgorithm.Sha384,
++            [64] = PublishedHashAlgorithm.Sha512,
++        };
++
++    public static bool TryParse(string? publishedHash, out PublishedInstallerHash parsed)
++    {
++        foreach (
++            string candidate in (publishedHash ?? "").Split(
++                ' ',
++                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
++            )
++        )
++        {
++            if (TryParseSingle(candidate, out parsed))
++                return true;
++        }
++
++        parsed = default;
++        return false;
++    }
++
++    private static bool TryParseSingle(string candidate, out PublishedInstallerHash parsed)
++    {
++        int separator = candidate.IndexOfAny([':', '-']);
++        if (
++            separator > 0
++            && _algorithmsByName.TryGetValue(
++                candidate[..separator],
++                out PublishedHashAlgorithm named
++            )
++        )
++        {
++            return TryBuild(named, candidate[(separator + 1)..], out parsed);
++        }
++
++        return TryBuild(null, candidate, out parsed);
++    }
++
++    private static bool TryBuild(
++        PublishedHashAlgorithm? expected,
++        string value,
++        out PublishedInstallerHash parsed
++    )
++    {
++        parsed = default;
++        if (!TryDecode(value, out byte[]? digest))
++            return false;
++
++        if (!_algorithmsByDigestLength.TryGetValue(digest.Length, out PublishedHashAlgorithm sized))
++            return false;
++
++        if (expected is { } named && named != sized)
++            return false;
++
++        parsed = new PublishedInstallerHash(sized, digest);
++        return true;
++    }
++
++    private static bool TryDecode(string value, out byte[] digest)
++    {
++        string hex = value.Replace(" ", "").Replace("-", "");
++        if (hex.Length > 0 && hex.Length % 2 == 0 && hex.All(Uri.IsHexDigit))
++        {
++            digest = Convert.FromHexString(hex);
++            return true;
++        }
++
++        Span<byte> buffer = stackalloc byte[64];
++        if (Convert.TryFromBase64String(value, buffer, out int written))
++        {
++            digest = buffer[..written].ToArray();
++            return true;
++        }
++
++        digest = [];
++        return false;
++    }
++
++    public async Task<bool> MatchesAsync(string filePath, CancellationToken token)
++    {
++        await using FileStream stream = new(
++            filePath,
++            FileMode.Open,
++            FileAccess.Read,
++            FileShare.Read,
++            8192,
++            useAsync: true
++        );
++
++        byte[] actual = Algorithm switch
++        {
++            PublishedHashAlgorithm.Md5 => await MD5.HashDataAsync(stream, token),
++            PublishedHashAlgorithm.Sha1 => await SHA1.HashDataAsync(stream, token),
++            PublishedHashAlgorithm.Sha384 => await SHA384.HashDataAsync(stream, token),
++            PublishedHashAlgorithm.Sha512 => await SHA512.HashDataAsync(stream, token),
++            _ => await SHA256.HashDataAsync(stream, token),
++        };
++
++        return CryptographicOperations.FixedTimeEquals(actual, Digest);
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
+index fcb956d4cebc5e334e3aac0a382336f4a24b8f4e..2583aa9359991138cef2eac1349e52ce5632d83e 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/PackageDetails.cs
+@@ -49,6 +49,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         /// </summary>
+         public Uri? LicenseUrl { get; set; }
+ 
++        /// <summary>
++        /// The version of the package the installer URL points at, as reported by the
++        /// loaded manifest. Null when the manager does not report it.
++        /// </summary>
++        public string? Version { get; set; }
++
+         /// <summary>
+         /// A URL pointing to the installer of the package
+         /// </summary>
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+index bdc402c53d8b8a540bbacaa8c2e9c891bb8a2764..ecefe8c539740c96d76e0e378713e850a0c7a2c7 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+@@ -334,8 +334,15 @@ namespace UniGetUI.PackageEngine.PackageClasses
+ 
+         private string ResolveInstallerVersion()
+         {
++            string listedVersion = HasConcreteVersion ? VersionString : "";
++            string resolvedVersion =
++                Details.Version is { } reported && reported.Any(char.IsDigit) ? reported : "";
++
+             if (Manager.InstallerUrlFollowsPackageVersion)
+-                return VersionString;
++                return listedVersion.Length > 0 ? listedVersion : resolvedVersion;
++
++            if (resolvedVersion.Length > 0)
++                return resolvedVersion;
+ 
+             if (IsUpgradable)
+                 return NewVersionString;
+@@ -346,40 +353,43 @@ namespace UniGetUI.PackageEngine.PackageClasses
+             if (GetAvailablePackage() is { } available)
+                 return available.VersionString;
+ 
+-            return VersionString;
++            return listedVersion;
+         }
+ 
+         public async Task<string?> GetInstallerFileName()
+         {
+             var scheme = InstallerFileNaming.ResolveScheme();
+-            string version = scheme is InstallerNameScheme.PublisherName
+-                ? ""
+-                : ResolveInstallerVersion();
++            bool versioned = scheme is not InstallerNameScheme.PublisherName;
+ 
+             if (Manager.Name.StartsWith("PowerShell") || Manager.Name.StartsWith(".NET"))
+             {
++                if (versioned && !HasConcreteVersion && !Details.IsPopulated)
++                    await Details.Load();
++
+                 return InstallerFileNaming.Build(
+                     $"{Id}.nupkg",
+                     Name,
+                     Id,
+-                    version,
++                    versioned ? ResolveInstallerVersion() : "",
+                     "nupkg",
+                     scheme
+                 );
+             }
+-
+-            if (!Details.IsPopulated)
+-                await Details.Load();
+-            if (Details.InstallerUrl is null)
+-                return null;
+-            return InstallerFileNaming.Build(
+-                await CoreTools.GetFileNameAsync(Details.InstallerUrl),
+-                Name,
+-                Id,
+-                version,
+-                Details.InstallerType,
+-                scheme
+-            );
++            else
++            {
++                if (!Details.IsPopulated)
++                    await Details.Load();
++                if (Details.InstallerUrl is null)
++                    return null;
++                return InstallerFileNaming.Build(
++                    await CoreTools.GetFileNameAsync(Details.InstallerUrl),
++                    Name,
++                    Id,
++                    versioned ? ResolveInstallerVersion() : "",
++                    Details.InstallerType,
++                    scheme
++                );
++            }
+         }
+ 
+         private int HighestChangedVersionComponent()
+diff --git a/src/UniGetUI.PackageEngine.Tests/Infrastructure/Fakes/TestPackageDetailsHelper.cs b/src/UniGetUI.PackageEngine.Tests/Infrastructure/Fakes/TestPackageDetailsHelper.cs
+index b2b951b37a0709ac14a6ba6437ac744e9b1f94ab..749486207bc1b267ab14bebb297c2b7d8f8eb1ed 100644
+--- a/src/UniGetUI.PackageEngine.Tests/Infrastructure/Fakes/TestPackageDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Tests/Infrastructure/Fakes/TestPackageDetailsHelper.cs
+@@ -56,6 +56,7 @@ public sealed class TestPackageDetailsHelper(TestPackageManager manager) : BaseP
+         target.HomepageUrl = source.HomepageUrl;
+         target.License = source.License;
+         target.LicenseUrl = source.LicenseUrl;
++        target.Version = source.Version;
+         target.InstallerUrl = source.InstallerUrl;
+         target.InstallerHash = source.InstallerHash;
+         target.InstallerType = source.InstallerType;
+diff --git a/src/UniGetUI.PackageEngine.Tests/InstallerFileNameTests.cs b/src/UniGetUI.PackageEngine.Tests/InstallerFileNameTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..09ab0aa47390757d00f117dc959c452c15474384
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/InstallerFileNameTests.cs
+@@ -0,0 +1,304 @@
++using UniGetUI.Core.Data;
++using UniGetUI.Core.SettingsEngine;
++using UniGetUI.Core.SettingsEngine.SecureSettings;
++using UniGetUI.Core.Tools;
++using UniGetUI.PackageEngine.Classes.Serializable;
++using UniGetUI.PackageEngine.PackageClasses;
++using UniGetUI.PackageEngine.PackageLoader;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Fakes;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++public sealed class InstallerFileNameTests : IDisposable
++{
++    private readonly string _testRoot;
++
++    public InstallerFileNameTests()
++    {
++        _testRoot = Path.Combine(
++            Path.GetTempPath(),
++            nameof(InstallerFileNameTests),
++            Guid.NewGuid().ToString("N")
++        );
++        CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
++        SecureSettings.TEST_SecureSettingsRootOverride = Path.Combine(_testRoot, "SecureSettings");
++        Directory.CreateDirectory(CoreData.UniGetUIUserConfigurationDirectory);
++        Settings.ResetSettings();
++        Settings.SetValue(
++            Settings.K.InstallerFileNameScheme,
++            InstallerFileNaming.NameAndVersionValue
++        );
++    }
++
++    public void Dispose()
++    {
++        Settings.ResetSettings();
++        CoreData.TEST_DataDirectoryOverride = null;
++        SecureSettings.TEST_SecureSettingsRootOverride = null;
++        if (Directory.Exists(_testRoot))
++            Directory.Delete(_testRoot, recursive: true);
++    }
++
++    private static TestPackageManager BuildManager(
++        bool installerUrlFollowsPackageVersion,
++        string? manifestVersion = null
++    ) =>
++        new PackageManagerBuilder()
++            .WithName("PowerShellTest")
++            .ConfigureDetails(helper =>
++            {
++                helper.PopulateDetails = details => details.Version = manifestVersion;
++            })
++            .ConfigureManager(manager =>
++                manager.SetInstallerUrlFollowsPackageVersion(installerUrlFollowsPackageVersion))
++            .Build();
++
++    private TestPackageManager BuildManagerReportingManifestVersion(string? manifestVersion) =>
++        new PackageManagerBuilder()
++            .ConfigureDetails(helper =>
++            {
++                helper.PopulateDetails = details =>
++                {
++                    details.InstallerUrl = new Uri(Path.Combine(_testRoot, "ContosoSetup.exe"));
++                    details.InstallerType = "exe";
++                    details.Version = manifestVersion;
++                };
++            })
++            .Build();
++
++    private static ImportedPackage BuildImportedPackage(TestPackageManager manager) =>
++        new(
++            new SerializablePackage
++            {
++                Id = "Contoso.Tool",
++                Name = "Contoso Tool",
++                Version = "1.0.0",
++                ManagerName = manager.Name,
++                Source = manager.DefaultSource.Name,
++            },
++            manager,
++            manager.DefaultSource
++        );
++
++    private static void InitializeLoaders()
++    {
++        _ = new DiscoverablePackagesLoader([]);
++        _ = new UpgradablePackagesLoader([]);
++        _ = new InstalledPackagesLoader([]);
++    }
++
++    [Fact]
++    public async Task ListedVersionIsUsedWhenTheManagerPinsTheInstallerUrl()
++    {
++        var manager = BuildManager(installerUrlFollowsPackageVersion: true);
++        InitializeLoaders();
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++
++        Assert.Equal("Contoso Tool_1.0.0.nupkg", await package.GetInstallerFileName());
++    }
++
++    [Fact]
++    public async Task NewVersionIsUsedWhenThePackageIsUpgradable()
++    {
++        var manager = BuildManager(installerUrlFollowsPackageVersion: false);
++        InitializeLoaders();
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++
++        Assert.Equal("Contoso Tool_2.0.0.nupkg", await package.GetInstallerFileName());
++    }
++
++    [Fact]
++    public async Task NewVersionOfTheUpgradableEquivalentIsUsed()
++    {
++        var manager = BuildManager(installerUrlFollowsPackageVersion: false);
++        InitializeLoaders();
++
++        await UpgradablePackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithName("Contoso Tool")
++                .WithId("Contoso.Tool")
++                .WithVersion("1.0.0")
++                .WithNewVersion("3.0.0")
++                .Build()
++        );
++
++        var installed = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++
++        Assert.Equal("Contoso Tool_3.0.0.nupkg", await installed.GetInstallerFileName());
++    }
++
++    [Fact]
++    public async Task VersionOfTheAvailableEquivalentIsUsed()
++    {
++        var manager = BuildManager(installerUrlFollowsPackageVersion: false);
++        InitializeLoaders();
++
++        await DiscoverablePackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithName("Contoso Tool")
++                .WithId("Contoso.Tool")
++                .WithVersion("4.0.0")
++                .Build()
++        );
++
++        var installed = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++
++        Assert.Equal("Contoso Tool_4.0.0.nupkg", await installed.GetInstallerFileName());
++    }
++
++    [Fact]
++    public async Task ListedVersionIsUsedWhenNoEquivalentIsLoaded()
++    {
++        var manager = BuildManager(installerUrlFollowsPackageVersion: false);
++        InitializeLoaders();
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++
++        Assert.Equal("Contoso Tool_1.0.0.nupkg", await package.GetInstallerFileName());
++    }
++
++    [Fact]
++    public async Task TheVersionReportedByTheLoadedManifestIsPreferred()
++    {
++        var manager = BuildManagerReportingManifestVersion("5.0.0");
++        InitializeLoaders();
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++
++        Assert.Equal("Contoso Tool_5.0.0.exe", await package.GetInstallerFileName());
++    }
++
++    [Fact]
++    public async Task ImportedPackagesAreNamedAfterTheVersionTheManifestOffers()
++    {
++        var manager = BuildManagerReportingManifestVersion("7.2.1");
++        InitializeLoaders();
++
++        Assert.Equal(
++            "Contoso Tool_7.2.1.exe",
++            await BuildImportedPackage(manager).GetInstallerFileName()
++        );
++    }
++
++    [Fact]
++    public async Task APlaceholderManifestVersionDoesNotSuppressTheFallbackChain()
++    {
++        var manager = BuildManagerReportingManifestVersion("Unknown");
++        InitializeLoaders();
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++
++        Assert.Equal("Contoso Tool_2.0.0.exe", await package.GetInstallerFileName());
++    }
++
++    [Fact]
++    public async Task ImportedPackagesNeverCarryTheLatestPlaceholderAsAVersion()
++    {
++        var manager = BuildManagerReportingManifestVersion(null);
++        InitializeLoaders();
++
++        Assert.Equal(
++            "Contoso Tool.exe",
++            await BuildImportedPackage(manager).GetInstallerFileName()
++        );
++    }
++
++    [Fact]
++    public async Task AnUnpinnedImportIsNamedAfterTheVersionThePinnedUrlResolvedTo()
++    {
++        var manager = BuildManager(
++            installerUrlFollowsPackageVersion: true,
++            manifestVersion: "9.1.0"
++        );
++        InitializeLoaders();
++
++        Assert.Equal(
++            "Contoso Tool_9.1.0.nupkg",
++            await BuildImportedPackage(manager).GetInstallerFileName()
++        );
++    }
++
++    [Fact]
++    public async Task APinnedVersionStillWinsWhenTheManagerPinsTheInstallerUrl()
++    {
++        var manager = BuildManager(
++            installerUrlFollowsPackageVersion: true,
++            manifestVersion: "9.1.0"
++        );
++        InitializeLoaders();
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++
++        Assert.Equal("Contoso Tool_1.0.0.nupkg", await package.GetInstallerFileName());
++    }
++
++    [Fact]
++    public async Task PublisherNameSchemeIgnoresTheResolvedVersion()
++    {
++        Settings.SetValue(
++            Settings.K.InstallerFileNameScheme,
++            InstallerFileNaming.PublisherNameValue
++        );
++        var manager = BuildManager(installerUrlFollowsPackageVersion: false);
++        InitializeLoaders();
++
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .WithNewVersion("2.0.0")
++            .Build();
++
++        Assert.Equal("Contoso.Tool.nupkg", await package.GetInstallerFileName());
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/NuGetManifestLoaderTests.cs b/src/UniGetUI.PackageEngine.Tests/NuGetManifestLoaderTests.cs
+index 576f7ba3bb8f66568a38df4102ab8814ceeaeb90..a958d14e1dbf604961d2b4377f32a22abfa362c7 100644
+--- a/src/UniGetUI.PackageEngine.Tests/NuGetManifestLoaderTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/NuGetManifestLoaderTests.cs
+@@ -33,6 +33,27 @@ public sealed class NuGetManifestLoaderTests
+         );
+     }
+ 
++    [Fact]
++    public void GetCacheKey_MatchesTheVersionedHashForThePackagesOwnVersion()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Tool")
++            .WithVersion("1.2.3")
++            .Build();
++
++        Assert.Equal(package.GetVersionedHash(), NuGetManifestLoader.GetCacheKey(package));
++        Assert.Equal(
++            package.GetVersionedHash(),
++            NuGetManifestLoader.GetCacheKey(package, "1.2.3")
++        );
++        Assert.NotEqual(
++            package.GetVersionedHash(),
++            NuGetManifestLoader.GetCacheKey(package, "2.0.0")
++        );
++    }
++
+     [Fact]
+     public void GetManifestContent_UsesCachedManifestWhenAvailable()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs b/src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs
+index a5aea4d3cecc1c286f5e135c461acc04b59ab210..fe0424976b507d95be28c83063cfc3554ba9da29 100644
+--- a/src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs
+@@ -1252,6 +1252,29 @@ public sealed class NuGetV3ClientTests
+         Assert.Equal("1.0.0-Z", NuGetV3Client.SelectHighestVersion(["1.0.0-a", "1.0.0-Z"], true));
+     }
+ 
++    [Fact]
++    public void SelectHighestVersion_PrefersAStableReleaseOverAHigherPreRelease()
++    {
++        Assert.Equal(
++            "3.0.0",
++            NuGetV3Client.SelectHighestVersion(
++                ["2.9.0", "3.0.0", "3.1.0-preview1"],
++                includePreRelease: false
++            )
++        );
++        Assert.Equal(
++            "1.0.1",
++            NuGetV3Client.SelectHighestVersion(["1.0.1-beta2", "1.0.1"], includePreRelease: false)
++        );
++        Assert.Null(
++            NuGetV3Client.SelectHighestVersion(["1.0.0-alpha"], includePreRelease: false)
++        );
++        Assert.Equal(
++            "1.0.0-alpha",
++            NuGetV3Client.SelectHighestVersion(["1.0.0-alpha"], includePreRelease: true)
++        );
++    }
++
+     [Fact]
+     public void TheClientAndTheManagerAgreeOnLabelOrdering()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PublishedInstallerHashTests.cs b/src/UniGetUI.PackageEngine.Tests/PublishedInstallerHashTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..66266adaf0e0c33fd8a9b4b0f5ac20bb0ba20c1d
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/PublishedInstallerHashTests.cs
+@@ -0,0 +1,95 @@
++using System.Security.Cryptography;
++using UniGetUI.PackageEngine.Operations;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++public sealed class PublishedInstallerHashTests : IDisposable
++{
++    private readonly string _filePath;
++    private readonly byte[] _payload;
++
++    public PublishedInstallerHashTests()
++    {
++        _payload = new byte[8192];
++        new Random(97).NextBytes(_payload);
++        _filePath = Path.Join(Path.GetTempPath(), $"unigetui-hash-{Guid.NewGuid():N}.bin");
++        File.WriteAllBytes(_filePath, _payload);
++    }
++
++    public void Dispose()
++    {
++        if (File.Exists(_filePath))
++            File.Delete(_filePath);
++    }
++
++    private async Task<bool> Matches(string publishedHash)
++    {
++        Assert.True(
++            PublishedInstallerHash.TryParse(publishedHash, out PublishedInstallerHash parsed),
++            $"could not parse {publishedHash}"
++        );
++        return await parsed.MatchesAsync(_filePath, CancellationToken.None);
++    }
++
++    [Fact]
++    public async Task WinGetPublishesUppercaseHexSha256()
++        => Assert.True(await Matches(Convert.ToHexString(SHA256.HashData(_payload))));
++
++    [Fact]
++    public async Task PipAndCargoPublishLowercaseHexSha256()
++        => Assert.True(
++            await Matches(Convert.ToHexString(SHA256.HashData(_payload)).ToLowerInvariant())
++        );
++
++    [Fact]
++    public async Task NpmAndBunPublishSubresourceIntegrity()
++        => Assert.True(
++            await Matches("sha512-" + Convert.ToBase64String(SHA512.HashData(_payload)))
++        );
++
++    [Fact]
++    public async Task TheNuGetFamilyPublishesBase64Sha512()
++        => Assert.True(await Matches(Convert.ToBase64String(SHA512.HashData(_payload))));
++
++    [Fact]
++    public async Task ScoopPublishesPrefixedHashes()
++    {
++        Assert.True(
++            await Matches("sha256:" + Convert.ToHexString(SHA256.HashData(_payload)))
++        );
++        Assert.True(await Matches("md5:" + Convert.ToHexString(MD5.HashData(_payload))));
++        Assert.True(await Matches(Convert.ToHexString(SHA1.HashData(_payload))));
++    }
++
++    [Fact]
++    public async Task IntegrityListsAreAcceptedThroughTheirFirstUsableEntry()
++        => Assert.True(
++            await Matches(
++                "sha512-" + Convert.ToBase64String(SHA512.HashData(_payload))
++                    + " sha256-" + Convert.ToBase64String(SHA256.HashData(_payload))
++            )
++        );
++
++    [Fact]
++    public async Task ADigestOfTheWrongContentDoesNotMatch()
++        => Assert.False(await Matches(Convert.ToHexString(SHA256.HashData([1, 2, 3, 4]))));
++
++    [Theory]
++    [InlineData(null)]
++    [InlineData("")]
++    [InlineData("   ")]
++    [InlineData("not-a-hash")]
++    [InlineData("0f6ec2")]
++    [InlineData("whirlpool:0f6ec2eda1f8c5dc4c267ee761c0dad8")]
++    public void UnusableHashesAreRejected(string? publishedHash)
++        => Assert.False(PublishedInstallerHash.TryParse(publishedHash, out _));
++
++    [Fact]
++    public void AnAlgorithmThatDisagreesWithItsDigestLengthIsRejected()
++        => Assert.False(
++            PublishedInstallerHash.TryParse(
++                "sha256-" + Convert.ToBase64String(SHA512.HashData(_payload)),
++                out _
++            )
++        );
++}
+-- 
+2.56.0
+

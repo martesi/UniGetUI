@@ -3,6 +3,7 @@ using Microsoft.Win32;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
+using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
 using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using UniGetUI.PackageEngine.Enums;
@@ -18,16 +19,99 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
     public static string GetIdNamePiece(IPackage package)
     {
         if (!package.Id.EndsWith("…"))
-            return $"--id \"{package.Id.TrimEnd('…')}\" --exact";
+            return $"--id {Selector(package.Id.TrimEnd('…'), "identifier")} --exact";
 
         if (!package.Name.EndsWith("…"))
-            return $"--name \"{package.Name}\" --exact";
+            return $"--name {Selector(package.Name, "name")} --exact";
 
-        return $"--id \"{package.Id.TrimEnd('…')}\"";
+        return $"--id {Selector(package.Id.TrimEnd('…'), "identifier")}";
+    }
+
+    private static string GetSelectorPiece(IPackage package)
+    {
+        if (GetSelectedLocalIdentifier(package) is { } localIdentifier)
+            return $"--id {Selector(localIdentifier, "local identifier")} --exact";
+
+        return GetIdNamePiece(package);
+    }
+
+    private static string? GetSelectedLocalIdentifier(IPackage package) =>
+        package.OverridenOptions.WinGet_UseLocalIdentifier ? GetFallbackIdentifier(package) : null;
+
+    private static bool DropsArchAndScope(IPackage package) =>
+        package.OverridenOptions.WinGet_DropArchAndScope
+        || GetSelectedLocalIdentifier(package) is not null;
+
+    private static bool OperationIsBrokered(IPackage package) =>
+        Settings.Get(Settings.K.UseAgentBroker) && !package.Source.IsVirtualManager;
+
+    private static string? GetFallbackIdentifier(IPackage package)
+    {
+        string? localIdentifier = NativePackageHandler.GetLocalIdentifier(package);
+        if (localIdentifier is null || localIdentifier == package.Id)
+            return null;
+
+        return CoreTools.IsOptionSafeIdentifier(localIdentifier, quotedByTheSink: true)
+            ? localIdentifier
+            : null;
+    }
+
+    private static string Selector(string value, string description)
+    {
+        if (!CoreTools.IsOptionSafeIdentifier(value, quotedByTheSink: true))
+            throw new InvalidOperationException(
+                $"Refusing to build a WinGet command line for the package {description} \"{value}\": it would be read as a command-line option."
+            );
+
+        return CoreTools.EscapeCommandLineArgument(value);
     }
 
     public WinGetPkgOperationHelper(WinGet manager)
         : base(manager) { }
+
+    internal static string? GetEffectiveScope(IPackage package, InstallOptions options)
+    {
+        if (DropsArchAndScope(package))
+            return null;
+
+        return (package.OverridenOptions.Scope ?? options.InstallationScope) switch
+        {
+            PackageScope.User => PackageScope.User,
+            PackageScope.Machine => PackageScope.Machine,
+            _ => null,
+        };
+    }
+
+    internal static string? GetUpdateArchitectureOverride(IPackage package)
+    {
+        if (package.Name.Contains("64-bit") || package.Id.ToLower().Contains("x64"))
+            return Architecture.x64;
+
+        if (package.Name.Contains("32-bit") || package.Id.ToLower().Contains("x86"))
+            return Architecture.x86;
+
+        return null;
+    }
+
+    internal static string? GetEffectiveArchitecture(
+        IPackage package,
+        InstallOptions options,
+        bool forUpdate = false
+    )
+    {
+        if (DropsArchAndScope(package))
+            return null;
+
+        string architecture =
+            (forUpdate ? GetUpdateArchitectureOverride(package) : null) ?? options.Architecture;
+        return architecture switch
+        {
+            Architecture.x86 => Architecture.x86,
+            Architecture.x64 => Architecture.x64,
+            Architecture.arm64 => Architecture.arm64,
+            _ => null,
+        };
+    }
 
     protected override IReadOnlyList<string> _getOperationParameters(
         IPackage package,
@@ -52,7 +136,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             },
         ];
 
-        parameters.AddRange(GetIdNamePiece(package).Split(" "));
+        parameters.AddRange(GetSelectorPiece(package).Split(" "));
         if (!package.Source.IsVirtualManager)
         {
             parameters.AddRange(["--source", package.Source.Name]);
@@ -63,18 +147,10 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         }
 
         // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
-        // WinGet_DropArchAndScope is set after an "update not applicable" result so the retry
-        // lets WinGet choose a compatible installer instead of repeating the same constraints.
-        if (!package.OverridenOptions.WinGet_DropArchAndScope)
+        // WinGet_DropArchAndScope is set after an "update not applicable" failure to retry without the scope/architecture constraints.
+        if (GetEffectiveScope(package, options) is { } scope)
         {
-            parameters.AddRange(
-                (package.OverridenOptions.Scope ?? options.InstallationScope) switch
-                {
-                    PackageScope.User => ["--scope", "user"],
-                    PackageScope.Machine => ["--scope", "machine"],
-                    _ => [],
-                }
-            );
+            parameters.AddRange(["--scope", scope]);
         }
 
         if (
@@ -83,11 +159,15 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             && package.OverridenOptions.WinGet_SpecifyVersion is not false
         )
         {
-            parameters.AddRange(["--version", $"\"{package.VersionString}\""]);
+            parameters.AddRange(
+                ["--version", CoreTools.EscapeCommandLineArgument(package.VersionString)]
+            );
         }
         else if (operation is OperationType.Install && options.Version != "")
         {
-            parameters.AddRange(["--version", $"\"{options.Version}\""]);
+            parameters.AddRange(
+                ["--version", CoreTools.EscapeCommandLineArgument(options.Version)]
+            );
         }
 
         if (usePinget && operation is OperationType.Update)
@@ -102,14 +182,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
 
         if (operation is OperationType.Update)
         {
-            if (package.Name.Contains("64-bit") || package.Id.ToLower().Contains("x64"))
-            {
-                options.Architecture = Architecture.x64;
-            }
-            else if (package.Name.Contains("32-bit") || package.Id.ToLower().Contains("x86"))
-            {
-                options.Architecture = Architecture.x86;
-            }
+            ApplyOperationOverrides(package, options, operation);
             parameters.Add("--include-unknown");
 
             if (!usePinget)
@@ -153,20 +226,58 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             if (options.SkipHashCheck)
                 parameters.Add("--ignore-security-hash");
 
-            if (!package.OverridenOptions.WinGet_DropArchAndScope)
+            if (GetEffectiveArchitecture(package, options) is { } architecture)
             {
-                parameters.AddRange(
-                    options.Architecture switch
-                    {
-                        Architecture.x86 => ["--architecture", "x86"],
-                        Architecture.x64 => ["--architecture", "x64"],
-                        Architecture.arm64 => ["--architecture", "arm64"],
-                        _ => [],
-                    }
-                );
+                parameters.AddRange(["--architecture", architecture]);
             }
         }
 
+        ApplyElevationRequirements(package, options, operation);
+
+        if (!usePinget)
+        {
+            parameters.Add(WinGet.GetProxyArgument());
+        }
+
+        parameters.AddRange(
+            operation switch
+            {
+                OperationType.Update => options.CustomParameters_Update,
+                OperationType.Uninstall => options.CustomParameters_Uninstall,
+                _ => options.CustomParameters_Install,
+            }
+        );
+        return parameters;
+    }
+
+    /// <summary>
+    /// Consults the WinGet native installer metadata to detect packages that require (or
+    /// prohibit) elevation, and updates <c>package.OverridenOptions.RunAsAdministrator</c>
+    /// accordingly. Used by both the local execution path (via
+    /// <see cref="_getOperationParameters"/>) and the agent-broker path, so that the
+    /// requested elevation matches regardless of where the operation runs.
+    /// </summary>
+    public override void ApplyOperationOverrides(
+        IPackage package,
+        InstallOptions options,
+        OperationType operation
+    )
+    {
+        if (
+            operation is OperationType.Update
+            && GetUpdateArchitectureOverride(package) is { } updateArchitecture
+        )
+        {
+            options.Architecture = updateArchitecture;
+        }
+    }
+
+    public override void ApplyElevationRequirements(
+        IPackage package,
+        InstallOptions options,
+        OperationType operation
+    )
+    {
         try
         {
             var installOptions = NativePackageHandler.GetInstallationOptions(
@@ -190,20 +301,22 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             )
             {
                 if (CoreTools.IsAdministrator())
-                    throw new UnauthorizedAccessException(
+                    throw new OperationPreconditionException(
                         CoreTools.Translate(
                             "This package cannot be installed from an elevated context."
                         )
+                            + " "
                             + CoreTools.Translate(
                                 "Please run UniGetUI as a regular user and try again."
                             )
                     );
 
                 if (options.RunAsAdministrator)
-                    throw new UnauthorizedAccessException(
+                    throw new OperationPreconditionException(
                         CoreTools.Translate(
                             "This package cannot be installed from an elevated context."
                         )
+                            + " "
                             + CoreTools.Translate(
                                 "Please check the installation options for this package and try again"
                             )
@@ -223,27 +336,13 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         }
         catch (Exception ex)
         {
-            if (ex is UnauthorizedAccessException)
+            if (ex is OperationPreconditionException)
                 throw;
 
             Logger.Error("Recovered from fatal WinGet exception:");
             Logger.Error(ex);
         }
 
-        if (!usePinget)
-        {
-            parameters.Add(WinGet.GetProxyArgument());
-        }
-
-        parameters.AddRange(
-            operation switch
-            {
-                OperationType.Update => options.CustomParameters_Update,
-                OperationType.Uninstall => options.CustomParameters_Uninstall,
-                _ => options.CustomParameters_Install,
-            }
-        );
-        return parameters;
     }
 
     protected override OperationVeredict _getOperationResult(
@@ -301,14 +400,10 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             )
             {
                 var options = InstallOptionsFactory.LoadApplicable(package);
-                bool hasScope =
-                    (package.OverridenOptions.Scope ?? options.InstallationScope)
-                    is PackageScope.User or PackageScope.Machine;
-                bool hasArch =
-                    options.Architecture
-                    is Architecture.x86 or Architecture.x64 or Architecture.arm64;
-
-                if (hasScope || hasArch)
+                if (
+                    GetEffectiveScope(package, options) is not null
+                    || GetEffectiveArchitecture(package, options, forUpdate: true) is not null
+                )
                 {
                     Logger.Warn(
                         $"Update for {package.Id} reported as not applicable; retrying without the scope/architecture constraints"
@@ -370,6 +465,22 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         )
         { // Sometimes, when uninstalling, error code 0x8A150030 can be caused by missing permissions.
             package.OverridenOptions.RunAsAdministrator = true;
+            return OperationVeredict.AutoRetry;
+        }
+
+        if (
+            uintCode is 0x8A150014
+            && operation is OperationType.Update or OperationType.Uninstall
+            && !package.OverridenOptions.WinGet_UseLocalIdentifier
+            && !OperationIsBrokered(package)
+            && GetFallbackIdentifier(package) is { } localIdentifier
+        )
+        {
+            Logger.Warn(
+                $"WinGet found no installed package matching {package.Id}; retrying the {operation} "
+                + $"against the local identifier {localIdentifier} (issue #5413)"
+            );
+            package.OverridenOptions.WinGet_UseLocalIdentifier = true;
             return OperationVeredict.AutoRetry;
         }
 

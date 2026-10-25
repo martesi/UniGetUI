@@ -1,0 +1,856 @@
+From dc42fb376537679e3ef17e10e6a5fea487f9ba97 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:44:57 +0800
+Subject: [PATCH] backport: Allow an empty Discover search to list every WinGet
+ package (#5536)
+
+Upstream-Commit: 9c8a18cf1a9ff728fbf96d472c56a008afeaf340
+Upstream-PR: Devolutions/UniGetUI#5536
+Classic-Source-Commit: dc42fb376537679e3ef17e10e6a5fea487f9ba97
+
+---
+ .../SettingsEngine_Names.cs                   |   1 +
+ src/UniGetUI.PackageEngine.Enums/Enums.cs     |   5 +
+ .../ManagerCapabilities.cs                    |   1 +
+ .../ClientHelpers/NativeWinGetHelper.cs       |  35 ++-
+ .../ClientHelpers/PingetCliHelper.cs          |  33 +-
+ .../ClientHelpers/WinGetCliHelper.cs          |  96 +++++-
+ .../WinGet.cs                                 |   1 +
+ .../AbstractPackageLoader.cs                  |  27 +-
+ .../DiscoverablePackagesLoader.cs             |  59 +++-
+ .../DiscoverablePackagesLoaderTests.cs        | 286 ++++++++++++++++++
+ .../WinGetCliParsingTests.cs                  |  41 +++
+ 11 files changed, 550 insertions(+), 35 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/DiscoverablePackagesLoaderTests.cs
+
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+index 2644f0cf1091b0bc0701979731d95bdfbd075347..de29d544caed09b7da93246db092a2d96fd4321d 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+@@ -114,6 +114,7 @@ public static partial class Settings
+         Test6,
+         Test7_Legacy,
+         Unset,
++        ExcludedSearchManagers,
+     };
+ 
+     public static string ResolveKey(K key)
+diff --git a/src/UniGetUI.PackageEngine.Enums/Enums.cs b/src/UniGetUI.PackageEngine.Enums/Enums.cs
+index 2061d7b832078c4f93c0ef5f295d1a991f825e30..d82036e29ed7019c61e554ecefd9d5df34c7f618 100644
+--- a/src/UniGetUI.PackageEngine.Enums/Enums.cs
++++ b/src/UniGetUI.PackageEngine.Enums/Enums.cs
+@@ -1,5 +1,10 @@
+ namespace UniGetUI.PackageEngine.Enums
+ {
++    public static class SearchLimits
++    {
++        public const int MaxEmptyQueryResultsPerSource = 100;
++    }
++
+     /// <summary>
+     /// Represents the installation scope of a package
+     /// </summary>
+diff --git a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+index ba1a2069ba81252f27db84e2ffab66ecdf3fff14..c1b855418b91d69d6d59b08df219c56f057153fe 100644
+--- a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
++++ b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+@@ -42,6 +42,7 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+         public bool SupportsCustomScopesOnUpdate = true;
+         public bool SupportsCustomScopesOnUninstall = true;
+         public bool SupportsPreRelease = false;
++        public bool SupportsEmptySearchQuery = false;
+         public bool SerializesOperations = false;
+         public bool SupportsCustomLocations = false;
+         public bool SupportsCustomSources = false;
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+index be8d05dff0cf64a97a6b3444961cc5ec43ed95d9..4130dfeeb68b47de71845665d56cdbac0bd1542f 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -184,7 +184,7 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+         List<Package> packages = [];
+         INativeTaskLogger logger = Manager.TaskLogger.CreateNew(LoggableTaskType.FindPackages);
+         Dictionary<
+-            (PackageCatalogReference, PackageMatchField),
++            (PackageCatalogReference, PackageMatchField?),
+             Task<FindPackagesResult>
+         > FindPackageTasks = [];
+ 
+@@ -203,24 +203,27 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+             ConnectResult result = CatalogReference.Connect();
+             if (result.Status == ConnectResultStatus.Ok)
+             {
+-                foreach (
+-                    var filter_type in new[]
+-                    {
+-                        PackageMatchField.Name,
+-                        PackageMatchField.Id,
+-                        PackageMatchField.Moniker,
+-                    }
+-                )
++                PackageMatchField?[] filterTypes = query.Length == 0
++                    ? [null]
++                    : [PackageMatchField.Name, PackageMatchField.Id, PackageMatchField.Moniker];
++                foreach (PackageMatchField? filter_type in filterTypes)
+                 {
+                     FindPackagesOptions PackageFilters = Factory.CreateFindPackagesOptions();
+ 
+-                    logger.Log("Generating filters...");
+-                    // Name filter
+-                    PackageMatchFilter FilterName = Factory.CreatePackageMatchFilter();
+-                    FilterName.Field = filter_type;
+-                    FilterName.Value = query;
+-                    FilterName.Option = PackageFieldMatchOption.ContainsCaseInsensitive;
+-                    PackageFilters.Filters.Add(FilterName);
++                    if (filter_type is { } field)
++                    {
++                        logger.Log("Generating filters...");
++                        // Name filter
++                        PackageMatchFilter FilterName = Factory.CreatePackageMatchFilter();
++                        FilterName.Field = field;
++                        FilterName.Value = query;
++                        FilterName.Option = PackageFieldMatchOption.ContainsCaseInsensitive;
++                        PackageFilters.Filters.Add(FilterName);
++                    }
++                    else
++                    {
++                        PackageFilters.ResultLimit = (uint)SearchLimits.MaxEmptyQueryResultsPerSource;
++                    }
+ 
+                     try
+                     {
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+index 20c30cfc306239d96daaa29444f841f877a2ec1a..51dcc295f326f7995df19f3aecaf286d015f269b 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+@@ -113,10 +113,35 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+ 
+     public IReadOnlyList<Package> FindPackages_UnSafe(string query)
+     {
+-        SearchResponse result = RunJson<SearchResponse>(
+-            LoggableTaskType.FindPackages,
+-            $"search {Quote(query)} --output json"
+-        );
++        if (query.Length == 0)
++        {
++            return Manager
++                .SourcesHelper.GetSources()
++                .SelectMany(SearchSourceForBrowse)
++                .ToArray();
++        }
++
++        return SearchPackages($"search {Quote(query)} --output json");
++    }
++
++    private Package[] SearchSourceForBrowse(IManagerSource source)
++    {
++        try
++        {
++            return SearchPackages(
++                $"search {Quote(string.Empty)} --source {Quote(source.Name)} --count {SearchLimits.MaxEmptyQueryResultsPerSource} --output json"
++            );
++        }
++        catch (Exception ex)
++        {
++            Logger.Warn($"Could not list the packages of the WinGet source {source.Name}: {ex.Message}");
++            return [];
++        }
++    }
++
++    private Package[] SearchPackages(string arguments)
++    {
++        SearchResponse result = RunJson<SearchResponse>(LoggableTaskType.FindPackages, arguments);
+ 
+         return result
+             .Matches.Select(match =>
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+index 15242a771e81122d239d54f962b34de0f42debf0..c07d9690bc2a9cd6ab2a572c8a31417e2ceb72bb 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+@@ -1,5 +1,7 @@
+ using System.Diagnostics;
+ using System.Text;
++using System.Text.Json;
++using System.Text.Json.Serialization;
+ using System.Text.RegularExpressions;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.Tools;
+@@ -11,7 +13,7 @@ using UniGetUI.PackageEngine.PackageClasses;
+ 
+ namespace UniGetUI.PackageEngine.Managers.WingetManager;
+ 
+-internal sealed class WinGetCliHelper : IWinGetManagerHelper
++internal sealed partial class WinGetCliHelper : IWinGetManagerHelper
+ {
+     private readonly WinGet Manager;
+     private readonly string _cliExecutablePath;
+@@ -267,6 +269,80 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+     }
+ 
+     public IReadOnlyList<Package> FindPackages_UnSafe(string query)
++    {
++        if (query.Length == 0)
++        {
++            return GetSourcesForBrowse()
++                .SelectMany(source => SearchPackages(query, source, SearchLimits.MaxEmptyQueryResultsPerSource))
++                .ToArray();
++        }
++
++        return SearchPackages(query, null, MAX_SEARCH_RESULTS);
++    }
++
++    private List<IManagerSource> GetSourcesForBrowse()
++    {
++        using var _cliLock = WinGet.AcquireCliLock();
++        List<IManagerSource> sources = [];
++        using Process p = new()
++        {
++            StartInfo = new()
++            {
++                FileName = _cliExecutablePath,
++                Arguments = Manager.Status.ExecutableCallArgs + " source export",
++                RedirectStandardOutput = true,
++                RedirectStandardError = true,
++                UseShellExecute = false,
++                CreateNoWindow = true,
++                StandardOutputEncoding = Encoding.UTF8,
++            },
++        };
++
++        IProcessTaskLogger logger = Manager.TaskLogger.CreateNew(LoggableTaskType.ListSources, p);
++
++        if (CoreTools.IsAdministrator())
++        {
++            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
++            logger.AddToStdErr(
++                $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
++            );
++        }
++
++        p.Start();
++
++        foreach (string name in ParseExportedSourceNames(ReadOutputLines(p, logger)))
++        {
++            sources.Add(Manager.SourcesHelper.Factory.GetSourceOrDefault(name));
++        }
++
++        logger.AddToStdErr(p.StandardError.ReadToEnd());
++        p.WaitForExit();
++        logger.Close(p.ExitCode);
++        return sources;
++    }
++
++    internal static IEnumerable<string> ParseExportedSourceNames(IEnumerable<string> outputLines)
++    {
++        foreach (string line in outputLines)
++        {
++            string? name;
++            try
++            {
++                name = JsonSerializer.Deserialize(line, WinGetCliJsonContext.Default.WinGetExportedSource)?.Name;
++            }
++            catch (JsonException)
++            {
++                continue;
++            }
++
++            if (!string.IsNullOrWhiteSpace(name))
++            {
++                yield return name;
++            }
++        }
++    }
++
++    private List<Package> SearchPackages(string query, IManagerSource? source, int count)
+     {
+         using var _cliLock = WinGet.AcquireCliLock();
+         List<Package> Packages = [];
+@@ -279,7 +355,11 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+                     Manager.Status.ExecutableCallArgs
+                     + " search \""
+                     + query
+-                    + "\"  --accept-source-agreements "
++                    + "\""
++                    + (source is null ? "" : " --source \"" + source.Name + "\"")
++                    + " --count "
++                    + count
++                    + " --accept-source-agreements "
+                     + WinGet.GetProxyArgument(),
+                 RedirectStandardOutput = true,
+                 RedirectStandardError = true,
+@@ -301,7 +381,7 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+         p.Start();
+ 
+-        Packages.AddRange(ParseFoundPackages(Manager, ReadOutputLines(p, logger)));
++        Packages.AddRange(ParseFoundPackages(Manager, ReadOutputLines(p, logger), source));
+ 
+         logger.AddToStdErr(p.StandardError.ReadToEnd());
+         p.WaitForExit();
+@@ -312,7 +392,8 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+     internal static IReadOnlyList<Package> ParseFoundPackages(
+         WinGet manager,
+-        IEnumerable<string> outputLines
++        IEnumerable<string> outputLines,
++        IManagerSource? queriedSource = null
+     )
+     {
+         List<Package> packages = [];
+@@ -333,7 +414,7 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+                 IManagerSource source =
+                     sourceName.Length == 0
+-                        ? manager.DefaultSource
++                        ? queriedSource ?? manager.DefaultSource
+                         : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+ 
+                 packages.Add(new Package(name, id, version, source, manager));
+@@ -507,4 +588,9 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+         logger.Close(p.ExitCode);
+         return sources;
+     }
++
++    internal sealed record WinGetExportedSource(string? Name);
++
++    [JsonSerializable(typeof(WinGetExportedSource))]
++    internal sealed partial class WinGetCliJsonContext : JsonSerializerContext { }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+index 26ca7d28a3a46235b06eb983425cd829f1fc11fa..c62442e68706a5b0dc887835e9c96c016e9236ee 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+@@ -127,6 +127,7 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
+                 SupportsCustomSources = true,
+                 SupportsCustomPackageIcons = true,
+                 SupportsCustomPackageScreenshots = true,
++                SupportsEmptySearchQuery = true,
+                 Sources = new SourceCapabilities
+                 {
+                     KnowsPackageCount = false,
+diff --git a/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs b/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
+index 572cf3c5792ee6bf3505b0683cc516512be2e77b..cf5c2eb4914ff4325acc49f5e4248280423b2a53 100644
+--- a/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
++++ b/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
+@@ -58,6 +58,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
+ 
+         protected readonly ConcurrentDictionary<long, IPackage> PackageReference;
+ 
++        private readonly ConcurrentDictionary<long, bool> _rememberedSelection = new();
++
+         /// <summary>
+         /// Fires when a block of packages (one package or more) is added or removed to the loader
+         /// </summary>
+@@ -183,13 +185,15 @@ namespace UniGetUI.PackageEngine.PackageLoader
+                 LastLoadReportedFailures = false;
+                 StartedLoading?.Invoke(this, EventArgs.Empty);
+ 
++                RememberSelectionState();
++
+                 // Clear packages only after signaling the load started, so the UI shows the
+                 // loading state instead of briefly flashing the "no packages found" message.
+                 PackageReference.Clear();
+                 IsLoaded = false;
+                 InvokePackagesChangedEvent(false, [], []);
+ 
+-                if (REQUIRES_INTERNET)
++                if (REQUIRES_INTERNET && WillQueryAnyManager())
+                 {
+                     await CoreTools.WaitForInternetConnection();
+                 }
+@@ -235,7 +239,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
+                                     }
+ 
+                                     toAdd.Add(package);
+-                                    await AddPackage(package);
++                                    await AddPackage(package, restoreSelection: true);
+                                 }
+ 
+                                 InvokePackagesChangedEvent(true, toAdd, []);
+@@ -304,6 +308,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
+             InvokePackagesChangedEvent(false, [], []);
+         }
+ 
++        protected virtual bool WillQueryAnyManager() => true;
++
+         /// <summary>
+         /// Loads the packages from the given manager
+         /// </summary>
+@@ -343,12 +349,25 @@ namespace UniGetUI.PackageEngine.PackageLoader
+             return ALLOW_MULTIPLE_PACKAGE_VERSIONS ? package.GetVersionedHash() : package.GetHash();
+         }
+ 
+-        protected async Task AddPackage(IPackage package)
++        private void RememberSelectionState()
++        {
++            _rememberedSelection.Clear();
++            foreach (var entry in PackageReference)
++            {
++                _rememberedSelection[entry.Key] = entry.Value.IsChecked;
++            }
++        }
++
++        protected async Task AddPackage(IPackage package, bool restoreSelection = false)
+         {
+             if (Contains(package))
+                 return;
+ 
+-            package.IsChecked = PACKAGES_CHECKED_BY_DEFAULT;
++            package.IsChecked =
++                restoreSelection
++                && _rememberedSelection.TryGetValue(HashPackage(package), out bool wasChecked)
++                    ? wasChecked
++                    : PACKAGES_CHECKED_BY_DEFAULT;
+             await WhenAddingPackage(package);
+             PackageReference.TryAdd(HashPackage(package), package);
+         }
+diff --git a/src/UniGetUI.PackageEngine.PackageLoader/DiscoverablePackagesLoader.cs b/src/UniGetUI.PackageEngine.PackageLoader/DiscoverablePackagesLoader.cs
+index 2a5d2e69efc5072c816ee51ed2fe0fba1350ccca..8b09029fb29e76b52fd0e72635902d830584a5a0 100644
+--- a/src/UniGetUI.PackageEngine.PackageLoader/DiscoverablePackagesLoader.cs
++++ b/src/UniGetUI.PackageEngine.PackageLoader/DiscoverablePackagesLoader.cs
+@@ -1,5 +1,7 @@
++using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.Interface.Enums;
++using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Interfaces;
+ 
+ namespace UniGetUI.PackageEngine.PackageLoader
+@@ -8,7 +10,11 @@ namespace UniGetUI.PackageEngine.PackageLoader
+     {
+         public static DiscoverablePackagesLoader Instance = null!;
+ 
+-        private string QUERY_TEXT = string.Empty;
++        // Cap results per manager; a broad query across every enabled manager otherwise wraps,
++        // tags and renders thousands of packages, freezing the UI and spiking RAM.
++        private const int MAX_RESULTS_PER_MANAGER = 100;
++
++        private string? QUERY_TEXT;
+         private volatile bool _pendingReload;
+ 
+         public DiscoverablePackagesLoader(IReadOnlyList<IPackageManager> managers)
+@@ -40,9 +46,15 @@ namespace UniGetUI.PackageEngine.PackageLoader
+             await ReloadPackages();
+         }
+ 
++        public void ResetSearch()
++        {
++            QUERY_TEXT = null;
++            ClearPackages(emitFinishSignal: false);
++        }
++
+         public override async Task ReloadPackages()
+         {
+-            if (QUERY_TEXT == "")
++            if (QUERY_TEXT is null)
+             {
+                 return;
+             }
+@@ -61,16 +73,51 @@ namespace UniGetUI.PackageEngine.PackageLoader
+             return await Task.FromResult(true);
+         }
+ 
++        public IReadOnlyList<IPackageManager> GetSearchableManagers()
++            => Managers.Where(manager => manager.IsReady()).ToArray();
++
++        public bool IsManagerSearched(IPackageManager manager)
++            => !Settings.GetDictionaryItem<string, bool>(Settings.K.ExcludedSearchManagers, manager.Name);
++
++        public void SetManagerSearched(IPackageManager manager, bool searched)
++            => Settings.SetDictionaryItem(Settings.K.ExcludedSearchManagers, manager.Name, !searched);
++
++        protected override bool WillQueryAnyManager()
++        {
++            string? query = QUERY_TEXT;
++            return Managers.Any(manager =>
++                manager.IsReady() && IsManagerSearched(manager) && CanSearch(manager, query));
++        }
++
++        private static bool CanSearch(IPackageManager manager, string? query)
++            => query != string.Empty || manager.Capabilities.SupportsEmptySearchQuery;
++
+         protected override IReadOnlyList<IPackage> LoadPackagesFromManager(IPackageManager manager)
+         {
+-            string text = QUERY_TEXT;
+-            text = CoreTools.EnsureSafeQueryString(text);
+-            if (text == string.Empty)
++            string? query = QUERY_TEXT;
++            if (query is null || !IsManagerSearched(manager) || !CanSearch(manager, query))
+             {
+                 return [];
+             }
+ 
+-            return manager.FindPackages(text);
++            string text = CoreTools.EnsureSafeQueryString(query);
++            if (text.Length == 0 && query.Length > 0)
++            {
++                return [];
++            }
++
++            IReadOnlyList<IPackage> found = manager.FindPackages(text);
++            if (text.Length == 0)
++            {
++                return found
++                    .GroupBy(package => package.Source.Name)
++                    .SelectMany(group => group.Take(SearchLimits.MaxEmptyQueryResultsPerSource))
++                    .ToArray();
++            }
++
++            return found.Count > MAX_RESULTS_PER_MANAGER
++                ? found.Take(MAX_RESULTS_PER_MANAGER).ToArray()
++                : found;
+         }
+ 
+         protected override Task WhenAddingPackage(IPackage package)
+diff --git a/src/UniGetUI.PackageEngine.Tests/DiscoverablePackagesLoaderTests.cs b/src/UniGetUI.PackageEngine.Tests/DiscoverablePackagesLoaderTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4b16243106bdae580f5e0e6585d4d98f6649846
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/DiscoverablePackagesLoaderTests.cs
+@@ -0,0 +1,286 @@
++using UniGetUI.Core.Data;
++using UniGetUI.Core.SettingsEngine;
++using UniGetUI.Core.SettingsEngine.SecureSettings;
++using UniGetUI.PackageEngine.Interfaces;
++using UniGetUI.PackageEngine.PackageLoader;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++public sealed class DiscoverablePackagesLoaderTests : IDisposable
++{
++    private readonly string _testRoot = Path.Combine(
++        Path.GetTempPath(),
++        nameof(DiscoverablePackagesLoaderTests),
++        Guid.NewGuid().ToString("N")
++    );
++
++    public DiscoverablePackagesLoaderTests()
++    {
++        Directory.CreateDirectory(_testRoot);
++        CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
++        SecureSettings.TEST_SecureSettingsRootOverride = Path.Combine(_testRoot, "SecureSettings");
++        Directory.CreateDirectory(CoreData.UniGetUIUserConfigurationDirectory);
++        Directory.CreateDirectory(CoreData.UniGetUIInstallationOptionsDirectory);
++        Settings.ResetSettings();
++        Settings.Set(Settings.K.DisableWaitForInternetConnection, true);
++    }
++
++    public void Dispose()
++    {
++        Settings.ResetSettings();
++        CoreData.TEST_DataDirectoryOverride = null;
++        SecureSettings.TEST_SecureSettingsRootOverride = null;
++        if (Directory.Exists(_testRoot))
++        {
++            Directory.Delete(_testRoot, recursive: true);
++        }
++    }
++
++    private static string SearchScopeFile => Path.Combine(
++        CoreData.UniGetUIUserConfigurationDirectory, "ExcludedSearchManagers.json");
++
++    private sealed class ProbeLoader(IReadOnlyList<IPackageManager> managers)
++        : DiscoverablePackagesLoader(managers)
++    {
++        public bool WillQuery() => WillQueryAnyManager();
++    }
++
++    [Fact]
++    public void ConnectivityWaitIsSkippedOnlyWhenNothingIsSelected()
++    {
++        var alpha = new PackageManagerBuilder().WithName("Alpha").WithDisplayName("Alpha").Build();
++        var beta = new PackageManagerBuilder().WithName("Beta").WithDisplayName("Beta").Build();
++        var loader = new ProbeLoader([alpha, beta]);
++
++        Assert.True(loader.WillQuery());
++
++        loader.SetManagerSearched(alpha, false);
++        Assert.True(loader.WillQuery());
++
++        loader.SetManagerSearched(beta, false);
++        Assert.False(loader.WillQuery());
++
++        loader.SetManagerSearched(alpha, true);
++        Assert.True(loader.WillQuery());
++    }
++
++    [Fact]
++    public async Task ExcludedManagersAreNeverQueried()
++    {
++        int alphaCalls = 0;
++        int betaCalls = 0;
++
++        var alpha = new PackageManagerBuilder()
++            .WithName("Alpha")
++            .WithDisplayName("Alpha")
++            .WithFindPackages((m, _) =>
++            {
++                alphaCalls++;
++                return [new PackageBuilder().WithManager(m).WithId("Alpha.Pkg").Build()];
++            })
++            .Build();
++
++        var beta = new PackageManagerBuilder()
++            .WithName("Beta")
++            .WithDisplayName("Beta")
++            .WithFindPackages((m, _) =>
++            {
++                betaCalls++;
++                return [new PackageBuilder().WithManager(m).WithId("Beta.Pkg").Build()];
++            })
++            .Build();
++
++        _ = new InstalledPackagesLoader([alpha, beta]);
++        _ = new UpgradablePackagesLoader([alpha, beta]);
++        var loader = new DiscoverablePackagesLoader([alpha, beta]);
++
++        Assert.True(loader.IsManagerSearched(alpha));
++        Assert.True(loader.IsManagerSearched(beta));
++
++        await loader.ReloadPackages("tool");
++        Assert.Equal(1, alphaCalls);
++        Assert.Equal(1, betaCalls);
++        Assert.Equal(2, loader.Packages.Count);
++
++        loader.SetManagerSearched(beta, false);
++        await loader.ReloadPackages("tool");
++        Assert.Equal(2, alphaCalls);
++        Assert.Equal(1, betaCalls);
++        Assert.Equal("Alpha.Pkg", Assert.Single(loader.Packages).Id);
++
++        loader.SetManagerSearched(beta, true);
++        await loader.ReloadPackages("tool");
++        Assert.Equal(3, alphaCalls);
++        Assert.Equal(2, betaCalls);
++        Assert.Equal(2, loader.Packages.Count);
++    }
++
++    [Fact]
++    public async Task NoSelectedManagerYieldsNoPackagesWithoutQuerying()
++    {
++        int alphaCalls = 0;
++        var alpha = new PackageManagerBuilder()
++            .WithName("Alpha")
++            .WithDisplayName("Alpha")
++            .WithFindPackages((m, _) =>
++            {
++                alphaCalls++;
++                return [new PackageBuilder().WithManager(m).WithId("Alpha.Pkg").Build()];
++            })
++            .Build();
++
++        _ = new InstalledPackagesLoader([alpha]);
++        _ = new UpgradablePackagesLoader([alpha]);
++        var loader = new DiscoverablePackagesLoader([alpha]);
++
++        loader.SetManagerSearched(alpha, false);
++        await loader.ReloadPackages("tool");
++
++        Assert.Equal(0, alphaCalls);
++        Assert.Empty(loader.Packages);
++        Assert.True(loader.IsLoaded);
++        Assert.False(loader.IsLoading);
++    }
++
++    [Fact]
++    public async Task EmptyQueryOnlyQueriesManagersThatSupportIt()
++    {
++        List<string> alphaQueries = [];
++        int betaCalls = 0;
++
++        var alpha = new PackageManagerBuilder()
++            .WithName("Alpha")
++            .WithDisplayName("Alpha")
++            .ConfigureCapabilities(capabilities =>
++            {
++                capabilities.SupportsEmptySearchQuery = true;
++                return capabilities;
++            })
++            .WithFindPackages((m, query) =>
++            {
++                alphaQueries.Add(query);
++                return [new PackageBuilder().WithManager(m).WithId("Alpha.Pkg").Build()];
++            })
++            .Build();
++
++        var beta = new PackageManagerBuilder()
++            .WithName("Beta")
++            .WithDisplayName("Beta")
++            .WithFindPackages((m, _) =>
++            {
++                betaCalls++;
++                return [new PackageBuilder().WithManager(m).WithId("Beta.Pkg").Build()];
++            })
++            .Build();
++
++        _ = new InstalledPackagesLoader([alpha, beta]);
++        _ = new UpgradablePackagesLoader([alpha, beta]);
++        var loader = new ProbeLoader([alpha, beta]);
++
++        await loader.ReloadPackages("");
++
++        Assert.Equal([""], alphaQueries);
++        Assert.Equal(0, betaCalls);
++        Assert.Equal("Alpha.Pkg", Assert.Single(loader.Packages).Id);
++
++        loader.SetManagerSearched(alpha, false);
++        Assert.False(loader.WillQuery());
++    }
++
++    [Fact]
++    public async Task EmptyQueryCapsResultsPerSourceSoLaterSourcesAreNotCrowdedOut()
++    {
++        var alpha = new PackageManagerBuilder()
++            .WithName("Alpha")
++            .WithDisplayName("Alpha")
++            .ConfigureCapabilities(capabilities =>
++            {
++                capabilities.SupportsEmptySearchQuery = true;
++                return capabilities;
++            })
++            .WithFindPackages((m, _) =>
++            {
++                var publicSource = new SourceBuilder().WithManager(m).WithName("public").Build();
++                var privateSource = new SourceBuilder().WithManager(m).WithName("private").Build();
++                return Enumerable.Range(0, 150)
++                    .Select(i => new PackageBuilder().WithManager(m).WithSource(publicSource).WithId($"Public.{i}").Build())
++                    .Concat(Enumerable.Range(0, 5)
++                        .Select(i => new PackageBuilder().WithManager(m).WithSource(privateSource).WithId($"Private.{i}").Build()))
++                    .ToArray();
++            })
++            .Build();
++
++        _ = new InstalledPackagesLoader([alpha]);
++        _ = new UpgradablePackagesLoader([alpha]);
++        var loader = new DiscoverablePackagesLoader([alpha]);
++
++        await loader.ReloadPackages("");
++        Assert.Equal(105, loader.Packages.Count);
++        Assert.Equal(5, loader.Packages.Count(package => package.Source.Name == "private"));
++
++        await loader.ReloadPackages("pkg");
++        Assert.Equal(100, loader.Packages.Count);
++    }
++
++    [Fact]
++    public async Task NothingIsQueriedBeforeASearchOrForAnUnsafeOnlyQuery()
++    {
++        int alphaCalls = 0;
++        var alpha = new PackageManagerBuilder()
++            .WithName("Alpha")
++            .WithDisplayName("Alpha")
++            .ConfigureCapabilities(capabilities =>
++            {
++                capabilities.SupportsEmptySearchQuery = true;
++                return capabilities;
++            })
++            .WithFindPackages((m, _) =>
++            {
++                alphaCalls++;
++                return [new PackageBuilder().WithManager(m).WithId("Alpha.Pkg").Build()];
++            })
++            .Build();
++
++        _ = new InstalledPackagesLoader([alpha]);
++        _ = new UpgradablePackagesLoader([alpha]);
++        var loader = new DiscoverablePackagesLoader([alpha]);
++
++        await loader.ReloadPackages();
++        Assert.Equal(0, alphaCalls);
++
++        await loader.ReloadPackages(";|&");
++        Assert.Equal(0, alphaCalls);
++        Assert.Empty(loader.Packages);
++
++        await loader.ReloadPackages("");
++        Assert.Equal(1, alphaCalls);
++
++        loader.ResetSearch();
++        Assert.Empty(loader.Packages);
++        await loader.ReloadPackages();
++        Assert.Equal(1, alphaCalls);
++        Assert.Empty(loader.Packages);
++    }
++
++    [Fact]
++    public void SearchScopeIsReadFromAndWrittenToDisk()
++    {
++        var alpha = new PackageManagerBuilder().WithName("Alpha").WithDisplayName("Alpha").Build();
++        var beta = new PackageManagerBuilder().WithName("Beta").WithDisplayName("Beta").Build();
++
++        File.WriteAllText(SearchScopeFile, "{\"Beta\":true}");
++
++        var loader = new DiscoverablePackagesLoader([alpha, beta]);
++        Assert.True(loader.IsManagerSearched(alpha));
++        Assert.False(loader.IsManagerSearched(beta));
++
++        loader.SetManagerSearched(alpha, false);
++        loader.SetManagerSearched(beta, true);
++
++        Assert.Equal(
++            new Dictionary<string, bool> { ["Alpha"] = true, ["Beta"] = false },
++            System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, bool>>(
++                File.ReadAllText(SearchScopeFile)));
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
+index 4ad5d73ac0a4015293f7a9472cd02a1b4abed415..a8b85c52e02c6cfbb3fef0d1c02d7410352c7d74 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
+@@ -1,5 +1,6 @@
+ #if WINDOWS
+ using UniGetUI.Core.Data;
++using UniGetUI.PackageEngine.Classes.Manager;
+ using UniGetUI.PackageEngine.Managers.WingetManager;
+ using UniGetUI.PackageEngine.PackageClasses;
+ using UniGetUI.PackageEngine.Tests.Infrastructure.Assertions;
+@@ -286,6 +287,46 @@ public sealed class WinGetCliParsingTests : IDisposable
+         Assert.Equal("winget", packages[2].Source.Name);
+     }
+ 
++    [Fact]
++    public void ParseFoundPackagesAssignsTheQueriedSourceWhenTheSourceColumnIsOmitted()
++    {
++        var manager = new WinGet();
++        var fonts = new ManagerSource(manager, "winget-font", new Uri("https://cdn.winget.microsoft.com/fonts"));
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseFoundPackages(
++            manager,
++            Lines(
++                """
++                Name                               Id                      Version
++                ------------------------------------------------------------------
++                Microsoft Fluent Calibri and Sitka Microsoft.FluentFonts   1.0.0.0
++                CaskaydiaCove                      ryanoasis.CaskaydiaCove 3.4.0
++                """
++            ),
++            fonts
++        );
++
++        Assert.Equal(2, packages.Count);
++        PackageAssert.Matches(packages[1], "CaskaydiaCove", "ryanoasis.CaskaydiaCove", "3.4.0");
++        Assert.All(packages, package => Assert.Same(fonts, package.Source));
++    }
++
++    [Fact]
++    public void ParseExportedSourceNamesKeepsNamesThatContainSpaces()
++    {
++        IEnumerable<string> names = WinGetCliHelper.ParseExportedSourceNames(
++            [
++                """{"Arg":"https://storeedgefd.dsx.mp.microsoft.com/v9.0","Data":"","Explicit":false,"Identifier":"StoreEdgeFD","Name":"msstore","TrustLevel":["Trusted"],"Type":"Microsoft.Rest"}""",
++                """{"Arg":"https://cdn.winget.microsoft.com/cache","Data":"Microsoft.Winget.Source_8wekyb3d8bbwe","Explicit":false,"Identifier":"Microsoft.Winget.Source_8wekyb3d8bbwe","Name":"winget","TrustLevel":["Trusted","StoreOrigin"],"Type":"Microsoft.PreIndexed.Package"}""",
++                """{"Arg":"https://packages.contoso.test/api","Data":"","Explicit":true,"Identifier":"Private Feed","Name":"Private Feed","TrustLevel":["None"],"Type":"Microsoft.Rest"}""",
++                "",
++                "Failed when opening source(s); try the 'source reset' command if the problem persists.",
++            ]
++        );
++
++        Assert.Equal(["msstore", "winget", "Private Feed"], names);
++    }
++
+     [Fact]
+     public void ParseInstalledPackagesReadsCapturedJapaneseWinGetOutput()
+     {
+-- 
+2.56.0
+

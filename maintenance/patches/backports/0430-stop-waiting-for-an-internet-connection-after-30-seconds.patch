@@ -1,0 +1,558 @@
+From 1b73729474ecabcaf12d4c377c1f556657221c71 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:39:30 +0800
+Subject: [PATCH] backport: Stop waiting for an internet connection after 30
+ seconds (#5487)
+
+Upstream-Commit: 9bfbe4b561ad90feba0e4037a03db256dafc5e90
+Upstream-PR: Devolutions/UniGetUI#5487
+
+Upstream-Commit: ed10d062c8dc3c0a1c320e9348a20eb2e0b3a32b
+Upstream-PR: Devolutions/UniGetUI#5333
+Classic-Source-Commit: 1b73729474ecabcaf12d4c377c1f556657221c71
+
+---
+ .../ConnectivityWaitTests.cs                  | 282 ++++++++++++++++++
+ src/UniGetUI.Core.Tools/Tools.cs              | 212 +++++++++++--
+ 2 files changed, 474 insertions(+), 20 deletions(-)
+ create mode 100644 src/UniGetUI.Core.Tools.Tests/ConnectivityWaitTests.cs
+
+diff --git a/src/UniGetUI.Core.Tools.Tests/ConnectivityWaitTests.cs b/src/UniGetUI.Core.Tools.Tests/ConnectivityWaitTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..22711e0e13b1d717ae4a82b3213eff8474462372
+--- /dev/null
++++ b/src/UniGetUI.Core.Tools.Tests/ConnectivityWaitTests.cs
+@@ -0,0 +1,282 @@
++using System.Diagnostics;
++using System.Net;
++
++namespace UniGetUI.Core.Tools.Tests;
++
++public class ConnectivityWaitTests
++{
++    private static readonly TimeSpan Poll = TimeSpan.FromMilliseconds(10);
++
++    // Runs the wait on its own thread and stops its probes once the test is over, so that a wait
++    // which never gives up fails the test instead of hanging the run
++    private static async Task<bool> WaitGuarded(
++        Func<bool> systemReportsInternet,
++        Func<TimeSpan, bool> httpCheckSucceeds,
++        TimeSpan timeout
++    )
++    {
++        using var stop = new CancellationTokenSource();
++
++        var wait = Task.Run(() =>
++            CoreTools.WaitForConnectivity(
++                () =>
++                {
++                    stop.Token.ThrowIfCancellationRequested();
++                    return systemReportsInternet();
++                },
++                httpCheckSucceeds,
++                timeout,
++                Poll
++            )
++        );
++
++        try
++        {
++            return await wait.WaitAsync(TimeSpan.FromSeconds(10));
++        }
++        finally
++        {
++            await stop.CancelAsync();
++        }
++    }
++
++    [Fact]
++    public void ReturnsAtOnceWhenTheSystemReportsInternet()
++    {
++        int httpChecks = 0;
++
++        bool connected = CoreTools.WaitForConnectivity(
++            () => true,
++            _ =>
++            {
++                httpChecks++;
++                return false;
++            },
++            TimeSpan.FromSeconds(30),
++            TimeSpan.FromSeconds(1)
++        );
++
++        Assert.True(connected);
++        Assert.Equal(0, httpChecks);
++    }
++
++    [Fact]
++    public void AStaleSystemAnswerIsOverriddenByTheHttpCheck()
++    {
++        var stopwatch = Stopwatch.StartNew();
++
++        bool connected = CoreTools.WaitForConnectivity(
++            () => false,
++            _ => true,
++            TimeSpan.FromSeconds(30),
++            TimeSpan.FromSeconds(1)
++        );
++
++        Assert.True(connected);
++        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"waited {stopwatch.Elapsed}");
++    }
++
++    [Fact]
++    public void AConnectionThatComesUpWhileWaitingIsPickedUp()
++    {
++        int systemChecks = 0;
++
++        bool connected = CoreTools.WaitForConnectivity(
++            () => ++systemChecks >= 4,
++            _ => false,
++            TimeSpan.FromSeconds(30),
++            Poll
++        );
++
++        Assert.True(connected);
++        Assert.Equal(4, systemChecks);
++    }
++
++    [Fact]
++    public async Task GivesUpAfterTheTimeoutInsteadOfBlockingForever()
++    {
++        TimeSpan timeout = TimeSpan.FromMilliseconds(300);
++        var stopwatch = Stopwatch.StartNew();
++
++        bool connected = await WaitGuarded(() => false, _ => false, timeout);
++
++        Assert.False(connected);
++        Assert.True(stopwatch.Elapsed >= timeout, $"returned after {stopwatch.Elapsed}");
++    }
++
++    [Fact]
++    public async Task SlowHttpChecksDoNotStretchTheWaitPastTheTimeout()
++    {
++        int httpChecks = 0;
++        var stopwatch = Stopwatch.StartNew();
++
++        bool connected = await WaitGuarded(
++            () => false,
++            _ =>
++            {
++                httpChecks++;
++                Thread.Sleep(200);
++                return false;
++            },
++            TimeSpan.FromMilliseconds(300)
++        );
++
++        Assert.False(connected);
++        Assert.InRange(httpChecks, 1, 3);
++        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"waited {stopwatch.Elapsed}");
++    }
++
++    [Fact]
++    public async Task EachHttpCheckIsGivenOnlyTheTimeThatIsLeft()
++    {
++        var budgets = new List<TimeSpan>();
++        TimeSpan timeout = TimeSpan.FromMilliseconds(1000);
++
++        bool connected = await WaitGuarded(
++            () => false,
++            budget =>
++            {
++                budgets.Add(budget);
++                Thread.Sleep(150);
++                return false;
++            },
++            timeout
++        );
++
++        Assert.False(connected);
++        Assert.True(budgets.Count >= 2, $"HTTP check ran {budgets.Count} times");
++        Assert.All(budgets, b => Assert.InRange(b, TimeSpan.FromTicks(1), timeout));
++        for (int i = 1; i < budgets.Count; i++)
++        {
++            Assert.True(
++                budgets[i] <= budgets[i - 1] - TimeSpan.FromMilliseconds(100),
++                $"budgets {budgets[i - 1]} then {budgets[i]}"
++            );
++        }
++    }
++
++    [Fact]
++    public async Task AHttpCheckThatUsesItsWholeBudgetDoesNotPushTheWaitPastTheTimeout()
++    {
++        TimeSpan timeout = TimeSpan.FromMilliseconds(300);
++        var stopwatch = Stopwatch.StartNew();
++
++        bool connected = await WaitGuarded(
++            () => false,
++            budget =>
++            {
++                Thread.Sleep(budget);
++                return false;
++            },
++            timeout
++        );
++
++        Assert.False(connected);
++        Assert.InRange(stopwatch.Elapsed, timeout, timeout + TimeSpan.FromSeconds(2));
++    }
++
++    private static readonly Uri TestUrl = new("http://connectivity.test/connecttest.txt");
++
++    private sealed class StubHandler(Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> respond)
++        : HttpMessageHandler
++    {
++        public string? Method { get; private set; }
++        public Uri? Url { get; private set; }
++
++        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
++        {
++            Method = request.Method.Method;
++            Url = request.RequestUri;
++            return respond(request, cancellationToken);
++        }
++
++        protected override Task<HttpResponseMessage> SendAsync(
++            HttpRequestMessage request,
++            CancellationToken cancellationToken
++        ) => Task.FromResult(Send(request, cancellationToken));
++    }
++
++    private static HttpResponseMessage Page(HttpStatusCode status, string body) =>
++        new(status) { Content = new StringContent(body) };
++
++    [Fact]
++    public void TheExpectedTestPageCountsAsConnectivity()
++    {
++        var handler = new StubHandler((_, _) => Page(HttpStatusCode.OK, "Microsoft Connect Test"));
++
++        Assert.True(CoreTools.HttpConnectivityCheck(handler, TestUrl, TimeSpan.FromSeconds(5)));
++        Assert.Equal("GET", handler.Method);
++        Assert.Equal(TestUrl, handler.Url);
++    }
++
++    [Theory]
++    [InlineData(HttpStatusCode.OK, "<html>Sign in to the Wi-Fi network</html>")]
++    [InlineData(HttpStatusCode.OK, "")]
++    [InlineData(HttpStatusCode.Found, "")]
++    [InlineData(HttpStatusCode.ServiceUnavailable, "Microsoft Connect Test")]
++    public void AnythingElseDoesNotCountAsConnectivity(HttpStatusCode status, string body)
++    {
++        var handler = new StubHandler((_, _) => Page(status, body));
++
++        Assert.False(CoreTools.HttpConnectivityCheck(handler, TestUrl, TimeSpan.FromSeconds(5)));
++    }
++
++    [Fact]
++    public void AFailedRequestDoesNotCountAsConnectivity()
++    {
++        var handler = new StubHandler((_, _) => throw new HttpRequestException("no route to host"));
++
++        Assert.False(CoreTools.HttpConnectivityCheck(handler, TestUrl, TimeSpan.FromSeconds(5)));
++    }
++
++    [Fact]
++    public void AnAnswerThatArrivesAfterTheBudgetDoesNotCountAsConnectivity()
++    {
++        var handler = new StubHandler(
++            (_, token) =>
++            {
++                token.WaitHandle.WaitOne(TimeSpan.FromSeconds(20));
++                token.ThrowIfCancellationRequested();
++                return Page(HttpStatusCode.OK, "Microsoft Connect Test");
++            }
++        );
++        var stopwatch = Stopwatch.StartNew();
++
++        bool connected = CoreTools.HttpConnectivityCheck(handler, TestUrl, TimeSpan.FromMilliseconds(150));
++
++        Assert.False(connected);
++        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(10), $"waited {stopwatch.Elapsed}");
++    }
++
++    // Stands in for a request that HttpClient cannot interrupt: it answers after the delay and
++    // takes no notice of the cancellation token
++    private sealed class DeafHandler(TimeSpan delay) : HttpMessageHandler
++    {
++        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
++        {
++            Thread.Sleep(delay);
++            return Page(HttpStatusCode.OK, "Microsoft Connect Test");
++        }
++
++        protected override async Task<HttpResponseMessage> SendAsync(
++            HttpRequestMessage request,
++            CancellationToken cancellationToken
++        )
++        {
++            await Task.Delay(delay);
++            return Page(HttpStatusCode.OK, "Microsoft Connect Test");
++        }
++    }
++
++    [Fact]
++    public void ARequestThatCannotBeCancelledStillEndsAtTheBudget()
++    {
++        var handler = new DeafHandler(TimeSpan.FromSeconds(4));
++        var stopwatch = Stopwatch.StartNew();
++
++        bool connected = CoreTools.HttpConnectivityCheck(handler, TestUrl, TimeSpan.FromMilliseconds(150));
++
++        Assert.False(connected);
++        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"waited {stopwatch.Elapsed}");
++    }
++}
+diff --git a/src/UniGetUI.Core.Tools/Tools.cs b/src/UniGetUI.Core.Tools/Tools.cs
+index d039fadba9fde1867c9482b19f2f744ad89200de..3651bca79886b255450ca1aca8b4e2039dea1989 100644
+--- a/src/UniGetUI.Core.Tools/Tools.cs
++++ b/src/UniGetUI.Core.Tools/Tools.cs
+@@ -933,41 +933,213 @@ namespace UniGetUI.Core.Tools
+         }
+ 
+         /// <summary>
+-        /// Pings the update server and 3 well-known sites to check for internet availability
++        /// Runs a command and returns its trimmed standard output. <paramref name="timeout"/> is the
++        /// total budget; the command and the children it still owns are killed once it elapses.
++        /// </summary>
++        /// <remarks>
++        /// A descendant that outlives the command itself cannot be reached: the OS reparents it as
++        /// soon as the root exits, so it stays out of the process tree while still holding the
++        /// output pipe open. Such a call times out and reports failure instead of returning output.
++        /// </remarks>
++        public static bool TryReadStandardOutput(
++            ProcessStartInfo startInfo,
++            TimeSpan timeout,
++            out string output
++        )
++        {
++            output = "";
++            Process? process = null;
++            Task<string>? reader = null;
++            var budget = Stopwatch.StartNew();
++            try
++            {
++                process = Process.Start(startInfo);
++                if (process is null)
++                    return false;
++
++                // StandardOutput.ReadToEnd() blocks until the child closes stdout, which a hung
++                // child never does, making any later WaitForExit(timeout) unreachable. Wait on
++                // the read itself instead, and kill the child so the pipe gets released.
++                reader = process.StandardOutput.ReadToEndAsync();
++                if (!reader.Wait(timeout))
++                {
++                    // An exited root means a descendant inherited stdout and is holding it open;
++                    // it is already reparented, so killing the tree below cannot reach it.
++                    string cause = process.HasExited
++                        ? "it exited but something it started still holds its output open"
++                        : "it did not respond in time and will be terminated";
++                    Logger.Warn(
++                        $"Could not read the output of '{startInfo.FileName}' within "
++                            + $"{timeout.TotalSeconds:0.#}s: {cause}"
++                    );
++                    return false;
++                }
++
++                // stdout reached EOF, so the output is complete whether or not the child has left
++                // yet. Give it what remains of the budget to exit on its own; the finally kills it
++                // otherwise, so a child that drops stdout early cannot stretch the wait past it.
++                TimeSpan remaining = timeout - budget.Elapsed;
++                if (remaining > TimeSpan.Zero)
++                    process.WaitForExit((int)remaining.TotalMilliseconds);
++
++                output = reader.Result.Trim();
++                return true;
++            }
++            catch (Exception ex)
++            {
++                Logger.Warn($"Could not read the output of '{startInfo.FileName}':");
++                Logger.Warn(ex);
++                return false;
++            }
++            finally
++            {
++                try
++                {
++                    if (process is not null && !process.HasExited)
++                        process.Kill(entireProcessTree: true);
++                }
++                catch
++                {
++                    // Best effort: the process may have exited on its own in the meantime.
++                }
++
++                // Dispose() leaves StandardOutput open (we read it in sync mode), so an abandoned
++                // read ends by itself once the killed child's pipe hits EOF. Observe it regardless.
++                reader?.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
++                process?.Dispose();
++            }
++        }
++
++        /// <summary>
++        /// Waits until the device reports internet access, giving up after
++        /// <see cref="InternetWaitTimeout"/> so that a wrong answer from the system never blocks loading forever
+         /// </summary>
+         public static async Task WaitForInternetConnection() =>
+             await TaskRecycler<int>.RunOrAttachAsync_VOID(_waitForInternetConnection);
+ 
++        private static readonly TimeSpan InternetWaitTimeout = TimeSpan.FromSeconds(30);
++        private static readonly TimeSpan HttpCheckTimeout = TimeSpan.FromSeconds(5);
++        private const string ConnectivityTestUrl = "http://www.msftconnecttest.com/connecttest.txt";
++        private const string ConnectivityTestBody = "Microsoft Connect Test";
++
++        private static bool _systemReportsInternetAccess()
++        {
++#if WINDOWS
++            var profile = NetworkInformation.GetInternetConnectionProfile();
++            return profile?.GetNetworkConnectivityLevel() == NetworkConnectivityLevel.InternetAccess;
++#else
++            return NetworkInterface.GetIsNetworkAvailable();
++#endif
++        }
++
++        private static bool _tryHttpConnectivityCheck(TimeSpan budget)
++        {
++            var handler = GenericHttpClientParameters;
++            handler.AllowAutoRedirect = false;
++            return HttpConnectivityCheck(handler, new Uri(ConnectivityTestUrl), budget);
++        }
++
++        /// <summary>
++        /// Fetches the connectivity test page and returns whether it came back as expected within
++        /// <paramref name="budget"/> (at most <see cref="HttpCheckTimeout"/>). Once SendAsync has returned its
++        /// task, the call stops waiting at that limit even if the request does not react to cancellation, and
++        /// leaves the request to end on its own.
++        /// </summary>
++        internal static bool HttpConnectivityCheck(HttpMessageHandler handler, Uri url, TimeSpan budget)
++        {
++            TimeSpan limit = budget < HttpCheckTimeout ? budget : HttpCheckTimeout;
++            try
++            {
++                return HttpConnectivityCheckAsync(handler, url, limit).WaitAsync(limit).GetAwaiter().GetResult();
++            }
++            catch (Exception)
++            {
++                // WaitAsync throws once the limit has passed, and any other failure is no connection either
++                return false;
++            }
++        }
++
++        private static async Task<bool> HttpConnectivityCheckAsync(HttpMessageHandler handler, Uri url, TimeSpan limit)
++        {
++            try
++            {
++                using HttpClient client = new(handler)
++                {
++                    Timeout = limit,
++                    MaxResponseContentBufferSize = 1024,
++                };
++                using var request = new HttpRequestMessage(HttpMethod.Get, url);
++                using HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(false);
++                if (response.StatusCode != HttpStatusCode.OK)
++                    return false;
++
++                // A captive portal can answer 200 too, so the page itself has to be the expected one
++                using var reader = new StreamReader(response.Content.ReadAsStream());
++                return reader.ReadToEnd().Trim() == ConnectivityTestBody;
++            }
++            catch (Exception)
++            {
++                // Any failure, including the timeout, means the endpoint could not be reached
++                return false;
++            }
++        }
++
+         public static void _waitForInternetConnection()
+         {
+             if (Settings.Get(Settings.K.DisableWaitForInternetConnection))
+                 return;
+ 
+             Logger.Debug("Checking for internet connectivity...");
++            WaitForConnectivity(
++                _systemReportsInternetAccess,
++                _tryHttpConnectivityCheck,
++                InternetWaitTimeout,
++                TimeSpan.FromSeconds(1)
++            );
++        }
++
++        /// <summary>
++        /// Polls until the system or the HTTP check reports connectivity, or until
++        /// <paramref name="timeout"/> has elapsed. The HTTP check is told how much of the timeout
++        /// is left. Returns whether connectivity was established.
++        /// </summary>
++        internal static bool WaitForConnectivity(
++            Func<bool> systemReportsInternet,
++            Func<TimeSpan, bool> httpCheckSucceeds,
++            TimeSpan timeout,
++            TimeSpan pollInterval
++        )
++        {
++            var stopwatch = Stopwatch.StartNew();
+             bool internetLost = false;
+ 
+-#if WINDOWS
+-            var profile = NetworkInformation.GetInternetConnectionProfile();
+-            while (
+-                profile is null
+-                || profile.GetNetworkConnectivityLevel()
+-                    is not NetworkConnectivityLevel.InternetAccess
+-            )
++            while (true)
+             {
+-                Thread.Sleep(1000);
+-                profile = NetworkInformation.GetInternetConnectionProfile();
+-                if (!internetLost)
++                if (systemReportsInternet())
++                {
++                    Logger.Debug("Internet connectivity was established.");
++                    return true;
++                }
++
++                // NCSI may be stale (common Windows 10 bug); verify with a real HTTP request
++                TimeSpan remaining = timeout - stopwatch.Elapsed;
++                if (remaining > TimeSpan.Zero && httpCheckSucceeds(remaining))
++                {
++                    Logger.Debug(
++                        "Internet connectivity was established (HTTP check passed, NCSI was stale)."
++                    );
++                    return true;
++                }
++
++                remaining = timeout - stopwatch.Elapsed;
++                if (remaining <= TimeSpan.Zero)
+                 {
+                     Logger.Warn(
+-                        "User is not connected to the internet, waiting for an internet connectio to be available..."
++                        $"Internet connectivity check timed out after {timeout.TotalSeconds}s, proceeding anyway."
+                     );
+-                    internetLost = true;
++                    return false;
+                 }
+-            }
+-#else
+-            while (!NetworkInterface.GetIsNetworkAvailable())
+-            {
+-                Thread.Sleep(1000);
++
+                 if (!internetLost)
+                 {
+                     Logger.Warn(
+@@ -975,9 +1147,9 @@ namespace UniGetUI.Core.Tools
+                     );
+                     internetLost = true;
+                 }
++
++                Thread.Sleep(remaining < pollInterval ? remaining : pollInterval);
+             }
+-#endif
+-            Logger.Debug("Internet connectivity was established.");
+         }
+ 
+         public static string TextProgressGenerator(int length, int progressPercent, string? extra)
+-- 
+2.56.0
+

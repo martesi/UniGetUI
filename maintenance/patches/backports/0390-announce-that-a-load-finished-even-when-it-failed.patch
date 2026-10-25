@@ -1,0 +1,178 @@
+From 83c2303f4ea7fdc1781aac63574363662c6670ad Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:36:56 +0800
+Subject: [PATCH] backport: Announce that a load finished even when it failed
+ (#5468)
+
+Upstream-Commit: eeb888819124303cf779d0bba6db7e20ac740d6f
+Upstream-PR: Devolutions/UniGetUI#5468
+Classic-Source-Commit: 83c2303f4ea7fdc1781aac63574363662c6670ad
+
+---
+ .../AbstractPackageLoader.cs                  | 28 +++++-
+ .../PackageLoaderPipelineTests.cs             | 85 +++++++++++++++++++
+ 2 files changed, 110 insertions(+), 3 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs b/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
+index 6bfdfb5c6e563bdc5e64f46876974af4c6115fe6..572cf3c5792ee6bf3505b0683cc516512be2e77b 100644
+--- a/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
++++ b/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
+@@ -37,6 +37,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
+ 
+         public bool LastLoadReportedFailures { get; private set; }
+ 
++        public bool HasPendingInitialLoad => !IsLoaded && !LastLoadReportedFailures;
++
+         public DateTime? LastLoadFinishedUtc { get; private set; }
+ 
+         private TaskCompletionSource? _loadCompletion;
+@@ -155,6 +157,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
+         public virtual async Task ReloadPackages()
+         {
+             TaskCompletionSource? completion = null;
++            int current_identifier = 0;
++            bool finishWasAnnounced = false;
+             try
+             {
+                 if (DISABLE_RELOAD)
+@@ -170,7 +174,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
+                 }
+ 
+                 LoadOperationIdentifier = new Random().Next();
+-                int current_identifier = LoadOperationIdentifier;
++                current_identifier = LoadOperationIdentifier;
+                 completion = new TaskCompletionSource(
+                     TaskCreationOptions.RunContinuationsAsynchronously
+                 );
+@@ -254,14 +258,32 @@ namespace UniGetUI.PackageEngine.PackageLoader
+                 {
+                     LastLoadFinishedUtc = DateTime.UtcNow;
+                     IsLoaded = true;
++                    finishWasAnnounced = true;
+                     InvokeFinishedLoadingEvent();
+                 }
+             }
+             catch (Exception ex)
+             {
+                 Logger.Error(ex);
+-                LastLoadReportedFailures = true;
+-                IsLoading = false;
++
++                if (
++                    !finishWasAnnounced
++                    && completion is not null
++                    && LoadOperationIdentifier == current_identifier
++                )
++                {
++                    LastLoadReportedFailures = true;
++                    IsLoading = false;
++
++                    try
++                    {
++                        InvokeFinishedLoadingEvent();
++                    }
++                    catch (Exception announceEx)
++                    {
++                        Logger.Error(announceEx);
++                    }
++                }
+             }
+             finally
+             {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageLoaderPipelineTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageLoaderPipelineTests.cs
+index 94d13c2412d6af30c0ccaa9dfdf82b6aa5aa5f63..0319bf7b4bb416ac6472c3a41e5821c0b1f07895 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageLoaderPipelineTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageLoaderPipelineTests.cs
+@@ -208,4 +208,89 @@ public sealed class PackageLoaderPipelineTests
+         Assert.False(isLoadingWhenFinished);
+         Assert.True(isLoadedWhenFinished);
+     }
++
++    [Fact]
++    public async Task ReloadPackages_SettlesAndAnnouncesCompletion_WhenTheLoadFails()
++    {
++        var manager = new PackageManagerBuilder()
++            .WithInstalledPackages(testManager =>
++            [
++                new PackageBuilder()
++                    .WithManager(testManager)
++                    .WithId("Contoso.Tool")
++                    .WithVersion("1.0.0")
++                    .Build(),
++            ])
++            .Build();
++        TestPackageLoader? loaderReference = null;
++        Task? waitTakenDuringLoad = null;
++        var loader = new TestPackageLoader(
++            [manager],
++            isPackageValid: _ =>
++            {
++                waitTakenDuringLoad = loaderReference!.WaitForCurrentLoadAsync();
++                throw new InvalidOperationException("the load blew up");
++            }
++        );
++        loaderReference = loader;
++        var recorder = new LoaderEventRecorder(loader);
++
++        await loader.ReloadPackages();
++
++        Assert.Equal(1, recorder.FinishedLoadingCount);
++        Assert.False(loader.IsLoading);
++        Assert.True(loader.LastLoadReportedFailures);
++        Assert.False(loader.HasPendingInitialLoad);
++        Assert.NotNull(waitTakenDuringLoad);
++        Assert.True(waitTakenDuringLoad.IsCompleted);
++    }
++
++    [Fact]
++    public async Task ReloadPackages_AnnouncesCompletionOnce_WhenAFinishedLoadingSubscriberThrows()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        var loader = new TestPackageLoader([manager], loadPackages: _ => []);
++        var recorder = new LoaderEventRecorder(loader);
++        loader.FinishedLoading += (_, _) => throw new InvalidOperationException("the subscriber blew up");
++
++        await loader.ReloadPackages();
++
++        Assert.Equal(1, recorder.FinishedLoadingCount);
++        Assert.True(loader.IsLoaded);
++        Assert.NotNull(loader.LastLoadFinishedUtc);
++        Assert.False(loader.LastLoadReportedFailures);
++    }
++
++    [Fact]
++    public async Task ReloadPackages_LeavesAQueuedReloadUntouched_WhenAFinishedLoadingSubscriberThrows()
++    {
++        using var release = new ManualResetEventSlim(true);
++        var manager = new PackageManagerBuilder().Build();
++        var loader = new TestPackageLoader(
++            [manager],
++            loadPackages: _ =>
++            {
++                release.Wait();
++                return [];
++            }
++        );
++
++        Task? queued = null;
++        loader.FinishedLoading += (_, _) =>
++        {
++            if (queued is not null) return;
++            release.Reset();
++            queued = loader.ReloadPackages();
++        };
++        loader.FinishedLoading += (_, _) => throw new InvalidOperationException("the subscriber blew up");
++
++        await loader.ReloadPackages();
++
++        Assert.NotNull(queued);
++        Assert.True(loader.IsLoading);
++        Assert.False(loader.LastLoadReportedFailures);
++
++        release.Set();
++        await queued;
++    }
+ }
+-- 
+2.56.0
+
