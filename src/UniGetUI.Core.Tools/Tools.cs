@@ -933,10 +933,156 @@ namespace UniGetUI.Core.Tools
         }
 
         /// <summary>
-        /// Pings the update server and 3 well-known sites to check for internet availability
+        /// Runs a command and returns its trimmed standard output. <paramref name="timeout"/> is the
+        /// total budget; the command and the children it still owns are killed once it elapses.
+        /// </summary>
+        /// <remarks>
+        /// A descendant that outlives the command itself cannot be reached: the OS reparents it as
+        /// soon as the root exits, so it stays out of the process tree while still holding the
+        /// output pipe open. Such a call times out and reports failure instead of returning output.
+        /// </remarks>
+        public static bool TryReadStandardOutput(
+            ProcessStartInfo startInfo,
+            TimeSpan timeout,
+            out string output
+        )
+        {
+            output = "";
+            Process? process = null;
+            Task<string>? reader = null;
+            var budget = Stopwatch.StartNew();
+            try
+            {
+                process = Process.Start(startInfo);
+                if (process is null)
+                    return false;
+
+                // StandardOutput.ReadToEnd() blocks until the child closes stdout, which a hung
+                // child never does, making any later WaitForExit(timeout) unreachable. Wait on
+                // the read itself instead, and kill the child so the pipe gets released.
+                reader = process.StandardOutput.ReadToEndAsync();
+                if (!reader.Wait(timeout))
+                {
+                    // An exited root means a descendant inherited stdout and is holding it open;
+                    // it is already reparented, so killing the tree below cannot reach it.
+                    string cause = process.HasExited
+                        ? "it exited but something it started still holds its output open"
+                        : "it did not respond in time and will be terminated";
+                    Logger.Warn(
+                        $"Could not read the output of '{startInfo.FileName}' within "
+                            + $"{timeout.TotalSeconds:0.#}s: {cause}"
+                    );
+                    return false;
+                }
+
+                // stdout reached EOF, so the output is complete whether or not the child has left
+                // yet. Give it what remains of the budget to exit on its own; the finally kills it
+                // otherwise, so a child that drops stdout early cannot stretch the wait past it.
+                TimeSpan remaining = timeout - budget.Elapsed;
+                if (remaining > TimeSpan.Zero)
+                    process.WaitForExit((int)remaining.TotalMilliseconds);
+
+                output = reader.Result.Trim();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not read the output of '{startInfo.FileName}':");
+                Logger.Warn(ex);
+                return false;
+            }
+            finally
+            {
+                try
+                {
+                    if (process is not null && !process.HasExited)
+                        process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // Best effort: the process may have exited on its own in the meantime.
+                }
+
+                // Dispose() leaves StandardOutput open (we read it in sync mode), so an abandoned
+                // read ends by itself once the killed child's pipe hits EOF. Observe it regardless.
+                reader?.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
+                process?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Waits until the device reports internet access, giving up after
+        /// <see cref="InternetWaitTimeout"/> so that a wrong answer from the system never blocks loading forever
         /// </summary>
         public static async Task WaitForInternetConnection() =>
             await TaskRecycler<int>.RunOrAttachAsync_VOID(_waitForInternetConnection);
+
+        private static readonly TimeSpan InternetWaitTimeout = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan HttpCheckTimeout = TimeSpan.FromSeconds(5);
+        private const string ConnectivityTestUrl = "http://www.msftconnecttest.com/connecttest.txt";
+        private const string ConnectivityTestBody = "Microsoft Connect Test";
+
+        private static bool _systemReportsInternetAccess()
+        {
+#if WINDOWS
+            var profile = NetworkInformation.GetInternetConnectionProfile();
+            return profile?.GetNetworkConnectivityLevel() == NetworkConnectivityLevel.InternetAccess;
+#else
+            return NetworkInterface.GetIsNetworkAvailable();
+#endif
+        }
+
+        private static bool _tryHttpConnectivityCheck(TimeSpan budget)
+        {
+            var handler = GenericHttpClientParameters;
+            handler.AllowAutoRedirect = false;
+            return HttpConnectivityCheck(handler, new Uri(ConnectivityTestUrl), budget);
+        }
+
+        /// <summary>
+        /// Fetches the connectivity test page and returns whether it came back as expected within
+        /// <paramref name="budget"/> (at most <see cref="HttpCheckTimeout"/>). Once SendAsync has returned its
+        /// task, the call stops waiting at that limit even if the request does not react to cancellation, and
+        /// leaves the request to end on its own.
+        /// </summary>
+        internal static bool HttpConnectivityCheck(HttpMessageHandler handler, Uri url, TimeSpan budget)
+        {
+            TimeSpan limit = budget < HttpCheckTimeout ? budget : HttpCheckTimeout;
+            try
+            {
+                return HttpConnectivityCheckAsync(handler, url, limit).WaitAsync(limit).GetAwaiter().GetResult();
+            }
+            catch (Exception)
+            {
+                // WaitAsync throws once the limit has passed, and any other failure is no connection either
+                return false;
+            }
+        }
+
+        private static async Task<bool> HttpConnectivityCheckAsync(HttpMessageHandler handler, Uri url, TimeSpan limit)
+        {
+            try
+            {
+                using HttpClient client = new(handler)
+                {
+                    Timeout = limit,
+                    MaxResponseContentBufferSize = 1024,
+                };
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                using HttpResponseMessage response = await client.SendAsync(request).ConfigureAwait(false);
+                if (response.StatusCode != HttpStatusCode.OK)
+                    return false;
+
+                // A captive portal can answer 200 too, so the page itself has to be the expected one
+                using var reader = new StreamReader(response.Content.ReadAsStream());
+                return reader.ReadToEnd().Trim() == ConnectivityTestBody;
+            }
+            catch (Exception)
+            {
+                // Any failure, including the timeout, means the endpoint could not be reached
+                return false;
+            }
+        }
 
         public static void _waitForInternetConnection()
         {
@@ -944,30 +1090,56 @@ namespace UniGetUI.Core.Tools
                 return;
 
             Logger.Debug("Checking for internet connectivity...");
+            WaitForConnectivity(
+                _systemReportsInternetAccess,
+                _tryHttpConnectivityCheck,
+                InternetWaitTimeout,
+                TimeSpan.FromSeconds(1)
+            );
+        }
+
+        /// <summary>
+        /// Polls until the system or the HTTP check reports connectivity, or until
+        /// <paramref name="timeout"/> has elapsed. The HTTP check is told how much of the timeout
+        /// is left. Returns whether connectivity was established.
+        /// </summary>
+        internal static bool WaitForConnectivity(
+            Func<bool> systemReportsInternet,
+            Func<TimeSpan, bool> httpCheckSucceeds,
+            TimeSpan timeout,
+            TimeSpan pollInterval
+        )
+        {
+            var stopwatch = Stopwatch.StartNew();
             bool internetLost = false;
 
-#if WINDOWS
-            var profile = NetworkInformation.GetInternetConnectionProfile();
-            while (
-                profile is null
-                || profile.GetNetworkConnectivityLevel()
-                    is not NetworkConnectivityLevel.InternetAccess
-            )
+            while (true)
             {
-                Thread.Sleep(1000);
-                profile = NetworkInformation.GetInternetConnectionProfile();
-                if (!internetLost)
+                if (systemReportsInternet())
+                {
+                    Logger.Debug("Internet connectivity was established.");
+                    return true;
+                }
+
+                // NCSI may be stale (common Windows 10 bug); verify with a real HTTP request
+                TimeSpan remaining = timeout - stopwatch.Elapsed;
+                if (remaining > TimeSpan.Zero && httpCheckSucceeds(remaining))
+                {
+                    Logger.Debug(
+                        "Internet connectivity was established (HTTP check passed, NCSI was stale)."
+                    );
+                    return true;
+                }
+
+                remaining = timeout - stopwatch.Elapsed;
+                if (remaining <= TimeSpan.Zero)
                 {
                     Logger.Warn(
-                        "User is not connected to the internet, waiting for an internet connectio to be available..."
+                        $"Internet connectivity check timed out after {timeout.TotalSeconds}s, proceeding anyway."
                     );
-                    internetLost = true;
+                    return false;
                 }
-            }
-#else
-            while (!NetworkInterface.GetIsNetworkAvailable())
-            {
-                Thread.Sleep(1000);
+
                 if (!internetLost)
                 {
                     Logger.Warn(
@@ -975,9 +1147,9 @@ namespace UniGetUI.Core.Tools
                     );
                     internetLost = true;
                 }
+
+                Thread.Sleep(remaining < pollInterval ? remaining : pollInterval);
             }
-#endif
-            Logger.Debug("Internet connectivity was established.");
         }
 
         public static string TextProgressGenerator(int length, int progressPercent, string? extra)
