@@ -252,22 +252,12 @@ namespace UniGetUI.Interface.SoftwarePages
 
         public override async Task LoadPackages()
         {
-            if (QueryBlock.Text.Trim() != "")
-            {
-                await LoadPackages(ReloadReason.External);
-            }
+            await LoadPackages(ReloadReason.External);
         }
 
         private void Event_SearchPackages(object? sender, RoutedEventArgs e)
         {
-            if (QueryBlock.Text.Trim() != "")
-            {
-                _ = (Loader as DiscoverablePackagesLoader)?.ReloadPackages(QueryBlock.Text.Trim());
-            }
-            else
-            {
-                Loader.StopLoading();
-            }
+            _ = (Loader as DiscoverablePackagesLoader)?.ReloadPackages(QueryBlock.Text.Trim());
         }
 
         protected override void WhenPackageCountUpdated() { }

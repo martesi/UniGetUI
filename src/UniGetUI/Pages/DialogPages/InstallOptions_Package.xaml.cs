@@ -518,7 +518,7 @@ namespace UniGetUI.Interface.Dialogs
                 _ => OperationType.Install,
             };
             var commandline = await Task.Run(() =>
-                Package.Manager.OperationHelper.GetParameters(Package, options, op)
+                Package.Manager.OperationHelper.GetStandaloneParameters(Package, options, op)
             );
             CommandBox.Text =
                 Package.Manager.Properties.ExecutableFriendlyName

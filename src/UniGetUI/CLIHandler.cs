@@ -49,7 +49,7 @@ public static class CLIHandler
 
     public static int ImportSettings()
     {
-        return ImportSettings(Environment.GetCommandLineArgs());
+        return ImportSettings(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int ImportSettings(IReadOnlyList<string> args)
@@ -62,7 +62,7 @@ public static class CLIHandler
 
     public static int ExportSettings()
     {
-        return ExportSettings(Environment.GetCommandLineArgs());
+        return ExportSettings(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int ExportSettings(IReadOnlyList<string> args)
@@ -75,7 +75,7 @@ public static class CLIHandler
 
     public static int EnableSetting()
     {
-        return EnableSetting(Environment.GetCommandLineArgs());
+        return EnableSetting(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int EnableSetting(IReadOnlyList<string> args)
@@ -88,7 +88,7 @@ public static class CLIHandler
 
     public static int DisableSetting()
     {
-        return DisableSetting(Environment.GetCommandLineArgs());
+        return DisableSetting(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int DisableSetting(IReadOnlyList<string> args)
@@ -101,7 +101,7 @@ public static class CLIHandler
 
     public static int SetSettingsValue()
     {
-        return SetSettingsValue(Environment.GetCommandLineArgs());
+        return SetSettingsValue(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int SetSettingsValue(IReadOnlyList<string> args)
@@ -191,7 +191,7 @@ public static class CLIHandler
 
     public static int EnableSecureSetting()
     {
-        return EnableSecureSetting(Environment.GetCommandLineArgs());
+        return EnableSecureSetting(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int EnableSecureSetting(IReadOnlyList<string> args)
@@ -204,7 +204,7 @@ public static class CLIHandler
 
     public static int DisableSecureSetting()
     {
-        return DisableSecureSetting(Environment.GetCommandLineArgs());
+        return DisableSecureSetting(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int DisableSecureSetting(IReadOnlyList<string> args)
@@ -217,7 +217,7 @@ public static class CLIHandler
 
     public static int EnableSecureSettingForUser()
     {
-        return EnableSecureSettingForUser(Environment.GetCommandLineArgs());
+        return EnableSecureSettingForUser(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int EnableSecureSettingForUser(IReadOnlyList<string> args)
@@ -230,7 +230,7 @@ public static class CLIHandler
 
     public static int DisableSecureSettingForUser()
     {
-        return DisableSecureSettingForUser(Environment.GetCommandLineArgs());
+        return DisableSecureSettingForUser(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int DisableSecureSettingForUser(IReadOnlyList<string> args)
@@ -243,7 +243,7 @@ public static class CLIHandler
 
     public static int Automation()
     {
-        return Automation(Environment.GetCommandLineArgs());
+        return Automation(UniGetUI.Core.Data.CoreData.GetProcessArguments());
     }
 
     internal static int Automation(IReadOnlyList<string> args)

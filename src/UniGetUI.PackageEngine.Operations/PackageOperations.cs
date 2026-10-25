@@ -8,6 +8,7 @@ using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.Interfaces.ManagerProviders;
 using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.PackageLoader;
 using UniGetUI.PackageEngine.Serializable;
@@ -273,9 +274,16 @@ namespace UniGetUI.PackageEngine.Operations
             List<string> Output
         )
         {
-            return Task.FromResult(
-                Package.Manager.OperationHelper.GetResult(Package, Role, Output, ReturnCode)
-            );
+            var result = Package.Manager.OperationHelper.GetResult(Package, Role, Output, ReturnCode);
+            if (result is OperationVeredict.Failure
+                && Output.Any(line => line.Contains("[WinError 32]", StringComparison.Ordinal)))
+            {
+                Metadata.FailureMessage = CoreTools.Translate(
+                    "A file of {package} is in use by another program. Close any program that may be using it, then try again",
+                    new Dictionary<string, object?> { { "package", Package.Name } }
+                );
+            }
+            return Task.FromResult(result);
         }
 
         private static bool IsWinGetManager(IPackageManager manager)

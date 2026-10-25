@@ -75,7 +75,7 @@ namespace UniGetUI.Interface
             ApplyProxyVariableToProcess();
             _applySubtitleToWindow();
 
-            foreach (var arg in Environment.GetCommandLineArgs())
+            foreach (var arg in UniGetUI.Core.Data.CoreData.GetProcessArguments())
             {
                 ParametersToProcess.Enqueue(arg);
             }
