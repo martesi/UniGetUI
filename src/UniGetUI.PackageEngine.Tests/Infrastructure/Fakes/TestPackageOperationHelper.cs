@@ -14,6 +14,28 @@ public sealed class TestPackageOperationHelper(TestPackageManager manager)
     public Func<IPackage, OperationType, IReadOnlyList<string>, int, OperationVeredict> ResultFactory { get; set; } =
         static (_, _, _, returnCode) => returnCode == 0 ? OperationVeredict.Success : OperationVeredict.Failure;
 
+    public Action<IPackage, InstallOptions, OperationType>? ElevationRequirementsAction { get; set; }
+
+    public override void ApplyElevationRequirements(
+        IPackage package,
+        InstallOptions options,
+        OperationType operation
+    )
+    {
+        ElevationRequirementsAction?.Invoke(package, options, operation);
+    }
+
+    public Action<IPackage, InstallOptions, OperationType>? OperationOverridesAction { get; set; }
+
+    public override void ApplyOperationOverrides(
+        IPackage package,
+        InstallOptions options,
+        OperationType operation
+    )
+    {
+        OperationOverridesAction?.Invoke(package, options, operation);
+    }
+
     protected override IReadOnlyList<string> _getOperationParameters(
         IPackage package,
         InstallOptions options,

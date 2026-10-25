@@ -181,5 +181,17 @@ namespace UniGetUI.PackageEngine.Classes.Manager
             IReadOnlyList<string> processOutput,
             int returnCode
         ) => throw new NotImplementedException();
+
+        public void ApplyElevationRequirements(
+            IPackage package,
+            InstallOptions options,
+            OperationType operation
+        ) => throw new NotImplementedException();
+
+        public void ApplyOperationOverrides(
+            IPackage package,
+            InstallOptions options,
+            OperationType operation
+        ) => throw new NotImplementedException();
     }
 }
