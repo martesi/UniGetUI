@@ -1086,13 +1086,13 @@
             />
             <Button
               Name="NewVersionHeader"
+              AutomationProperties.AutomationId="NewVersionHeader"
               Grid.Column="8"
               Grid.ColumnSpan="2"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch"
               BorderThickness="0"
               CornerRadius="0"
-              Visibility="{x:Bind RoleIsUpdateLike}"
             />
             <Button
               Name="SourceHeader"

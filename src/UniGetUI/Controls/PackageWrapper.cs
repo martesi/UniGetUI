@@ -109,6 +109,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
 
         public void NotifyColumnVisibilityChanged()
         {
+            if (!_listRowRealized) return;
             foreach (string property in new[]
             {
                 nameof(NameColumnWidth), nameof(IdColumnWidth), nameof(VersionColumnWidth),
@@ -162,7 +163,8 @@ namespace UniGetUI.PackageEngine.PackageClasses
                     OptionalDetailsGate.Release();
                 }
                 token.ThrowIfCancellationRequested();
-                InstallerHostText = details.InstallerUrl?.Host is { Length: > 0 } host ? host : "—";
+                InstallerHostText = details.InstallerUrl is { IsAbsoluteUri: true } uri
+                    && !string.IsNullOrWhiteSpace(uri.Host) ? uri.Host : "—";
                 DownloadSizeBytes = details.InstallerSize;
                 DownloadSizeText = DownloadSizeBytes > 0 ? CoreTools.FormatAsSize(DownloadSizeBytes) : "—";
                 ReleaseDate = DateTime.TryParse(details.UpdateDate, CultureInfo.InvariantCulture,
