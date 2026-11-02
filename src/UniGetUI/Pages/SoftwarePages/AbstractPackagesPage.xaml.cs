@@ -1212,6 +1212,9 @@ namespace UniGetUI.Interface
             }
 
             FilteredPackages.FromRange(matchingList_selectedSources);
+            if (FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.DownloadSize
+                or ObservablePackageCollection.Sorter.ReleaseDate)
+                _ = LoadDetailsAndSortAsync(FilteredPackages.CurrentSorter);
             UpdatePackageCount();
 
             if (previousSelection is not null)

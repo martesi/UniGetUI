@@ -86,6 +86,24 @@ function Invoke-Element {
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
 }
 
+function Toggle-Column {
+    param([System.Windows.Automation.AutomationElement] $Root, [string] $Column)
+
+    Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
+    $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
+    try {
+        $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
+            [System.Windows.Automation.ExpandCollapsePattern]::Pattern
+        )
+        $expand.Expand()
+    }
+    catch {
+        $columnsMenu.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
+    }
+    Invoke-Element (Find-ElementByAutomationId $Root "Column$Column")
+}
+
 function Find-ToggleByAutomationId {
     param(
         [System.Windows.Automation.AutomationElement] $Root,
@@ -241,19 +259,7 @@ try {
         -ArgumentList 'unigetui://showDiscoverPage' -PassThru
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     $query = Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120
-    Invoke-Element (Find-ElementByAutomationId $root 'OrderByButton')
-    $columnsMenu = Find-ElementByAutomationId $root 'ColumnsMenu'
-    try {
-        $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
-            [System.Windows.Automation.ExpandCollapsePattern]::Pattern
-        )
-        $expand.Expand()
-    }
-    catch {
-        $columnsMenu.SetFocus()
-        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
-    }
-    Invoke-Element (Find-ElementByAutomationId $root 'ColumnReleaseDate')
+    Toggle-Column $root 'ReleaseDate'
     [void](Find-ElementByAutomationId $root 'ReleaseDateHeader')
     $value = [System.Windows.Automation.ValuePattern]$query.GetCurrentPattern(
         [System.Windows.Automation.ValuePattern]::Pattern
@@ -277,6 +283,34 @@ try {
     } while (-not $dateFound -and (Get-Date) -lt $deadline)
     if (-not $dateFound) { throw 'A package release date was not displayed.' }
     Invoke-Element (Find-ElementByAutomationId $root 'ReleaseDateHeader')
+
+    Write-Host 'Checking the New version column on Updates'
+    $null = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+        -ArgumentList 'unigetui://showUpdatesPage' -PassThru
+    [void](Find-ElementByAutomationId $root 'NewVersionHeader' -TimeoutSeconds 120)
+    Toggle-Column $root 'NewVersion'
+    $headerCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NewVersionHeader'
+    )
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $header = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $headerCondition)
+        if (-not $header -or $header.Current.IsOffscreen) { break }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if ($header -and -not $header.Current.IsOffscreen) {
+        throw 'The New version column did not hide.'
+    }
+    Toggle-Column $root 'NewVersion'
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $header = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $headerCondition)
+        if ($header -and -not $header.Current.IsOffscreen) { break }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if (-not $header -or $header.Current.IsOffscreen) {
+        throw 'The New version column did not appear again.'
+    }
 
     Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
     Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
