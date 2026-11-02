@@ -804,18 +804,13 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
         try
         {
             PackageQuery query = CreateQuery(package, version);
-            ShowResult result;
-            using (Repository repository = OpenRepository())
-            {
-                result = repository.ShowFirstMatchAcrossSources(query);
-            }
+            ShowResult result = (showPackage ?? ShowWithRepository)(query);
 
             // Pinget silently falls back to the latest manifest when the requested version
             // isn't in the index (yanked / expired / never indexed). That fallback would
             // make the host-change check return false-negatives, so reject any result whose
             // manifest version doesn't match what we asked for.
-            string returnedVersion = result.Manifest.Version ?? "";
-            if (!string.Equals(returnedVersion, version, StringComparison.OrdinalIgnoreCase))
+            if (requireExactVersion)
             {
                 string returnedVersion = result.Manifest.Version ?? "";
                 if (!string.Equals(returnedVersion, version, StringComparison.OrdinalIgnoreCase))
@@ -831,14 +826,17 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
                 }
             }
 
-            HashSet<string> hosts = new(StringComparer.OrdinalIgnoreCase);
+            List<string> urls = [];
             foreach (Installer installer in result.Manifest.Installers)
             {
-                if (TryCreateUri(installer.Url, out Uri? uri) && uri is not null)
-                    hosts.Add(uri.Host);
+                if (string.IsNullOrWhiteSpace(installer.Url))
+                    continue;
+                if (urls.Contains(installer.Url, StringComparer.OrdinalIgnoreCase))
+                    continue;
+                urls.Add(installer.Url);
             }
 
-            return hosts.Count > 0 ? hosts : null;
+            return urls.Count > 0 ? urls : null;
         }
         catch (Exception ex)
         {

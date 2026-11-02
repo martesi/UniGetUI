@@ -40,7 +40,6 @@ public sealed class WinGetManagerTests : IDisposable
         Settings.SetValue(Settings.K.ProxyURL, "");
         Settings.SetValue(Settings.K.WinGetCliToolPreference, "");
         Settings.SetValue(Settings.K.WinGetComApiPolicy, "");
-        Settings.Set(Settings.K.UseAgentBroker, false);
     }
 
     public void Dispose()
@@ -146,6 +145,33 @@ public sealed class WinGetManagerTests : IDisposable
             ["packaged COM registration", "lower-trust COM registration"],
             NativeWinGetHelper.PreferredActivationModes
         );
+    }
+
+    [Fact]
+    public void NativeWinGetHelperSearchesEmptyQueryThroughCatalogDefaultSelector()
+    {
+        var request = Assert.Single(NativeWinGetHelper.GetSearchRequests(""));
+
+        Assert.Equal(Microsoft.Management.Deployment.PackageMatchField.CatalogDefault, request.Field);
+        Assert.True(request.IsSelector);
+        Assert.Equal((uint)SearchLimits.MaxEmptyQueryResultsPerSource, request.ResultLimit);
+    }
+
+    [Fact]
+    public void NativeWinGetHelperSearchesQueryByNameIdAndMonikerFilters()
+    {
+        var requests = NativeWinGetHelper.GetSearchRequests("contoso");
+
+        Assert.Equal(
+            [
+                Microsoft.Management.Deployment.PackageMatchField.Name,
+                Microsoft.Management.Deployment.PackageMatchField.Id,
+                Microsoft.Management.Deployment.PackageMatchField.Moniker,
+            ],
+            requests.Select(request => request.Field)
+        );
+        Assert.All(requests, request => Assert.False(request.IsSelector));
+        Assert.All(requests, request => Assert.Null(request.ResultLimit));
     }
 
     [Fact]
@@ -2259,33 +2285,6 @@ public sealed class WinGetManagerTests : IDisposable
 
         OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
         Assert.False(package.OverridenOptions.WinGet_UseLocalIdentifier);
-    }
-
-    [Fact]
-    public void WinGetBrokeredUpdateIsNotRetriedBecauseTheRequestWouldBeIdentical()
-    {
-        var manager = new WinGet();
-        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS.Brokered");
-        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
-
-        bool originalSetting = Settings.Get(Settings.K.UseAgentBroker);
-        Settings.Set(Settings.K.UseAgentBroker, true);
-        try
-        {
-            var veredict = manager.OperationHelper.GetResult(
-                package,
-                OperationType.Update,
-                [],
-                unchecked((int)0x8A150014)
-            );
-
-            OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
-            Assert.False(package.OverridenOptions.WinGet_UseLocalIdentifier);
-        }
-        finally
-        {
-            Settings.Set(Settings.K.UseAgentBroker, originalSetting);
-        }
     }
 
     [Fact]

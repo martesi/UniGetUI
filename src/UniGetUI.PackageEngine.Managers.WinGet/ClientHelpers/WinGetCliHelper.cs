@@ -15,6 +15,8 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager;
 
 internal sealed partial class WinGetCliHelper : IWinGetManagerHelper
 {
+    private const int MAX_SEARCH_RESULTS = 100;
+
     private readonly WinGet Manager;
     private readonly string _cliExecutablePath;
     private readonly IPingetPackageDetailsProvider _packageDetailsProvider;
