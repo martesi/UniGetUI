@@ -1,0 +1,58 @@
+From 23cd62ce058fd25314266763cde7460c0ee0d557 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 17:33:18 +0200
+Subject: [PATCH] fix: stabilize Classic tray setting validation
+
+Classic-Source-Commit: 08d5baaadd65ff5331e9ed57703189d298423b80
+---
+ .../SettingsPages/GeneralPages/Interface_P.xaml.cs     |  9 +++------
+ testing/automation/run-winui-ui-e2e.ps1                | 10 ++++++++++
+ 2 files changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml.cs b/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml.cs
+index aa6467f..0a39228 100644
+--- a/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml.cs
++++ b/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml.cs
+@@ -118,12 +118,9 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
+             SystemTrayIconCard.WarningText = keepsRunning && Settings.Get(Settings.K.HideSystemTrayIcon)
+                 ? "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu."
+                 : "";
+-            if (DisableSystemTray is not null)
+-            {
+-                DisableSystemTray.WarningText = keepsRunning
+-                    ? ""
+-                    : "UniGetUI stops checking for updates and sending notifications until you open it again.";
+-            }
++            DisableSystemTray.WarningText = keepsRunning
++                ? ""
++                : "UniGetUI stops checking for updates and sending notifications until you open it again.";
+         }
+ 
+         private void ThemeSelector_ValueChanged(object sender, EventArgs e) =>
+diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
+index 9659d82..e1392e0 100644
+--- a/testing/automation/run-winui-ui-e2e.ps1
++++ b/testing/automation/run-winui-ui-e2e.ps1
+@@ -146,9 +146,19 @@ try {
+     [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
+ 
+     Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
++    Write-Host 'Opening interface settings'
+     Invoke-Element (Find-ElementByAutomationId $window 'InterfaceSettingsEntry')
++    Write-Host 'Enabling background mode'
+     Ensure-ToggleOn (Find-ElementByAutomationId $window 'DisableSystemTray')
++    Write-Host 'Checking tray icon toggle'
+     $trayIcon = Find-ElementByAutomationId $window 'HideSystemTrayIcon'
++    $deadline = (Get-Date).AddSeconds(15)
++    while (-not $trayIcon.Current.IsEnabled -and (Get-Date) -lt $deadline) {
++        Start-Sleep -Milliseconds 250
++    }
++    if (-not $trayIcon.Current.IsEnabled) {
++        throw 'The tray icon setting did not become enabled with background mode.'
++    }
+     Ensure-ToggleOn $trayIcon
+     $trayToggle = [System.Windows.Automation.TogglePattern]($trayIcon.GetCurrentPattern(
+         [System.Windows.Automation.TogglePattern]::Pattern
+-- 
+2.51.1
+
