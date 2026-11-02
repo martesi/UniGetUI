@@ -229,6 +229,39 @@ namespace UniGetUI.Interface
         protected abstract void WhenPackagesLoaded(ReloadReason reason);
         protected abstract void WhenPackageCountUpdated();
         protected abstract void WhenShowingContextMenu(IPackage package);
+
+        protected BetterMenuItem CreateCopyLinkMenuItem()
+        {
+            BetterMenuItem item = new()
+            {
+                Text = CoreTools.AutoTranslated("Copy link"),
+                IconName = IconType.Info_Round,
+            };
+            item.Click += (_, _) =>
+            {
+                if (SelectedItem is not { } package || !PackageLink.CanLinkTo(package))
+                    return;
+                try
+                {
+                    var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                    data.SetText(PackageLink.FromPackage(package).ToUri());
+                    Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
+                    DialogHelper.ShowDismissableBalloon(
+                        CoreTools.Translate("Copy link"),
+                        CoreTools.Translate("A link to {0} was copied to the clipboard.", package.Name)
+                    );
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex);
+                    DialogHelper.ShowDismissableBalloon(
+                        CoreTools.Translate("Copy link"),
+                        CoreTools.Translate("The package link could not be copied.")
+                    );
+                }
+            };
+            return item;
+        }
         public abstract void GenerateToolBar();
         public abstract BetterMenu GenerateContextMenu();
 

@@ -18,8 +18,10 @@ using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
+using UniGetUI.Interface.Telemetry;
 using UniGetUI.PackageEngine;
 using UniGetUI.PackageEngine.Classes.Manager.Classes;
+using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.PackageLoader;
@@ -370,6 +372,15 @@ namespace UniGetUI.Interface
         /// <param name="link">the unigetui:// deep link to handle</param>
         private void HandleDeepLink(string link)
         {
+            if (PackageLink.IsPackageLink(link))
+            {
+                if (PackageLink.TryParse(link) is { } packageLink)
+                    _ = OpenPackageLinkAsync(packageLink);
+                else
+                    ShowPackageLinkError(CoreTools.Translate("The package link is invalid."));
+                return;
+            }
+
             string baseUrl = Uri.UnescapeDataString(link[11..]);
             Logger.ImportantInfo("Begin handle of deep link with body " + baseUrl);
 
@@ -401,6 +412,72 @@ namespace UniGetUI.Interface
             {
                 Logger.Error(new UriFormatException($"Malformed URL {link}"));
             }
+        }
+
+        private async Task OpenPackageLinkAsync(PackageLink link)
+        {
+            ShowFromTray();
+            if (link.Manager is { } managerId)
+            {
+                var manager = PEInterface.Managers.FirstOrDefault(candidate =>
+                    candidate.Id.Equals(managerId, StringComparison.OrdinalIgnoreCase)
+                );
+                if (manager is null)
+                {
+                    ShowPackageLinkError(CoreTools.Translate("This version of UniGetUI does not support the package manager {0}.", managerId));
+                    return;
+                }
+                if (!manager.IsEnabled())
+                {
+                    ShowPackageLinkError(CoreTools.Translate("{0} is disabled. Enable it in the settings to open this package.", manager.DisplayName));
+                    return;
+                }
+                if (!manager.IsReady())
+                {
+                    ShowPackageLinkError(CoreTools.Translate("{0} is not available on this computer.", manager.DisplayName));
+                    return;
+                }
+            }
+
+            IPackage? package = null;
+            int loadingId = DialogHelper.ShowLoadingDialog(CoreTools.Translate("Looking for {0}...", link.DisplayName));
+            try
+            {
+                package = await Task.Run(() => IpcPackageApi.FindCatalogPackage(new IpcPackageActionRequest
+                {
+                    PackageId = link.Id,
+                    ManagerName = link.Manager,
+                    PackageSource = link.Source,
+                }));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not resolve the package link for {link.Id}");
+                Logger.Warn(ex);
+            }
+            finally
+            {
+                DialogHelper.HideLoadingDialog(loadingId);
+            }
+
+            if (package is null || package.Source.IsVirtualManager)
+            {
+                ShowPackageLinkError(CoreTools.Translate("{0} was not found.", link.DisplayName));
+                return;
+            }
+            if (link.Version is not null && !package.Manager.Capabilities.SupportsCustomVersions)
+            {
+                ShowPackageLinkError(CoreTools.Translate("{0} does not support installing a specified version.", package.Manager.DisplayName));
+                return;
+            }
+
+            await DialogHelper.ShowPackageDetails(package, OperationType.Install, TEL_InstallReferral.FROM_LINK, link.Version);
+        }
+
+        private static void ShowPackageLinkError(string message)
+        {
+            Logger.Warn(message);
+            DialogHelper.ShowDismissableBalloon(CoreTools.Translate("The package link could not be opened"), message);
         }
 
         /// <summary>
@@ -450,7 +527,10 @@ namespace UniGetUI.Interface
                         Logger.Warn("Unknown parameter " + param);
                     }
                 }
-                else if (param.Length > 11 && param.ToLower().StartsWith("unigetui://"))
+                else if (
+                    PackageLink.IsPackageLink(param)
+                    || param.StartsWith("unigetui://", StringComparison.OrdinalIgnoreCase)
+                )
                 {
                     HandleDeepLink(param);
                 }

@@ -31,6 +31,7 @@ namespace UniGetUI.Interface.SoftwarePages
         private BetterMenuItem? MenuUninstallThenReinstall;
         private BetterMenuItem? MenuIgnoreUpdates;
         private BetterMenuItem? MenuPackageDetails;
+        private BetterMenuItem? MenuCopyLink;
         private BetterMenuItem? MenuOpenInstallLocation;
         private BetterMenuItem? MenuDownloadInstaller;
         private BetterMenuItem? MenuUpdate;
@@ -195,6 +196,7 @@ namespace UniGetUI.Interface.SoftwarePages
             };
             MenuPackageDetails.Click += MenuDetails_Invoked;
             menu.Items.Add(MenuPackageDetails);
+            menu.Items.Add(MenuCopyLink = CreateCopyLinkMenuItem());
 
             return menu;
         }
@@ -371,6 +373,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 || MenuReinstallPackage is null
                 || MenuIgnoreUpdates is null
                 || MenuPackageDetails is null
+                || MenuCopyLink is null
                 || MenuOpenInstallLocation is null
                 || MenuDownloadInstaller is null
                 || MenuUpdate is null
@@ -401,6 +404,7 @@ namespace UniGetUI.Interface.SoftwarePages
             MenuUninstallThenReinstall.IsEnabled = !IS_LOCAL;
             MenuIgnoreUpdates.IsEnabled = false; // Will be set on the lines below;
             MenuPackageDetails.IsEnabled = !IS_LOCAL;
+            MenuCopyLink.IsEnabled = PackageLink.CanLinkTo(package);
             MenuDownloadInstaller.IsEnabled =
                 !IS_LOCAL && package.Manager.Capabilities.CanDownloadInstaller;
             ;

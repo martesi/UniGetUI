@@ -50,6 +50,7 @@
 
           <TextBlock
             Name="PackageName"
+            AutomationProperties.AutomationId="PackageDetailsName"
             Grid.Column="1"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"

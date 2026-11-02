@@ -366,6 +366,11 @@ namespace UniGetUI.Interface.Dialogs
                     VersionComboBox.SelectedValue = ver;
                 }
             }
+            if (!string.IsNullOrWhiteSpace(Options.Version) && !versions.Contains(Options.Version))
+            {
+                VersionComboBox.Items.Add(Options.Version);
+                VersionComboBox.SelectedValue = Options.Version;
+            }
             IgnoreUpdatesCheckbox.IsChecked = await Package.HasUpdatesIgnoredAsync();
 
             VersionComboBox.IsEnabled =
