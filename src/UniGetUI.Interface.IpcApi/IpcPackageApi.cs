@@ -54,6 +54,18 @@ public sealed class IpcPackageOperationResult
     public IReadOnlyList<string> Output { get; set; } = [];
 }
 
+public sealed class IpcPackageBulkOperationResult
+{
+    public string Status { get; set; } = "success";
+    public string Command { get; set; } = "";
+    public bool Completed { get; set; }
+    public string? Message { get; set; }
+    public int QueuedCount { get; set; }
+    public int SucceededCount { get; set; }
+    public int FailedCount { get; set; }
+    public IReadOnlyList<IpcPackageOperationResult> Results { get; set; } = [];
+}
+
 public sealed class IpcPackageDependencyInfo
 {
     public string Name { get; set; } = "";
@@ -114,6 +126,8 @@ internal enum IpcPackageLookupMode
 
 public static class IpcPackageApi
 {
+    private static readonly SemaphoreSlim BulkUpdateQueueLock = new(1, 1);
+
     public static IReadOnlyList<IpcPackageInfo> SearchPackages(
         string query,
         string? managerName = null,
@@ -186,6 +200,89 @@ public static class IpcPackageApi
             request,
             (pkg, options) => new UpdatePackageOperation(pkg, options)
         );
+    }
+
+    /// <summary>
+    /// Queues an update for every available update, or for those of one manager, and returns the
+    /// operations it started. Sessions with a window queue them through the window instead, so
+    /// they show in its operations list; this is what a headless session uses.
+    /// </summary>
+    public static async Task<IReadOnlyList<AbstractOperation>> QueueAllUpdatesAsync(
+        string? managerName = null
+    )
+    {
+        await BulkUpdateQueueLock.WaitAsync();
+        try
+        {
+            List<AbstractOperation> operations = [];
+            foreach (var package in await GetUpdatesToApplyAsync(managerName))
+            {
+                if (
+                    package.Tag is PackageTag.OnQueue or PackageTag.BeingProcessed
+                    || IpcOperationApi.HasPendingPackageOperation(package)
+                )
+                    continue;
+
+                var options = await InstallOptionsFactory.LoadApplicableAsync(package);
+                var operation = new UpdatePackageOperation(package, options);
+                IpcOperationApi.Track(operation);
+                _ = Task.Run(() => RunTrackedOperationAsync(operation));
+                operations.Add(operation);
+            }
+
+            return operations;
+        }
+        finally
+        {
+            BulkUpdateQueueLock.Release();
+        }
+    }
+
+    internal static IpcPackageBulkOperationResult CreateQueuedBulkResult(
+        string command,
+        IReadOnlyList<AbstractOperation> operations
+    )
+    {
+        var results = operations
+            .OfType<PackageOperation>()
+            .Select(operation =>
+                CreateOperationResult(command, operation.Package, operation, completed: false)
+            )
+            .ToArray();
+
+        return new IpcPackageBulkOperationResult
+        {
+            Command = command,
+            Completed = results.Length == 0,
+            Message = results.Length == 0
+                ? "No updates are available."
+                : "The updates were queued for background execution.",
+            QueuedCount = results.Length,
+            Results = results,
+        };
+    }
+
+    // Reads the update list the app shows, never the managers' raw lists: only the loader applies
+    // ignored updates, skipped minor updates and the minimum update age.
+    private static async Task<IReadOnlyList<IPackage>> GetUpdatesToApplyAsync(string? managerName)
+    {
+        var loader = UpgradablePackagesLoader.Instance
+            ?? throw new InvalidOperationException(
+                "The current UniGetUI session has not loaded its package updates."
+            );
+
+        if (loader.IsLoading)
+        {
+            await loader.WaitForCurrentLoadAsync();
+        }
+        else if (!loader.IsLoaded)
+        {
+            await loader.ReloadPackages();
+        }
+
+        return loader.Packages
+            .Where(package => MatchesManager(package.Manager, managerName))
+            .ToArray();
     }
 
     public static Task<IpcPackageOperationResult> UninstallPackageAsync(

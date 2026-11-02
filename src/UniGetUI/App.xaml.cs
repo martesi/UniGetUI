@@ -437,17 +437,12 @@ namespace UniGetUI
                 IpcApi.QuitAppHandler = () => RunOnUiThread(QuitApp);
                 IpcApi.ShowPackageHandler = request => RunOnUiThread(() => ShowPackage(request));
 
-                IpcApi.OnUpgradeAll += (_, _) =>
-                    MainWindow.DispatcherQueue.TryEnqueue(() =>
-                    {
-                        _ = Operations.UpdateAll();
-                    });
-
-                IpcApi.OnUpgradeAllForManager += (s, managerName) =>
-                    MainWindow.DispatcherQueue.TryEnqueue(() =>
-                    {
-                        _ = Operations.UpdateAllForManager(managerName);
-                    });
+                IpcApi.UpdateAllHandler = managerName =>
+                    RunOnUiThread(() =>
+                        managerName is null
+                            ? Operations.UpdateAll()
+                            : Operations.UpdateAllForManager(managerName)
+                    );
 
                 await IpcApi.Start();
             }
