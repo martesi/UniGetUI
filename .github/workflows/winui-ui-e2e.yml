@@ -17,6 +17,7 @@ on:
       - '.github/workflows/winui-ui-e2e.yml'
       - 'global.json'
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   winui-ui-e2e:

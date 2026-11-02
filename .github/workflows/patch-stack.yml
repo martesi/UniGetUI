@@ -24,6 +24,7 @@ on:
       - 'scripts/verify-patch-stack.ps1'
       - '.github/workflows/patch-stack.yml'
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

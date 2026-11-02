@@ -16,6 +16,7 @@ on:
       - '.github/workflows/cli-headless-e2e.yml'
       - 'global.json'
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   cli-headless-e2e:

@@ -29,6 +29,7 @@ on:
       - '.github/workflows/dotnet-test.yml'
 
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   test-codebase:

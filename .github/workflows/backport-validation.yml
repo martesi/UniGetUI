@@ -1,0 +1,21 @@
+name: Classic backport validation
+
+on:
+  push:
+    branches:
+      - "ci/backport/**"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    uses: ./.github/workflows/classic-guard.yml
+  patch-stack:
+    uses: ./.github/workflows/patch-stack.yml
+  dotnet:
+    uses: ./.github/workflows/dotnet-test.yml
+  cli:
+    uses: ./.github/workflows/cli-headless-e2e.yml
+  winui:
+    uses: ./.github/workflows/winui-ui-e2e.yml
