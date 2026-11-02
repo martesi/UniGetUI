@@ -169,7 +169,7 @@ try {
         throw 'UniGetUI main window was not found.'
     }
 
-    Invoke-Element (Find-ElementByAutomationId $window 'OperationsSettingsEntry')
+    Invoke-Element (Find-ElementByAutomationId $window 'OperationsSettingsEntry' -TimeoutSeconds 120)
     [void](Find-ElementByAutomationId $window 'InstallerFileNameScheme')
     [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
 
