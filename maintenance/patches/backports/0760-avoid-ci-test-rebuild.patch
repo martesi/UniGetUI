@@ -1,0 +1,24 @@
+From a7fd8f861708698cf78efc2ca884ddcf594952f4 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 12:41:59 -0800
+Subject: [PATCH] ci: test the already-built Windows solution
+
+Classic-Source-Commit: 23ca69058a7887f9f51a0fb87b6337528088b833
+---
+ .github/workflows/dotnet-test.yml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/.github/workflows/dotnet-test.yml b/.github/workflows/dotnet-test.yml
+index b3fc3e8..d42c4b2 100644
+--- a/.github/workflows/dotnet-test.yml
++++ b/.github/workflows/dotnet-test.yml
+@@ -94,5 +94,5 @@ jobs:
+       working-directory: src
+       env:
+         GITHUB_TOKEN: ${{ github.token }}
+-      run: dotnet test UniGetUI.Windows.slnx --no-restore --verbosity q --nologo /p:Platform=x64
++      run: dotnet test UniGetUI.Windows.slnx --no-build --no-restore --verbosity q --nologo /p:Platform=x64
+ 
+-- 
+2.51.1
+

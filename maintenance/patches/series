@@ -77,3 +77,4 @@ backports/0720-update-ignored-once.patch
 backports/0730-ignored-update-guard.patch
 backports/0740-isolate-nuget-tests.patch
 backports/0750-winui-startup-wait.patch
+backports/0760-avoid-ci-test-rebuild.patch
