@@ -1,0 +1,24 @@
+name: Backport NuGet diagnostics
+
+on:
+  push:
+    branches: [ "ci/diagnose-nuget-icon" ]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repetition: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Run package-engine tests with detailed results
+        shell: pwsh
+        run: dotnet test src/UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --framework net10.0 --logger "console;verbosity=normal" /p:Platform=x64
