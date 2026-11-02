@@ -6,18 +6,12 @@ namespace UniGetUI.Core.Logging
     {
         private static readonly List<LogEntry> LogContents = [];
         private static readonly Lock LogWriteLock = new();
-        private static readonly string SessionLogPath = Path.Combine(
-            Path.GetTempPath(),
-            "UniGetUI",
-            "session.log"
-        );
-
         private static readonly string UserName = Environment.UserName;
 
         // When enabled, the current user's name is replaced by **** in every logged line (privacy).
         public static bool RedactUsername { get; set; }
 
-        public static string GetSessionLogPath() => SessionLogPath;
+        public static string GetSessionLogPath() => Path.Join(AppPaths.ScratchDirectory, "session.log");
 
         // Replaces the current user's name with **** when redaction is enabled (privacy).
         // Public so other diagnostic surfaces (operation output, crash reports, update logs)
@@ -45,11 +39,12 @@ namespace UniGetUI.Core.Logging
         {
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(SessionLogPath)!);
+                string sessionLogPath = GetSessionLogPath();
+                Directory.CreateDirectory(Path.GetDirectoryName(sessionLogPath)!);
                 lock (LogWriteLock)
                 {
                     File.AppendAllText(
-                        SessionLogPath,
+                        sessionLogPath,
                         $"[{DateTime.Now:yyyy-MM-dd h:mm:ss tt}] {text}{Environment.NewLine}"
                     );
                 }

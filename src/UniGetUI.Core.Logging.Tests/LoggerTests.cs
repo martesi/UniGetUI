@@ -6,6 +6,7 @@ namespace UniGetUI.Core.Logging.Tests
         [Fact]
         public void TestLogger()
         {
+            int initialCount = Logger.GetLogs().Length;
             DateTime startTime = DateTime.Now;
             Logger.Info("Hello World");
             Logger.Debug("Hello World 2");
@@ -14,7 +15,7 @@ namespace UniGetUI.Core.Logging.Tests
 
             DateTime endTime = DateTime.Now;
 
-            LogEntry[] logs = Logger.GetLogs();
+            LogEntry[] logs = Logger.GetLogs().Skip(initialCount).ToArray();
 
             Assert.Equal("Hello World", logs[0].Content);
             Assert.Equal("Hello World 2", logs[1].Content);
@@ -26,10 +27,10 @@ namespace UniGetUI.Core.Logging.Tests
             Assert.Equal(LogEntry.SeverityLevel.Error, logs[2].Severity);
             Assert.Equal(LogEntry.SeverityLevel.Warning, logs[3].Severity);
 
-            Assert.True(logs[0].Time > startTime && logs[0].Time < endTime);
-            Assert.True(logs[1].Time > startTime && logs[1].Time < endTime);
-            Assert.True(logs[2].Time > startTime && logs[2].Time < endTime);
-            Assert.True(logs[3].Time > startTime && logs[3].Time < endTime);
+            Assert.InRange(logs[0].Time, startTime, endTime);
+            Assert.InRange(logs[1].Time, startTime, endTime);
+            Assert.InRange(logs[2].Time, startTime, endTime);
+            Assert.InRange(logs[3].Time, startTime, endTime);
         }
     }
 }
