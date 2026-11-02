@@ -372,7 +372,7 @@ namespace UniGetUI.PackageEngine.Operations
                 l.Add(new(preReq, true));
 
             foreach (var process in opts.KillBeforeOperation)
-                l.Add(new InnerOperation(new KillProcessOperation(process), mustSucceed: false));
+                l.Add(new InnerOperation(new KillProcessOperation(process), mustSucceed: true));
 
             if (role is OperationType.Install && opts.PreInstallCommand.Any())
                 l.Add(
@@ -550,7 +550,9 @@ namespace UniGetUI.PackageEngine.Operations
             UpgradablePackagesLoader.Instance.Remove(Package);
             InstalledPackagesLoader.Instance.Remove(Package);
 
-            bool explicitVersionRequested = !string.IsNullOrWhiteSpace(Options.Version);
+            bool explicitVersionRequested =
+                !string.IsNullOrWhiteSpace(Options.Version)
+                && Package.Manager.Capabilities.SupportsCustomVersionsOnUpdate;
             var installedPackage = await ResolveInstalledPackageSnapshotAsync(
                 explicitVersionRequested
                     ? Options.Version
