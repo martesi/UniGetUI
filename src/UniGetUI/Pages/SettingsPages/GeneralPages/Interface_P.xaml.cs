@@ -118,12 +118,9 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             SystemTrayIconCard.WarningText = keepsRunning && Settings.Get(Settings.K.HideSystemTrayIcon)
                 ? "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu."
                 : "";
-            if (DisableSystemTray is not null)
-            {
-                DisableSystemTray.WarningText = keepsRunning
-                    ? ""
-                    : "UniGetUI stops checking for updates and sending notifications until you open it again.";
-            }
+            DisableSystemTray.WarningText = keepsRunning
+                ? ""
+                : "UniGetUI stops checking for updates and sending notifications until you open it again.";
         }
 
         private void ThemeSelector_ValueChanged(object sender, EventArgs e) =>

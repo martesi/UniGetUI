@@ -146,9 +146,19 @@ try {
     [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
 
     Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
+    Write-Host 'Opening interface settings'
     Invoke-Element (Find-ElementByAutomationId $window 'InterfaceSettingsEntry')
+    Write-Host 'Enabling background mode'
     Ensure-ToggleOn (Find-ElementByAutomationId $window 'DisableSystemTray')
+    Write-Host 'Checking tray icon toggle'
     $trayIcon = Find-ElementByAutomationId $window 'HideSystemTrayIcon'
+    $deadline = (Get-Date).AddSeconds(15)
+    while (-not $trayIcon.Current.IsEnabled -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $trayIcon.Current.IsEnabled) {
+        throw 'The tray icon setting did not become enabled with background mode.'
+    }
     Ensure-ToggleOn $trayIcon
     $trayToggle = [System.Windows.Automation.TogglePattern]($trayIcon.GetCurrentPattern(
         [System.Windows.Automation.TogglePattern]::Pattern
