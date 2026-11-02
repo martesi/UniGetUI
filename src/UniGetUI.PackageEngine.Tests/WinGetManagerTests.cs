@@ -2489,9 +2489,20 @@ public sealed class WinGetManagerTests : IDisposable
             .Invoke(null, [value]);
     }
 
+    private static IPackage CreatePingetQueryPackage()
+    {
+        return new PackageBuilder()
+            .WithManager(new WinGet())
+            .WithName("Contoso Tool")
+            .WithId("Contoso.Tool")
+            .WithVersion("1.2.3")
+            .Build();
+    }
+
     private static ShowResult CreatePingetShowResult(
         string? description = "Contoso description",
-        string? shortDescription = null
+        string? shortDescription = null,
+        IReadOnlyList<string>? installerUrls = null
     )
     {
         var package = new SearchMatch
@@ -2511,6 +2522,9 @@ public sealed class WinGetManagerTests : IDisposable
             ReleaseDate = "2026-04-27",
             PackageDependencies = ["Contoso.Dependency [2.0]"],
         };
+        List<Installer> installers = installerUrls is null
+            ? [installer]
+            : [.. installerUrls.Select(url => installer with { Url = url })];
 
         return new ShowResult
         {
@@ -2529,9 +2543,9 @@ public sealed class WinGetManagerTests : IDisposable
                 ReleaseNotes = "Release notes",
                 Tags = ["utility"],
                 PackageDependencies = ["Contoso.Runtime"],
-                Installers = [installer],
+                Installers = installers,
             },
-            SelectedInstaller = installer,
+            SelectedInstaller = installers.FirstOrDefault(),
             StructuredDocument = new Dictionary<string, object?>(),
         };
     }
