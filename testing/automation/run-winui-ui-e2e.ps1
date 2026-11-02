@@ -236,7 +236,33 @@ try {
 
     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
 
-    Write-Host 'WinUI UI E2E passed: settings, tray icon control, and CSV toolbar are reachable.'
+    $toolsBefore = (& dotnet tool list --global | Out-String)
+    $packageLink = 'unigetui://package?manager=dotnet-tool&id=dotnetsay&version=2.1.4'
+    Write-Host 'Opening a package link in the running app'
+    $redirect = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+        -ArgumentList $packageLink -PassThru
+    $details = Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) `
+        'PackageDetailsName' -TimeoutSeconds 180
+    if ($details.Current.Name -notmatch '(?i)dotnetsay') {
+        throw 'The running app did not open the requested package.'
+    }
+    Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+    Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
+
+    Write-Host 'Opening a package link at startup'
+    $appProcess = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+        -ArgumentList $packageLink -PassThru
+    $details = Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) `
+        'PackageDetailsName' -TimeoutSeconds 180
+    if ($details.Current.ProcessId -ne $appProcess.Id -or $details.Current.Name -notmatch '(?i)dotnetsay') {
+        throw 'The app did not open the requested package at startup.'
+    }
+    $toolsAfter = (& dotnet tool list --global | Out-String)
+    if ($toolsBefore -ne $toolsAfter) {
+        throw 'Opening a package link changed the installed dotnet tools.'
+    }
+
+    Write-Host 'WinUI UI E2E passed: settings, tray icon control, CSV toolbar, and package links.'
 }
 finally {
     if ($appProcess -and -not $appProcess.HasExited) {

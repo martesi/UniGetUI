@@ -23,6 +23,7 @@ namespace UniGetUI.Interface.SoftwarePages
         private BetterMenuItem? MenuInteractive;
         private BetterMenuItem? MenuSkipHash;
         private BetterMenuItem? MenuDownloadInstaller;
+        private BetterMenuItem? MenuCopyLink;
 
         public DiscoverSoftwarePage()
             : base(
@@ -149,6 +150,7 @@ namespace UniGetUI.Interface.SoftwarePages
             };
             menuDetails.Click += MenuDetails_Invoked;
             menu.Items.Add(menuDetails);
+            menu.Items.Add(MenuCopyLink = CreateCopyLinkMenuItem());
 
             return menu;
         }
@@ -271,6 +273,7 @@ namespace UniGetUI.Interface.SoftwarePages
                 || MenuInteractive is null
                 || MenuSkipHash is null
                 || MenuDownloadInstaller is null
+                || MenuCopyLink is null
             )
             {
                 Logger.Warn("MenuItems are null on DiscoverPackagesPage");
@@ -281,6 +284,7 @@ namespace UniGetUI.Interface.SoftwarePages
             MenuInteractive.IsEnabled = package.Manager.Capabilities.CanRunInteractively;
             MenuSkipHash.IsEnabled = package.Manager.Capabilities.CanSkipIntegrityChecks;
             MenuDownloadInstaller.IsEnabled = package.Manager.Capabilities.CanDownloadInstaller;
+            MenuCopyLink.IsEnabled = PackageLink.CanLinkTo(package);
         }
 
         private void ExportSelection_Click(object sender, RoutedEventArgs e) =>

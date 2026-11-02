@@ -469,6 +469,12 @@ public static class IpcPackageApi
         return FindAnyPackage(request);
     }
 
+    public static IPackage FindCatalogPackage(IpcPackageActionRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return FindSearchResult(request, sanitizeQuery: true);
+    }
+
     public static IReadOnlyList<string> GetPackageVersions(IpcPackageActionRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -700,11 +706,20 @@ public static class IpcPackageApi
         };
     }
 
-    private static IPackage FindSearchResult(IpcPackageActionRequest request)
+    private static IPackage FindSearchResult(
+        IpcPackageActionRequest request,
+        bool sanitizeQuery = false
+    )
     {
+        string query = sanitizeQuery
+            ? CoreTools.EnsureSafeQueryString(request.PackageId)
+            : request.PackageId;
+        if (string.IsNullOrWhiteSpace(query))
+            throw new InvalidOperationException("The package identifier is not a valid search query.");
+
         foreach (var manager in GetManagers(request.ManagerName))
         {
-            var package = manager.FindPackages(request.PackageId).FirstOrDefault(candidate =>
+            var package = manager.FindPackages(query).FirstOrDefault(candidate =>
                 MatchesIdentity(candidate, request)
             );
             if (package is not null)

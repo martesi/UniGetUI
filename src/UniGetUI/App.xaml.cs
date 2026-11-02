@@ -21,6 +21,7 @@ using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageOperations;
 using UniGetUI.Pages.DialogPages;
 using UniGetUI.Services;
+using UniGetUI.Shared;
 using Windows.ApplicationModel.Activation;
 using LaunchActivatedEventArgs = Microsoft.UI.Xaml.LaunchActivatedEventArgs;
 
@@ -403,11 +404,11 @@ namespace UniGetUI
                 RaiseExceptionAsFatal = false;
 
                 // Process any remaining command-line arguments
-                MainWindow.ProcessCommandLineParameters();
                 MainWindow.ParametersToProcess.ItemEnqueued += (_, _) =>
                 {
                     MainWindow.DispatcherQueue.TryEnqueue(MainWindow.ProcessCommandLineParameters);
                 };
+                MainWindow.ProcessCommandLineParameters();
 
                 _ = CheckForMissingDependencies();
 
@@ -671,14 +672,15 @@ namespace UniGetUI
                 {
                     // If the app redirection event comes from a launch, extract
                     // the CLI arguments and redirect them to the ParameterProcessor
-                    foreach (
-                        Match argument in Regex.Matches(
+                    string[] arguments = Regex.Matches(
                             launchArguments.Arguments,
                             "([^ \"']+|\"[^\"]+\"|'[^']+')"
                         )
-                    )
+                        .Select(argument => argument.Value)
+                        .ToArray();
+                    foreach (string argument in SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(arguments))
                     {
-                        MainWindow.ParametersToProcess.Enqueue(argument.Value);
+                        MainWindow.ParametersToProcess.Enqueue(argument);
                     }
                 }
                 else
@@ -687,6 +689,10 @@ namespace UniGetUI
                         "REDIRECTOR ACTIVATOR: args.Data was null when casted to ILaunchActivatedEventArgs"
                     );
                 }
+            }
+            else if (kind is ExtendedActivationKind.Protocol && rawArgs.Data is IProtocolActivatedEventArgs protocol)
+            {
+                MainWindow.ParametersToProcess.Enqueue(protocol.Uri.AbsoluteUri);
             }
             else
             {

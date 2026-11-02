@@ -49,5 +49,6 @@
         <Compile Include="..\UniGetUI\CLIHandler.cs" Link="CLIHandler.cs" />
         <Compile Include="..\UniGetUI\CsvExportHelpers.cs" Link="CsvExportHelpers.cs" />
         <Compile Include="..\UniGetUI\ModernAppLauncher.cs" Link="ModernAppLauncher.cs" />
+        <Compile Include="..\UniGetUI\Services\PackageLink.cs" Link="PackageLink.cs" />
     </ItemGroup>
 </Project>

@@ -53,7 +53,8 @@ namespace UniGetUI.Interface.Dialogs
         public PackageDetailsPage(
             IPackage package,
             OperationType role,
-            TEL_InstallReferral referral
+            TEL_InstallReferral referral,
+            string? requestedVersion = null
         )
         {
             if (role == OperationType.None)
@@ -119,6 +120,8 @@ namespace UniGetUI.Interface.Dialogs
             InstalledPackage = UpgradablePackage?.GetInstalledPackages().FirstOrDefault();
 
             var options = InstallOptionsFactory.LoadForPackage(package);
+            if (!string.IsNullOrWhiteSpace(requestedVersion))
+                options.Version = requestedVersion;
             InstallOptionsPage = new InstallOptionsPage(package, OperationRole, options);
             InstallOptionsPage.Close += (_, _) => Close?.Invoke(this, EventArgs.Empty);
             InstallOptionsPage.HideCloseButton();

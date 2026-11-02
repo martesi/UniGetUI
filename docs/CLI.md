@@ -240,11 +240,13 @@ UniGetUI also accepts the following `unigetui://` links:
 
 | Deep link | Meaning |
 | --- | --- |
-| `unigetui://showPackage?id={id}&managerName={manager}&sourceName={source}` | Opens package details for the specified package. |
+| `unigetui://package?id={id}&manager={manager}&source={source}&version={version}` | Finds the package and opens its details. Only `id` is required. |
 | `unigetui://showUniGetUI` | Shows UniGetUI and brings the window to the front. |
 | `unigetui://showDiscoverPage` | Opens the Discover page. |
 | `unigetui://showUpdatesPage` | Opens the Updates page. |
 | `unigetui://showInstalledPage` | Opens the Installed page. |
+
+Use **Copy link** in a package's context menu to share it. A link opens package details; it does not install the package. The optional `version` selects a version when the manager supports it. The recipient must have the package manager enabled and its source available.
 
 ## Installer parameters
 
