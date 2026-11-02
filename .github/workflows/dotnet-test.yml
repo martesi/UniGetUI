@@ -94,5 +94,5 @@ jobs:
       working-directory: src
       env:
         GITHUB_TOKEN: ${{ github.token }}
-      run: dotnet test UniGetUI.Windows.slnx --no-restore --verbosity q --nologo /p:Platform=x64
+      run: dotnet test UniGetUI.Windows.slnx --no-build --no-restore --verbosity q --nologo /p:Platform=x64
 
