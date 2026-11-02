@@ -246,6 +246,13 @@
                         SelectionChanged="VersionComboBox_SelectionChanged"
                       />
 
+                      <TextBox
+                        Name="VersionTextBox"
+                        Grid.Column="1"
+                        HorizontalAlignment="Stretch"
+                        Visibility="Collapsed"
+                      />
+
                       <ProgressBar
                         Name="VersionProgress"
                         Grid.Column="1"

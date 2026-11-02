@@ -100,3 +100,8 @@ The appended patches retain the individual upstream references.
 - Avalonia Software Catalog/editor, TUI, macOS presentation, sidebar reordering,
   upstream release-channel identity, and agent automation workflows remain outside
   Classic's WinUI maintenance boundary.
+
+### Late October additions
+
+- #5619: enter a Scoop version directly in WinUI. The existing Classic operation history does not have upstream's new version field.
+- #5623: import the Bun release-date correction. The optional package-list column requires a separate WinUI adaptation.

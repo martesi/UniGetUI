@@ -1,0 +1,1759 @@
+From 5bf46d54e424c9806c2e857f89eb5e23d7567082 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 20:37:21 +0800
+Subject: [PATCH] backport: update Classic package managers and shared fixes
+
+Add Scoop version installs and pinned updates, improve WinGet identifiers and display names, and fix NuGet version and scope selection. Stop operations when requested processes cannot close, correct Bun release dates, and support invariant-culture translations. Adapt Scoop version input for WinUI and repair the existing PowerShell scope test.
+
+Upstream-Commit: fa15c43901da08893577b5354fb04517697b870d
+Upstream-PR: Devolutions/UniGetUI#5601
+
+Upstream-Commit: b299859dd120db1fcc18f1ab72b20b87be7fb470
+Upstream-PR: Devolutions/UniGetUI#5600
+
+Upstream-Commit: fea4ca753e23da569b2c805d93daf052648891b5
+Upstream-PR: Devolutions/UniGetUI#5619
+
+Upstream-Commit: 8f9b1e906345769300a640972801843a602f3e21
+Upstream-PR: Devolutions/UniGetUI#5624
+
+Upstream-Commit: b45b2ba83efc7ee43372836e5d9984048a522ccc
+Upstream-PR: Devolutions/UniGetUI#5623
+
+Upstream-Commit: c6400a4d705c6a06917572b34ee4ad8da7582039
+Upstream-PR: Devolutions/UniGetUI#5626
+
+Upstream-Commit: 745822ba87ee475cbcb192c4aec30a58f6a4d7cd
+Upstream-PR: Devolutions/UniGetUI#5629
+
+Classic-Source-Commit: 2523d6b5b0ee7dca7fc076b2831b4a5ff73464bf
+---
+ .../LanguageEngineTests.cs                    |  21 ++
+ .../UniGetUI.Core.LanguageEngine.Tests.csproj |   1 +
+ .../LanguageEngine.cs                         |  24 +-
+ .../ManagerCapabilities.cs                    |   2 +
+ .../Helpers/BunPkgDetailsHelper.cs            |  11 +-
+ .../BaseNuGet.cs                              |  89 ++++---
+ .../Helpers/ScoopPkgDetailsHelper.cs          |  18 +-
+ .../Helpers/ScoopPkgOperationHelper.cs        |  12 +-
+ .../Scoop.cs                                  | 150 +++++++++++-
+ .../ClientHelpers/PingetCliHelper.cs          | 121 ++++++++-
+ .../Helpers/WinGetPkgOperationHelper.cs       |  14 ++
+ ...GetUI.PackageEngine.Managers.WinGet.csproj |   1 +
+ .../KillProcessOperation.cs                   |  80 +++---
+ .../PackageOperations.cs                      |   6 +-
+ .../Manager/Helpers/BasePkgDetailsHelper.cs   |   3 +
+ .../BunManagerTests.cs                        |  31 +++
+ .../KillProcessOperationTests.cs              | 117 +++++++++
+ .../PackageOperationsTests.cs                 |  33 ++-
+ .../PowerShell7ManagerTests.cs                |  24 ++
+ .../ScoopManagerTests.cs                      | 181 ++++++++++++++
+ .../WinGetManagerTests.cs                     | 231 ++++++++++++++++++
+ .../DialogPages/InstallOptions_Package.xaml   |   7 +
+ .../InstallOptions_Package.xaml.cs            |  23 +-
+ 23 files changed, 1098 insertions(+), 102 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/KillProcessOperationTests.cs
+
+diff --git a/src/UniGetUI.Core.Language.Tests/LanguageEngineTests.cs b/src/UniGetUI.Core.Language.Tests/LanguageEngineTests.cs
+index 0968fce..43279b8 100644
+--- a/src/UniGetUI.Core.Language.Tests/LanguageEngineTests.cs
++++ b/src/UniGetUI.Core.Language.Tests/LanguageEngineTests.cs
+@@ -1,3 +1,4 @@
++using System.Globalization;
+ using UniGetUI.Core.Data;
+ using UniGetUI.PackageEngine.Enums;
+ 
+@@ -71,6 +72,26 @@ namespace UniGetUI.Core.Language.Tests
+             Assert.Equal("uk", engine.Locale);
+         }
+ 
++        [Theory]
++        [InlineData("en")]
++        [InlineData("es")]
++        [InlineData("uk")]
++        public void TestTranslatingWithParametersInInvariantGlobalizationMode(string language)
++        {
++            Assert.Equal(CultureInfo.InvariantCulture, CultureInfo.CurrentCulture);
++
++            LanguageEngine engine = new();
++            engine.LoadLanguage(language);
++
++            Assert.Equal(
++                "3 packages were found, 1234.5 MB",
++                engine.Translate(
++                    "{count} packages were found, {size} MB",
++                    new Dictionary<string, object?> { { "count", 3 }, { "size", 1234.5 } }
++                )
++            );
++        }
++
+         [Fact]
+         public void TestLoadingLanguageIgnoresCachedOverrides()
+         {
+diff --git a/src/UniGetUI.Core.Language.Tests/UniGetUI.Core.LanguageEngine.Tests.csproj b/src/UniGetUI.Core.Language.Tests/UniGetUI.Core.LanguageEngine.Tests.csproj
+index 8682af7..1d834f6 100644
+--- a/src/UniGetUI.Core.Language.Tests/UniGetUI.Core.LanguageEngine.Tests.csproj
++++ b/src/UniGetUI.Core.Language.Tests/UniGetUI.Core.LanguageEngine.Tests.csproj
+@@ -4,6 +4,7 @@
+         <TargetFrameworks />
+         <IsPackable>false</IsPackable>
+         <IsTestProject>true</IsTestProject>
++        <InvariantGlobalization>true</InvariantGlobalization>
+     </PropertyGroup>
+ 
+     <ItemGroup>
+diff --git a/src/UniGetUI.Core.LanguageEngine/LanguageEngine.cs b/src/UniGetUI.Core.LanguageEngine/LanguageEngine.cs
+index 7ba8bff..65d974f 100644
+--- a/src/UniGetUI.Core.LanguageEngine/LanguageEngine.cs
++++ b/src/UniGetUI.Core.LanguageEngine/LanguageEngine.cs
+@@ -54,7 +54,7 @@ namespace UniGetUI.Core.Language
+                 Locale = ResolveLocale(lang);
+ 
+                 MainLangDict = LoadLanguageFile(Locale);
+-                Formatter = new() { Locale = Locale.Replace('_', '-') };
++                Formatter = CreateFormatter(Locale);
+ 
+                 SelectedLocale = Locale;
+                 Logger.Info("Loaded language locale: " + Locale);
+@@ -67,11 +67,29 @@ namespace UniGetUI.Core.Language
+                 // Keep the app functional even if locale resolution fails.
+                 Locale = "en";
+                 MainLangDict = LoadLanguageFile(Locale);
+-                Formatter = new() { Locale = "en" };
++                Formatter = CreateFormatter(Locale);
+                 SelectedLocale = Locale;
+             }
+         }
+ 
++        private static MessageFormatter CreateFormatter(string locale)
++        {
++            string formatterLocale = locale.Replace('_', '-');
++            try
++            {
++                CultureInfo.GetCultureInfo(formatterLocale);
++            }
++            catch (CultureNotFoundException)
++            {
++                Logger.Warn(
++                    $"Culture \"{formatterLocale}\" is not available, formatting translated strings with the invariant culture"
++                );
++                formatterLocale = CultureInfo.InvariantCulture.Name;
++            }
++
++            return new() { Locale = formatterLocale };
++        }
++
+         private static string ResolveLocale(string lang)
+         {
+             foreach (string candidate in GetLocaleCandidates(lang))
+@@ -274,7 +292,7 @@ namespace UniGetUI.Core.Language
+ 
+         public string Translate(string key, Dictionary<string, object?> dict)
+         {
+-            Formatter ??= new() { Locale = (Locale ?? "en").Replace('_', '-') };
++            Formatter ??= CreateFormatter(Locale ?? "en");
+             return Formatter.FormatMessage(Translate(key), dict);
+         }
+     }
+diff --git a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+index c1b8554..90a3315 100644
+--- a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
++++ b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+@@ -34,6 +34,8 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+         public bool CanUninstallPreviousVersionsAfterUpdate = false;
+         public bool CanListDependencies = false;
+         public bool SupportsCustomVersions = false;
++        public bool CanListVersions = true;
++        public bool SupportsCustomVersionsOnUpdate = true;
+         public bool SupportsCustomArchitectures = false;
+         public string[] SupportedCustomArchitectures = [];
+         public bool SupportsCustomScopes = false;
+diff --git a/src/UniGetUI.PackageEngine.Managers.Bun/Helpers/BunPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Bun/Helpers/BunPkgDetailsHelper.cs
+index a5ad497..59a9e1a 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Bun/Helpers/BunPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Bun/Helpers/BunPkgDetailsHelper.cs
+@@ -14,6 +14,15 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
+     {
+         public BunPkgDetailsHelper(Bun manager) : base(manager) { }
+ 
++        // With BunPreferLatestVersions off, an update can offer an older line than "latest", so date the offered version
++        internal static string? GetReleaseDate(JsonObject? contents, IPackage package)
++        {
++            string datedVersion = package.IsUpgradable
++                ? package.NewVersionString
++                : contents?["dist-tags"]?["latest"]?.ToString() ?? package.VersionString;
++            return contents?["time"]?[datedVersion]?.ToString();
++        }
++
+         protected override void GetDetails_UnSafe(IPackageDetails details)
+         {
+             try
+@@ -58,7 +67,7 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
+                 // Handle author which can be string or object with "name" property
+                 var authorNode = contents?["author"];
+                 details.Author = authorNode is JsonObject authorObj ? authorObj["name"]?.ToString() : authorNode?.ToString();
+-                details.UpdateDate = contents?["time"]?[contents?["dist-tags"]?["latest"]?.ToString() ?? details.Package.VersionString]?.ToString();
++                details.UpdateDate = GetReleaseDate(contents, details.Package);
+ 
+                 if (Uri.TryCreate(contents?["dist"]?["tarball"]?.ToString() ?? "", UriKind.RelativeOrAbsolute, out var installerUrl))
+                     details.InstallerUrl = installerUrl;
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+index c34a9bf..10d5dfa 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+@@ -330,15 +330,15 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+                 entries.Add(candidate);
+             }
+ 
+-            var installed = new Dictionary<string, (string Id, string Version)>();
+-            foreach (IPackage package in installedPackages)
+-                installed[package.Id.ToLower()] = (package.Id, package.VersionString);
+-
+-            var scopeMap = BuildInstalledScopeMap(installedPackages);
++            var newestInstalled = SelectNewestInstalled(installedPackages);
++            var scopeMap = BuildInstalledScopeMap(newestInstalled.Values);
+             List<Package> packages = [];
+ 
+-            foreach ((string id, string installedVersion) in installed.Values)
++            foreach (IPackage installedPackage in newestInstalled.Values)
+             {
++                string id = installedPackage.Id;
++                string installedVersion = installedPackage.VersionString;
++
+                 if (!availableById.TryGetValue(id, out List<LocalNuGetPackage>? entries))
+                     continue;
+ 
+@@ -495,10 +495,12 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+                         continue;
+                     }
+ 
+-                    var packageIdVersion = new Dictionary<string, string>();
+-                    foreach (var package in pair.Value)
+-                        packageIdVersion[package.Id.ToLower()] = package.VersionString;
+-                    var packageIdScope = BuildInstalledScopeMap(pair.Value);
++                    var newestInstalled = SelectNewestInstalled(pair.Value);
++                    var packageIdVersion = newestInstalled.ToDictionary(
++                        entry => entry.Key,
++                        entry => entry.Value.VersionString
++                    );
++                    var packageIdScope = BuildInstalledScopeMap(newestInstalled.Values);
+ 
+                     using HttpClient client = new(CoreTools.GenericHttpClientParameters);
+                     client.DefaultRequestHeaders.UserAgent.ParseAdd(CoreData.UserAgentString);
+@@ -660,11 +662,13 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+                 return null;
+             }
+ 
+-            var installed = new Dictionary<string, (string Id, string Version)>();
+-            foreach (var package in installedPackages)
+-                installed[package.Id.ToLower()] = (package.Id, package.VersionString);
++            var newestInstalled = SelectNewestInstalled(installedPackages);
++            var installed = newestInstalled.ToDictionary(
++                entry => entry.Key,
++                entry => (entry.Value.Id, Version: entry.Value.VersionString)
++            );
+ 
+-            var scopeMap = BuildInstalledScopeMap(installedPackages);
++            var scopeMap = BuildInstalledScopeMap(newestInstalled.Values);
+             var candidates = new ConcurrentDictionary<string, string>();
+             var failures = new ConcurrentDictionary<string, Exception?>();
+ 
+@@ -744,26 +748,15 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             IReadOnlyList<IPackage> installedPackages
+         )
+         {
+-            var highestInstalledById = new Dictionary<string, string>();
+-            foreach (var package in installedPackages)
+-            {
+-                string key = package.Id.ToLower();
+-                if (
+-                    !highestInstalledById.TryGetValue(key, out string? highest)
+-                    || CompareVersions(package.VersionString, highest) > 0
+-                )
+-                {
+-                    highestInstalledById[key] = package.VersionString;
+-                }
+-            }
++            var newestInstalled = SelectNewestInstalled(installedPackages);
+ 
+             List<Package> kept = [];
+             foreach (var candidate in candidates)
+             {
+                 if (
+-                    !highestInstalledById.TryGetValue(
++                    !newestInstalled.TryGetValue(
+                         candidate.Id.ToLower(),
+-                        out string? highestInstalled
++                        out IPackage? newestPackage
+                     )
+                 )
+                 {
+@@ -771,6 +764,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+                     continue;
+                 }
+ 
++                string highestInstalled = newestPackage.VersionString;
+                 bool isNewer =
+                     CompareVersions(highestInstalled, candidate.NewVersionString)
+                     is { } comparison
+@@ -785,14 +779,41 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             return kept;
+         }
+ 
++        /// <summary>
++        /// Picks, for each installed package id (lowercased), the copy its update applies to:
++        /// the highest installed version, the last one enumerated on a tie. Update-PSResource
++        /// installs a new version side by side with the old ones, and Get-InstalledPSResource
++        /// lists them sorted as strings (1.9.0, 1.12.6, 1.10.1), so taking whichever copy came
++        /// last reported a stale installed version that never moved after an update.
++        /// </summary>
++        internal Dictionary<string, IPackage> SelectNewestInstalled(
++            IEnumerable<IPackage> installedPackages
++        )
++        {
++            var newest = new Dictionary<string, IPackage>();
++            foreach (var package in installedPackages)
++            {
++                string key = package.Id.ToLower();
++                if (
++                    !newest.TryGetValue(key, out IPackage? current)
++                    || !IsOlderVersion(package.VersionString, current.VersionString)
++                )
++                {
++                    newest[key] = package;
++                }
++            }
++
++            return newest;
++        }
++
+         /// <summary>
+         /// Maps each installed package id (lowercased) to the scope its update should target.
+-        /// Mirrors the last-wins keying of the version map so the scope and the installed
+-        /// version always come from the same enumerated package (issue #5163). A module
+-        /// installed in a single scope updates in that scope; a module installed in both
+-        /// resolves to whichever scope is enumerated last (as its version does) — surfacing
+-        /// an independent update per scope would require scope-aware package identity, which
+-        /// the upgrade loader does not currently support.
++        /// Callers pass the copies chosen by <see cref="SelectNewestInstalled"/>, so the scope
++        /// and the installed version always come from the same enumerated package (issue
++        /// #5163). A module installed in a single scope updates in that scope; a module
++        /// installed in both resolves to the scope holding its newest version — surfacing an
++        /// independent update per scope would require scope-aware package identity, which the
++        /// upgrade loader does not currently support.
+         /// </summary>
+         internal static Dictionary<string, string?> BuildInstalledScopeMap(
+             IEnumerable<IPackage> installedPackages
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgDetailsHelper.cs
+index cc457c4..9eb7cdc 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgDetailsHelper.cs
+@@ -41,18 +41,7 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                 }
+             }
+ 
+-            string packageId;
+-            // If source is ellipsed, a local path, or a URL manifest, omit source argument
+-            if (
+-                details.Package.Source.Name.Contains("...")
+-                || details.Package.Source.Name.Contains(":\\")
+-                || details.Package.Source.Name.StartsWith("http")
+-            )
+-                packageId = Scoop.RequireSafePackageSpec(details.Package.Id);
+-            else
+-                packageId = Scoop.RequireSafePackageSpec(
+-                    $"{details.Package.Source.Name}/{details.Package.Id}"
+-                );
++            string packageId = Scoop.GetPackageSpec(details.Package);
+ 
+             var startInfo = new ProcessStartInfo
+             {
+@@ -303,9 +292,6 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+             );
+         }
+ 
+-        protected override IReadOnlyList<string> GetInstallableVersions_UnSafe(IPackage package)
+-        {
+-            throw new InvalidOperationException("Scoop does not support custom package versions");
+-        }
++        protected override IReadOnlyList<string> GetInstallableVersions_UnSafe(IPackage package) => [];
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgOperationHelper.cs
+index c7ea986..55f1f3d 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopPkgOperationHelper.cs
+@@ -29,11 +29,13 @@ internal sealed class ScoopPkgOperationHelper : BasePkgOperationHelper
+             },
+         ];
+ 
+-        // If source is ellipsed, a local path, or a URL manifest, omit source argument
+-        if (package.Source.Name.Contains("...") || package.Source.Name.Contains(":\\") || package.Source.Name.StartsWith("http"))
+-            parameters.Add(Scoop.RequireSafePackageSpec(package.Id));
+-        else
+-            parameters.Add(Scoop.RequireSafePackageSpec($"{package.Source.Name}/{package.Id}"));
++        string spec = Scoop.GetPackageSpec(package);
++        if (operation is OperationType.Install && options.Version.Length > 0)
++            spec = Scoop.RequireSafePackageSpec($"{spec}@{options.Version}");
++        parameters.Add(spec);
++
++        if (operation is OperationType.Update && ((Scoop)Manager).IsPinnedInstall(package))
++            parameters.Add("--force");
+ 
+         if (
+             package.OverridenOptions.Scope == PackageScope.Global
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+index d83b550..69d1964 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+@@ -1,4 +1,6 @@
+ using System.Diagnostics;
++using System.Text.Json.Nodes;
++using System.Text.RegularExpressions;
+ using UniGetUI.Core.Classes;
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.Logging;
+@@ -18,10 +20,49 @@ using Architecture = UniGetUI.PackageEngine.Enums.Architecture;
+ 
+ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+ {
+-    public class Scoop : PackageManager
++    public partial class Scoop : PackageManager
+     {
+         public override bool CommandLineIsShellInterpreted => true;
+ 
++        internal const string GeneratedManifestSource = "<auto-generated>";
++
++        private static readonly Version PinnedUpdatesMinimumVersion = new(0, 6, 0);
++
++        [GeneratedRegex(@"\bv(\d+\.\d+\.\d+)\b")]
++        private static partial Regex ScoopReleaseVersionRegex();
++
++        internal Func<string, (string Bucket, string Version)?> FindBucketManifest;
++
++        private IReadOnlyDictionary<string, string> _pinnedInstalls = new Dictionary<string, string>();
++
++        internal static string GetPackageSpec(IPackage package)
++        {
++            string sourceName = package.Source.Name;
++            if (
++                sourceName.Contains("...")
++                || sourceName.Contains(":\\")
++                || sourceName.StartsWith("http")
++                || sourceName == GeneratedManifestSource
++            )
++                return RequireSafePackageSpec(package.Id);
++
++            return RequireSafePackageSpec($"{sourceName}/{package.Id}");
++        }
++
++        internal static bool UpdatesPinnedInstalls(string scoopVersion)
++        {
++            Match match = ScoopReleaseVersionRegex().Match(scoopVersion);
++            return match.Success
++                && Version.TryParse(match.Groups[1].Value, out Version? version)
++                && version >= PinnedUpdatesMinimumVersion;
++        }
++
++        internal bool IsPinnedInstall(IPackage package) =>
++            _pinnedInstalls.ContainsKey(PinnedInstallKey(package.Id, package.OverridenOptions.Scope));
++
++        private static string PinnedInstallKey(string id, string? scope) =>
++            (scope == PackageScope.Global ? "global/" : "user/") + id;
++
+         /// <summary>
+         /// Scoop is addressed as "bucket/app", so the source name becomes part of the specifier
+         /// that reaches the command line. The base helpers validate the package identifier; the
+@@ -95,6 +136,9 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                 ],
+                 SupportsCustomScopes = true,
+                 SupportsCustomSources = true,
++                SupportsCustomVersions = true,
++                CanListVersions = false,
++                SupportsCustomVersionsOnUpdate = false,
+                 Sources = new SourceCapabilities
+                 {
+                     KnowsPackageCount = true,
+@@ -181,6 +225,62 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+             SourcesHelper = new ScoopSourceHelper(this);
+             DetailsHelper = new ScoopPkgDetailsHelper(this);
+             OperationHelper = new ScoopPkgOperationHelper(this);
++            FindBucketManifest = FindBucketManifestOnDisk;
++        }
++
++        private (string Bucket, string Version)? FindBucketManifestOnDisk(string id)
++        {
++            if (!CoreTools.IsValidPackageIdentifier(id) || id.Contains('/'))
++                return null;
++
++            string?[] roots =
++            [
++                Environment.GetEnvironmentVariable("SCOOP"),
++                Path.Join(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop"),
++            ];
++            string? bucketsDir = roots
++                .Where(root => !string.IsNullOrEmpty(root))
++                .Select(root => Path.Join(root, "buckets"))
++                .FirstOrDefault(Directory.Exists);
++            if (bucketsDir is null)
++                return null;
++
++            List<string> buckets = Directory
++                .GetDirectories(bucketsDir)
++                .Select(Path.GetFileName)
++                .OfType<string>()
++                .Order(StringComparer.OrdinalIgnoreCase)
++                .ToList();
++            List<string> known = Properties.KnownSources
++                .Select(source => source.Name)
++                .Where(name => buckets.Contains(name, StringComparer.OrdinalIgnoreCase))
++                .ToList();
++            IEnumerable<string> ordered = known.Concat(
++                buckets.Where(name => !known.Contains(name, StringComparer.OrdinalIgnoreCase))
++            );
++
++            foreach (string bucket in ordered)
++            {
++                string bucketDir = Path.Join(bucketsDir, bucket);
++                string manifestDir = Directory.Exists(Path.Join(bucketDir, "bucket"))
++                    ? Path.Join(bucketDir, "bucket")
++                    : bucketDir;
++                string manifestPath = Path.Join(manifestDir, id + ".json");
++                if (!File.Exists(manifestPath))
++                    continue;
++
++                try
++                {
++                    if (JsonNode.Parse(File.ReadAllText(manifestPath))?["version"]?.ToString() is { Length: > 0 } version)
++                        return (bucket, version);
++                }
++                catch (Exception ex)
++                {
++                    Logger.Warn($"Could not read the Scoop manifest {manifestPath}: {ex.Message}");
++                }
++            }
++
++            return null;
+         }
+ 
+         internal IReadOnlyList<Package> ParseSearchOutput(IEnumerable<string> lines)
+@@ -237,7 +337,8 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+ 
+         internal IReadOnlyList<Package> ParseAvailableUpdates(
+             IEnumerable<string> lines,
+-            IEnumerable<IPackage> installedPackages
++            IReadOnlyList<IPackage> installedPackages,
++            bool includePinnedInstalls = false
+         )
+         {
+             Dictionary<string, IPackage> installedPackageMap = [];
+@@ -307,12 +408,44 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                 }
+             }
+ 
++            if (!includePinnedInstalls)
++                return packages;
++
++            foreach (IPackage installedPackage in installedPackages)
++            {
++                if (
++                    !_pinnedInstalls.TryGetValue(
++                        PinnedInstallKey(installedPackage.Id, installedPackage.OverridenOptions.Scope),
++                        out string? headVersion
++                    )
++                    || CompareVersions(headVersion, installedPackage.VersionString) is not > 0
++                    || packages.Any(package =>
++                        package.Id == installedPackage.Id
++                        && package.OverridenOptions.Scope == installedPackage.OverridenOptions.Scope
++                    )
++                )
++                    continue;
++
++                packages.Add(
++                    new Package(
++                        CoreTools.FormatAsName(installedPackage.Id),
++                        installedPackage.Id,
++                        installedPackage.VersionString,
++                        headVersion,
++                        installedPackage.Source,
++                        this,
++                        new OverridenInstallationOptions(installedPackage.OverridenOptions.Scope)
++                    )
++                );
++            }
++
+             return packages;
+         }
+ 
+         internal IReadOnlyList<Package> ParseInstalledPackages(IEnumerable<string> lines)
+         {
+             List<Package> packages = [];
++            Dictionary<string, string> pinnedInstalls = [];
+             IReadOnlyList<int>? columns = null;
+             foreach (string rawLine in lines)
+             {
+@@ -348,6 +481,12 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                     info.Contains("Global install") ? PackageScope.Global : PackageScope.User
+                 );
+ 
++                if (source == GeneratedManifestSource && FindBucketManifest(id) is { } bucketManifest)
++                {
++                    source = bucketManifest.Bucket;
++                    pinnedInstalls[PinnedInstallKey(id, options.Scope)] = bucketManifest.Version;
++                }
++
+                 packages.Add(
+                     new Package(
+                         CoreTools.FormatAsName(id),
+@@ -362,6 +501,7 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                 );
+             }
+ 
++            _pinnedInstalls = pinnedInstalls;
+             return packages;
+         }
+ 
+@@ -436,7 +576,11 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+             p.Start();
+             RegisterListingProcess(p);
+ 
+-            return ParseAvailableUpdates(ScoopProcess.ReadLines(p, logger), installedPackages);
++            return ParseAvailableUpdates(
++                ScoopProcess.ReadLines(p, logger),
++                installedPackages,
++                UpdatesPinnedInstalls(Status.Version)
++            );
+         }
+ 
+         protected override IReadOnlyList<Package> GetInstalledPackages_UnSafe() =>
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+index 51dcc29..82eae60 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+@@ -1,4 +1,6 @@
++using System.Collections.Concurrent;
+ using System.Diagnostics;
++using System.Runtime.InteropServices;
+ using System.Text;
+ using System.Text.Json;
+ using System.Text.Json.Serialization;
+@@ -21,6 +23,10 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+     };
+     private static readonly PingetCliJsonContext SerializationContext = new(SerializationOptions);
+ 
++    private const string MsResourcePrefix = "ms-resource:";
++    private const string MsixIdPrefix = "MSIX\\";
++    private static readonly ConcurrentDictionary<(string Identity, string Name), string> ResolvedDisplayNames = new();
++
+     private readonly WinGet Manager;
+     private readonly string _cliExecutablePath;
+     private readonly IPingetPackageDetailsProvider _packageDetailsProvider;
+@@ -57,7 +63,7 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+             // Restore the version we last upgraded to when WinGet reports it as unknown (#5158).
+             bool versionUnknown = WinGetPkgOperationHelper.IsUnknownVersion(match.InstalledVersion);
+             var package = new Package(
+-                match.Name,
++                ResolveDisplayName(match),
+                 match.Id,
+                 versionUnknown
+                     ? WinGetPkgOperationHelper.GetLastInstalledVersion(match.Id)
+@@ -93,10 +99,15 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+             "list --output json"
+         );
+ 
++        return BuildInstalledPackages(result);
++    }
++
++    internal IReadOnlyList<Package> BuildInstalledPackages(ListResponse result)
++    {
+         return result
+             .Matches.Select(match =>
+                 new Package(
+-                    match.Name,
++                    ResolveDisplayName(match),
+                     match.Id,
+                     WinGetPkgOperationHelper.ResolveReportedInstalledVersion(match.Id, match.InstalledVersion),
+                     GetSource(match),
+@@ -296,6 +307,112 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+         return null;
+     }
+ 
++    internal static string ResolveDisplayName(ListMatch match) =>
++        ResolveDisplayName(match, LoadIndirectString, ResolvedDisplayNames);
++
++    internal static string ResolveDisplayName(
++        ListMatch match,
++        Func<string, string?> loadIndirectString,
++        ConcurrentDictionary<(string Identity, string Name), string> cache
++    )
++    {
++        if (!match.Name.StartsWith(MsResourcePrefix, StringComparison.OrdinalIgnoreCase))
++        {
++            return match.Name;
++        }
++
++        string? packageFullName = GetMsixPackageFullName(match.LocalId) ?? GetMsixPackageFullName(match.Id);
++        if (packageFullName is null)
++        {
++            return cache.GetOrAdd((match.Id, match.Name), static key => GetNonMsixFallbackName(key.Identity, key.Name));
++        }
++
++        return cache.GetOrAdd(
++            (packageFullName, match.Name),
++            static (key, loader) => ResolveMsixDisplayName(key.Identity, key.Name, loader),
++            loadIndirectString
++        );
++    }
++
++    private static string ResolveMsixDisplayName(
++        string packageFullName,
++        string name,
++        Func<string, string?> loadIndirectString
++    )
++    {
++        string packageName = packageFullName.Split('_')[0];
++        foreach (string reference in GetResourceReferences(name, packageName))
++        {
++            string? resolved = loadIndirectString($"@{{{packageFullName}?{reference}}}");
++            if (!string.IsNullOrWhiteSpace(resolved))
++            {
++                return resolved;
++            }
++        }
++
++        Logger.Warn(
++            $"Could not resolve the display name {name} of the MSIX package {packageFullName}; showing {packageName} instead"
++        );
++        return packageName;
++    }
++
++    private static string GetNonMsixFallbackName(string id, string name)
++    {
++        if (id.Contains('\\'))
++        {
++            Logger.Warn($"Could not resolve the display name {name} of {id}, which is not an MSIX package");
++            return name;
++        }
++
++        Logger.Warn($"Could not resolve the display name {name} of {id}, which is not an MSIX package; showing its id instead");
++        return id;
++    }
++
++    private static string? GetMsixPackageFullName(string? id)
++    {
++        if (id is null || !id.StartsWith(MsixIdPrefix, StringComparison.OrdinalIgnoreCase))
++        {
++            return null;
++        }
++
++        string packageFullName = id[MsixIdPrefix.Length..];
++        return packageFullName.Contains('_') ? packageFullName : null;
++    }
++
++    private static IEnumerable<string> GetResourceReferences(string name, string packageName)
++    {
++        string reference = name[MsResourcePrefix.Length..];
++        if (reference.StartsWith("//", StringComparison.Ordinal))
++        {
++            yield return name;
++        }
++        else if (reference.StartsWith('/'))
++        {
++            yield return $"{MsResourcePrefix}//{packageName}{reference}";
++        }
++        else
++        {
++            yield return $"{MsResourcePrefix}//{packageName}/Resources/{reference}";
++            yield return $"{MsResourcePrefix}//{packageName}/{reference}";
++        }
++    }
++
++    private static string? LoadIndirectString(string source)
++    {
++        Span<char> buffer = stackalloc char[1024];
++        int result = SHLoadIndirectString(source, ref buffer[0], (uint)buffer.Length, 0);
++        if (result != 0)
++        {
++            return null;
++        }
++
++        int end = buffer.IndexOf('\0');
++        return end > 0 ? new string(buffer[..end]) : null;
++    }
++
++    [LibraryImport("shlwapi.dll", EntryPoint = "SHLoadIndirectString", StringMarshalling = StringMarshalling.Utf16)]
++    private static partial int SHLoadIndirectString(string source, ref char output, uint outputLength, nint reserved);
++
+     private IManagerSource GetSource(ListMatch match)
+     {
+         return GetSource(InferSourceName(match), match.Id);
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 0ed75f4..09f4b62 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -468,6 +468,20 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             return OperationVeredict.AutoRetry;
+         }
+ 
++        if (
++            uintCode is 0x8A150014
++            && operation is OperationType.Update or OperationType.Uninstall
++            && package.OverridenOptions.WinGet_UseLocalIdentifier
++        )
++        {
++            Logger.Warn(
++                $"WinGet found no installed package matching the local identifier of {package.Id} either; "
++                + "the next attempt will select the package by its catalog identifier again"
++            );
++            package.OverridenOptions.WinGet_UseLocalIdentifier = false;
++            return OperationVeredict.Failure;
++        }
++
+         if (
+             uintCode is 0x8A150014
+             && operation is OperationType.Update or OperationType.Uninstall
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj b/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
+index 0b662f3..d068fb9 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj
+@@ -2,6 +2,7 @@
+     <PropertyGroup>
+         <TargetFramework>$(WindowsTargetFramework)</TargetFramework>
+         <TargetFrameworks />
++        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+     </PropertyGroup>
+ 
+     <ItemGroup>
+diff --git a/src/UniGetUI.PackageEngine.Operations/KillProcessOperation.cs b/src/UniGetUI.PackageEngine.Operations/KillProcessOperation.cs
+index f179d86..5cc66a6 100644
+--- a/src/UniGetUI.PackageEngine.Operations/KillProcessOperation.cs
++++ b/src/UniGetUI.PackageEngine.Operations/KillProcessOperation.cs
+@@ -8,18 +8,20 @@ namespace UniGetUI.PackageOperations;
+ public class KillProcessOperation : AbstractOperation
+ {
+     private readonly string ProcessName;
++    private readonly bool ForceKill;
+ 
+-    public KillProcessOperation(string procName)
++    public KillProcessOperation(string procName, bool forceKill = false)
+         : base(false)
+     {
+         ProcessName = CoreTools.MakeValidFileName(procName);
+-        Metadata.Status = $"Closing process(es) {procName}";
+-        Metadata.Title = $"Closing process(es) {procName}";
++        ForceKill = forceKill;
++        Metadata.Status = CoreTools.Translate("Closing process(es) {0}", procName);
++        Metadata.Title = CoreTools.Translate("Closing process(es) {0}", procName);
+         Metadata.OperationInformation = " ";
+-        Metadata.SuccessTitle = $"Done!";
+-        Metadata.SuccessMessage = $"Done!";
+-        Metadata.FailureTitle = $"Failed to close process";
+-        Metadata.FailureMessage = $"The process(es) {procName} could not be closed";
++        Metadata.SuccessTitle = CoreTools.Translate("Done!");
++        Metadata.SuccessMessage = CoreTools.Translate("Done!");
++        Metadata.FailureTitle = CoreTools.Translate("Failed to close process");
++        Metadata.FailureMessage = CoreTools.Translate("The process(es) {0} could not be closed", procName);
+     }
+ 
+     protected override void ApplyRetryAction(string retryMode) { }
+@@ -32,38 +34,52 @@ public class KillProcessOperation : AbstractOperation
+                 $"Attempting to close all processes with name {ProcessName}...",
+                 LineType.Information
+             );
+-            var procs = Process.GetProcessesByName(ProcessName.Replace(".exe", ""));
+-            foreach (var proc in procs)
++            bool processSurvived = false;
++            foreach (var proc in Process.GetProcessesByName(ProcessName.Replace(".exe", "")))
+             {
+-                if (proc.HasExited)
+-                    continue;
+-                Line(
+-                    $"Attempting to close process {ProcessName} with pid={proc.Id}...",
+-                    LineType.VerboseDetails
+-                );
+-                proc.CloseMainWindow();
+-                await Task.WhenAny(proc.WaitForExitAsync(), Task.Delay(1000));
+-                if (!proc.HasExited)
++                using (proc)
+                 {
+-                    if (Settings.Get(Settings.K.KillProcessesThatRefuseToDie))
++                    CancellationToken.ThrowIfCancellationRequested();
++                    if (proc.HasExited)
++                        continue;
++                    Line(
++                        $"Attempting to close process {ProcessName} with pid={proc.Id}...",
++                        LineType.VerboseDetails
++                    );
++                    proc.CloseMainWindow();
++                    await Task.WhenAny(
++                        proc.WaitForExitAsync(CancellationToken),
++                        Task.Delay(1000, CancellationToken)
++                    );
++                    CancellationToken.ThrowIfCancellationRequested();
++                    if (!proc.HasExited)
+                     {
+-                        Line(
+-                            $"Timeout for process {ProcessName}, attempting to kill...",
+-                            LineType.Information
+-                        );
+-                        proc.Kill();
+-                    }
+-                    else
+-                    {
+-                        Line(
+-                            $"{ProcessName} with pid={proc.Id} did not exit and will not be killed. You can change this from UniGetUI settings.",
+-                            LineType.Error
+-                        );
++                        if (ForceKill || Settings.Get(Settings.K.KillProcessesThatRefuseToDie))
++                        {
++                            Line(
++                                $"Timeout for process {ProcessName}, attempting to kill...",
++                                LineType.Information
++                            );
++                            proc.Kill(entireProcessTree: true);
++                            await proc.WaitForExitAsync(CancellationToken);
++                        }
++                        else
++                        {
++                            Line(
++                                $"{ProcessName} with pid={proc.Id} did not exit and will not be killed. You can change this from UniGetUI settings.",
++                                LineType.Error
++                            );
++                            processSurvived = true;
++                        }
+                     }
+                 }
+             }
+ 
+-            return OperationVeredict.Success;
++            return processSurvived ? OperationVeredict.Failure : OperationVeredict.Success;
++        }
++        catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
++        {
++            return OperationVeredict.Canceled;
+         }
+         catch (Exception ex)
+         {
+diff --git a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+index 04f4577..03ec0eb 100644
+--- a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
++++ b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+@@ -372,7 +372,7 @@ namespace UniGetUI.PackageEngine.Operations
+                 l.Add(new(preReq, true));
+ 
+             foreach (var process in opts.KillBeforeOperation)
+-                l.Add(new InnerOperation(new KillProcessOperation(process), mustSucceed: false));
++                l.Add(new InnerOperation(new KillProcessOperation(process), mustSucceed: true));
+ 
+             if (role is OperationType.Install && opts.PreInstallCommand.Any())
+                 l.Add(
+@@ -550,7 +550,9 @@ namespace UniGetUI.PackageEngine.Operations
+             UpgradablePackagesLoader.Instance.Remove(Package);
+             InstalledPackagesLoader.Instance.Remove(Package);
+ 
+-            bool explicitVersionRequested = !string.IsNullOrWhiteSpace(Options.Version);
++            bool explicitVersionRequested =
++                !string.IsNullOrWhiteSpace(Options.Version)
++                && Package.Manager.Capabilities.SupportsCustomVersionsOnUpdate;
+             var installedPackage = await ResolveInstalledPackageSnapshotAsync(
+                 explicitVersionRequested
+                     ? Options.Version
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Helpers/BasePkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Helpers/BasePkgDetailsHelper.cs
+index 96c5de0..ed1b6d1 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Helpers/BasePkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Helpers/BasePkgDetailsHelper.cs
+@@ -67,6 +67,9 @@ namespace UniGetUI.PackageEngine.Classes.Manager.BaseProviders
+             try
+             {
+                 RequireShellSafeId(package);
++                if (Manager.Capabilities.SupportsCustomVersions && !Manager.Capabilities.CanListVersions)
++                    return [];
++
+                 if (Manager.Capabilities.SupportsCustomVersions)
+                 {
+                     var result = GetInstallableVersions_UnSafe(package);
+diff --git a/src/UniGetUI.PackageEngine.Tests/BunManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/BunManagerTests.cs
+index 5592c5a..befebc0 100644
+--- a/src/UniGetUI.PackageEngine.Tests/BunManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/BunManagerTests.cs
+@@ -1,3 +1,4 @@
++using System.Text.Json.Nodes;
+ using UniGetUI.Interface.Enums;
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.ManagerClasses.Manager;
+@@ -405,6 +406,36 @@ public sealed class BunManagerTests
+         Assert.Contains("typescript@5.4.0", parameters);
+     }
+ 
++    /// <summary>
++    /// Tests that the release date is the offered version's for updates, which can be older than "latest",
++    /// and the latest version's otherwise.
++    /// </summary>
++    [Fact]
++    public void ReleaseDateUsesTheOfferedVersionForUpdates()
++    {
++        var manager = new Bun();
++        var contents = JsonNode.Parse("""
++            {
++              "dist-tags": { "latest": "6.0.0" },
++              "time": { "5.2.0": "2026-01-01T00:00:00Z", "5.3.0": "2026-02-01T00:00:00Z", "6.0.0": "2026-03-01T00:00:00Z" }
++            }
++            """) as JsonObject;
++        var update = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("typescript")
++            .WithVersion("5.2.0")
++            .WithNewVersion("5.3.0")
++            .Build();
++        var available = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("typescript")
++            .WithVersion("6.0.0")
++            .Build();
++
++        Assert.Equal("2026-02-01T00:00:00Z", BunPkgDetailsHelper.GetReleaseDate(contents, update));
++        Assert.Equal("2026-03-01T00:00:00Z", BunPkgDetailsHelper.GetReleaseDate(contents, available));
++    }
++
+     /// <summary>
+     /// Tests OperationHelper respects package's overridden scope over options scope.
+     /// </summary>
+diff --git a/src/UniGetUI.PackageEngine.Tests/KillProcessOperationTests.cs b/src/UniGetUI.PackageEngine.Tests/KillProcessOperationTests.cs
+new file mode 100644
+index 0000000..21941a8
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/KillProcessOperationTests.cs
+@@ -0,0 +1,117 @@
++using System.Diagnostics;
++using UniGetUI.Core.SettingsEngine;
++using UniGetUI.PackageEngine.Enums;
++using UniGetUI.PackageOperations;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++[Collection(nameof(OperationOrchestrationTestCollection))]
++public sealed class KillProcessOperationTests
++{
++    [Fact]
++    public async Task FailsWhenAProcessRefusesToCloseAndMayNotBeKilled()
++    {
++        Settings.Set(Settings.K.KillProcessesThatRefuseToDie, false);
++        using var target = WindowlessProcess.Start();
++        using var operation = new KillProcessOperation(target.Name);
++
++        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.Equal(OperationStatus.Failed, operation.Status);
++        Assert.False(target.Process.HasExited);
++    }
++
++    [Fact]
++    public async Task SucceedsWhenAProcessThatRefusesToCloseIsKilled()
++    {
++        Settings.Set(Settings.K.KillProcessesThatRefuseToDie, false);
++        using var target = WindowlessProcess.Start();
++        using var operation = new KillProcessOperation(target.Name, forceKill: true);
++
++        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.Equal(OperationStatus.Succeeded, operation.Status);
++        Assert.True(target.Process.HasExited);
++    }
++
++    [Fact]
++    public async Task SucceedsWhenNoProcessHasTheName()
++    {
++        using var operation = new KillProcessOperation($"unigetui-absent-{Guid.NewGuid():N}");
++
++        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.Equal(OperationStatus.Succeeded, operation.Status);
++    }
++
++    private sealed class WindowlessProcess : IDisposable
++    {
++        private readonly string _directory;
++
++        public string Name { get; }
++        public Process Process { get; }
++
++        private WindowlessProcess(string directory, string name, Process process)
++        {
++            _directory = directory;
++            Name = name;
++            Process = process;
++        }
++
++        public static WindowlessProcess Start()
++        {
++            string directory = Path.Combine(Path.GetTempPath(), $"unigetui-killtest-{Guid.NewGuid():N}");
++            Directory.CreateDirectory(directory);
++            string name = $"unigetui-killtest-{Guid.NewGuid():N}";
++
++            string source;
++            string arguments;
++            if (OperatingSystem.IsWindows())
++            {
++                source = Path.Combine(Environment.SystemDirectory, "cmd.exe");
++                arguments = "/d /c ping -n 120 127.0.0.1 >nul";
++                name += ".exe";
++            }
++            else
++            {
++                source = File.Exists("/bin/sleep") ? "/bin/sleep" : "/usr/bin/sleep";
++                arguments = "120";
++            }
++
++            string executable = Path.Combine(directory, name);
++            File.Copy(source, executable);
++            if (!OperatingSystem.IsWindows())
++                File.SetUnixFileMode(executable, File.GetUnixFileMode(source));
++
++            var process = Process.Start(
++                new ProcessStartInfo(executable, arguments)
++                {
++                    CreateNoWindow = true,
++                    UseShellExecute = false,
++                }
++            )!;
++            return new WindowlessProcess(directory, name, process);
++        }
++
++        public void Dispose()
++        {
++            try
++            {
++                if (!Process.HasExited)
++                {
++                    Process.Kill(entireProcessTree: true);
++                    Process.WaitForExit(10000);
++                }
++            }
++            catch (InvalidOperationException) { }
++
++            Process.Dispose();
++            try
++            {
++                Directory.Delete(_directory, recursive: true);
++            }
++            catch (IOException) { }
++            catch (UnauthorizedAccessException) { }
++        }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+index 69dbe01..441a6c3 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+@@ -70,12 +70,12 @@ public sealed class PackageOperationsTests
+             inner =>
+             {
+                 Assert.IsType<KillProcessOperation>(inner.Operation);
+-                Assert.False(inner.MustSucceed);
++                Assert.True(inner.MustSucceed);
+             },
+             inner =>
+             {
+                 Assert.IsType<KillProcessOperation>(inner.Operation);
+-                Assert.False(inner.MustSucceed);
++                Assert.True(inner.MustSucceed);
+             },
+             inner =>
+             {
+@@ -781,6 +781,35 @@ public sealed class PackageOperationsTests
+         );
+     }
+ 
++    [Fact]
++    public async Task UpdateOperationSuccessfulRunIgnoresAnInstallOnlyPinnedVersion()
++    {
++        Package? installedPackage = null;
++        var manager = new PackageManagerBuilder()
++            .ConfigureCapabilities(capabilities =>
++            {
++                capabilities.SupportsCustomVersionsOnUpdate = false;
++                return capabilities;
++            })
++            .WithInstalledPackages(_ => [Assert.IsType<Package>(installedPackage)])
++            .Build();
++        var oldPackage = new PackageBuilder()
++            .WithManager(manager).WithId("jq").WithVersion("1.7.1").WithNewVersion("1.8.2").Build();
++        installedPackage = new PackageBuilder()
++            .WithManager(manager).WithId("jq").WithVersion("1.8.2").Build();
++        InitializeLoaders();
++        await InstalledPackagesLoader.Instance.AddForeign(oldPackage);
++        using var operation = new SimulatedUpdatePackageOperation(
++            oldPackage, new InstallOptions { Version = "1.7.1" }, OperationVeredict.Success);
++
++        await operation.MainThread();
++        await WaitForAsync(() => InstalledPackagesLoader.Instance.GetEquivalentPackages(oldPackage)
++            .Any(package => package.VersionString == "1.8.2"));
++
++        Assert.DoesNotContain(InstalledPackagesLoader.Instance.GetEquivalentPackages(oldPackage),
++            package => package.VersionString == "1.7.1");
++    }
++
+     [Fact]
+     public async Task UpdateOperationSuccessfulRunPrefersAuthoritativeInstalledVersion()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+index ef5ac82..1138c90 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+@@ -383,10 +383,34 @@ public sealed class PowerShell7ManagerTests
+         Assert.Equal("2025.2.0", update.NewVersionString);
+         Assert.Equal(PackageScope.Machine, update.OverridenOptions.Scope);
+ 
++        var parameters = manager.OperationHelper.GetParameters(
++            update, new InstallOptions(), OperationType.Update);
+         Assert.Contains("AllUsers", parameters);
+         Assert.DoesNotContain("CurrentUser", parameters);
+     }
+ 
++    [Fact]
++    public void SelectNewestInstalled_UsesTheNewestVersionAndItsScope()
++    {
++        var manager = new PowerShell7();
++        var installed = PowerShell7.ParseInstalledPackages(
++            [
++                "##SCOPE:AllUsers##", "XKCD\t1.12.6\tPSGallery",
++                "##SCOPE:CurrentUser##", "XKCD\t1.9.0\tPSGallery",
++            ], manager);
++
++        var newest = manager.SelectNewestInstalled(installed);
++        var selected = newest["xkcd"];
++        Assert.Equal("1.12.6", selected.VersionString);
++        Assert.Equal(PackageScope.Machine, BaseNuGet.BuildInstalledScopeMap(newest.Values)["xkcd"]);
++        var update = Assert.Single(BaseNuGet.ParseUpdatesResponse(
++            "<entry><d:Id>XKCD</d:Id><d:Version>1.12.7</d:Version></entry>",
++            new Dictionary<string, string> { ["xkcd"] = selected.VersionString },
++            BaseNuGet.BuildInstalledScopeMap(newest.Values), selected.Source, manager));
++        Assert.Equal("1.12.6", update.VersionString);
++        Assert.Equal(PackageScope.Machine, update.OverridenOptions.Scope);
++    }
++
+     // Regression for https://github.com/Devolutions/UniGetUI/issues/4781:
+     // the previous Format-Table-based pipeline truncated long names (e.g.
+     // "Microsoft.Graph.Beta.DeviceManagement.Administration" → "Microsoft.Graph.Beta..")
+diff --git a/src/UniGetUI.PackageEngine.Tests/ScoopManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/ScoopManagerTests.cs
+index 857cbc2..ca01e56 100644
+--- a/src/UniGetUI.PackageEngine.Tests/ScoopManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/ScoopManagerTests.cs
+@@ -252,6 +252,187 @@ public sealed class ScoopManagerTests : IDisposable
+         Assert.True(package.OverridenOptions.RunAsAdministrator);
+     }
+ 
++    [Fact]
++    public void InstallParametersAppendRequestedVersionToSpec()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(manager.SourcesHelper.Factory.GetSourceOrDefault("main"))
++            .WithId("jq")
++            .Build();
++
++        var install = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions { Version = "1.7.1" },
++            OperationType.Install
++        );
++        var update = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions { Version = "1.7.1" },
++            OperationType.Update
++        );
++
++        OperationAssert.HasParameters(install, "install", "main/jq@1.7.1");
++        OperationAssert.HasParameters(update, "update", "main/jq");
++    }
++
++    [Fact]
++    public void InstallParametersRefuseVersionsAShellWouldReinterpret()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(manager.SourcesHelper.Factory.GetSourceOrDefault("main"))
++            .WithId("jq")
++            .Build();
++
++        Assert.Throws<InvalidOperationException>(() =>
++            manager.OperationHelper.GetParameters(
++                package,
++                new InstallOptions { Version = "1.7.1;calc" },
++                OperationType.Install
++            )
++        );
++    }
++
++    [Fact]
++    public void PinnedInstallsResolveTheirBucketAndUpdateWithForce()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++        manager.FindBucketManifest = id => id == "jq" ? ("main", "1.8.2") : null;
++
++        var installed = manager.ParseInstalledPackages(PinnedListLines);
++        var updates = manager.ParseAvailableUpdates(EmptyStatusLines, installed, includePinnedInstalls: true);
++
++        Assert.Collection(
++            installed,
++            package =>
++            {
++                PackageAssert.Matches(package, "Jq", "jq", "1.7.1");
++                PackageAssert.BelongsTo(package, manager, manager.SourcesHelper.Factory.GetSourceOrDefault("main"));
++            },
++            package => Assert.Equal(Scoop.GeneratedManifestSource, package.Source.Name)
++        );
++        var update = Assert.Single(updates);
++        PackageAssert.Matches(update, "Jq", "jq", "1.7.1", "1.8.2");
++        OperationAssert.HasParameters(
++            manager.OperationHelper.GetParameters(update, new InstallOptions(), OperationType.Update),
++            "update",
++            "main/jq",
++            "--force"
++        );
++        OperationAssert.HasParameters(
++            manager.OperationHelper.GetParameters(installed[1], new InstallOptions(), OperationType.Uninstall),
++            "uninstall",
++            "orphan"
++        );
++    }
++
++    [Fact]
++    public void PinnedInstallsResolveToTheBucketScoopWouldPick()
++    {
++        string scoopRoot = Path.Combine(_testRoot, "scoop");
++        WriteBucketManifest(scoopRoot, "aaa", nested: false, "jq", "9.9.9");
++        WriteBucketManifest(scoopRoot, "main", nested: true, "jq", "1.8.2");
++        WriteBucketManifest(scoopRoot, "zzz", nested: false, "orphan", "0.2.0");
++        string? previousRoot = Environment.GetEnvironmentVariable("SCOOP");
++        Environment.SetEnvironmentVariable("SCOOP", scoopRoot);
++        try
++        {
++            var manager = CreateManagerWithKnownSources("main", "zzz");
++
++            var installed = manager.ParseInstalledPackages(PinnedListLines);
++            var updates = manager.ParseAvailableUpdates(EmptyStatusLines, installed, includePinnedInstalls: true);
++
++            Assert.Equal(["main", "zzz"], installed.Select(package => package.Source.Name));
++            Assert.Equal(
++                [("jq", "1.8.2"), ("orphan", "0.2.0")],
++                updates.Select(package => (package.Id, package.NewVersionString))
++            );
++        }
++        finally
++        {
++            Environment.SetEnvironmentVariable("SCOOP", previousRoot);
++        }
++    }
++
++    private static void WriteBucketManifest(string scoopRoot, string bucket, bool nested, string id, string version)
++    {
++        string directory = Path.Combine(scoopRoot, "buckets", bucket, nested ? "bucket" : "");
++        Directory.CreateDirectory(directory);
++        File.WriteAllText(Path.Combine(directory, id + ".json"), $$"""{ "version": "{{version}}" }""");
++    }
++
++    [Fact]
++    public void PinnedInstallIsFoundWhenTheOtherScopeHasTheSameVersionUnpinned()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++        manager.FindBucketManifest = id => id == "jq" ? ("main", "1.8.2") : null;
++
++        var installed = manager.ParseInstalledPackages(
++        [
++            "Name Version Source           Updated             Info",
++            "---- ------- ------           -------             ----",
++            "jq   1.7.1   main             2026-10-27 15:35:44 64bit",
++            "jq   1.7.1   <auto-generated> 2026-10-27 15:35:44 Global install",
++        ]);
++        var updates = manager.ParseAvailableUpdates(EmptyStatusLines, installed, includePinnedInstalls: true);
++
++        var update = Assert.Single(updates);
++        PackageAssert.Matches(update, "Jq", "jq", "1.7.1", "1.8.2");
++        Assert.Equal(PackageScope.Global, update.OverridenOptions.Scope);
++    }
++
++    [Fact]
++    public void PinnedInstallsAreNotOfferedAsUpdatesOnOlderScoop()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++        manager.FindBucketManifest = id => id == "jq" ? ("main", "1.8.2") : null;
++
++        var installed = manager.ParseInstalledPackages(PinnedListLines);
++
++        Assert.Empty(manager.ParseAvailableUpdates(EmptyStatusLines, installed));
++    }
++
++    [Fact]
++    public void PinnedInstallsAtOrAboveBucketVersionAreNotOfferedAsUpdates()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++        manager.FindBucketManifest = id => id == "jq" ? ("main", "1.7.1") : null;
++
++        var installed = manager.ParseInstalledPackages(PinnedListLines);
++
++        Assert.Empty(manager.ParseAvailableUpdates(EmptyStatusLines, installed, includePinnedInstalls: true));
++    }
++
++    [Theory]
++    [InlineData("Current Scoop version:\nv0.6.0 - Released at 2026-09-30\n", true)]
++    [InlineData("Current Scoop version:\nv0.10.1 - Released at 2027-01-01\n", true)]
++    [InlineData("Current Scoop version:\nv0.5.3 - Released at 2025-08-11\n", false)]
++    [InlineData("Current Scoop version:\ne6aa3b36 (HEAD -> develop) fix something\n", false)]
++    [InlineData("Unknown", false)]
++    public void PinnedUpdatesRequireScoopWithForcedPinUpgrade(string versionOutput, bool expected)
++    {
++        Assert.Equal(expected, Scoop.UpdatesPinnedInstalls(versionOutput));
++    }
++
++    private static readonly string[] PinnedListLines =
++    [
++        "Installed apps:",
++        "",
++        "Name   Version Source           Updated             Info",
++        "----   ------- ------           -------             ----",
++        "jq     1.7.1   <auto-generated> 2026-10-27 15:35:44 64bit",
++        "orphan 0.1.0   <auto-generated> 2026-10-27 15:35:44 64bit",
++    ];
++
++    private static readonly string[] EmptyStatusLines =
++    [
++        "Name Installed Version Latest Version Missing Dependencies Info",
++        "---- ----------------- -------------- -------------------- ----",
++    ];
++
+     [Fact]
+     public void UninstallParametersOmitLocalSourcePrefixAndAppendPurge()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index e0929f9..0c9f77c 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -1,4 +1,5 @@
+ #if WINDOWS
++using System.Collections.Concurrent;
+ using Devolutions.Pinget.Core;
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.SettingsEngine;
+@@ -624,6 +625,189 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.Equal("winget", PingetCliHelper.InferSourceName(match));
+     }
+ 
++    private static ListMatch PingetListMatch(string name, string id, string? localId)
++    {
++        static string Quote(string? value) => value is null ? "null" : "\"" + value.Replace("\\", "\\\\") + "\"";
++
++        string json = $$"""
++            {
++                "Matches": [
++                    {
++                        "Name": {{Quote(name)}},
++                        "Id": {{Quote(id)}},
++                        "LocalId": {{Quote(localId)}},
++                        "InstalledVersion": "1.0.0.0",
++                        "AvailableVersion": null,
++                        "SourceName": null,
++                        "PackageFamilyNames": [],
++                        "ProductCodes": [],
++                        "UpgradeCodes": []
++                    }
++                ],
++                "Warnings": [],
++                "Truncated": false
++            }
++            """;
++        return Assert.Single(PingetCliHelper.DeserializeJson<ListResponse>(json).Matches);
++    }
++
++    [Fact]
++    public void PingetCliHelperKeepsPlainDisplayNames()
++    {
++        ListMatch match = PingetListMatch("Contoso Tool", "Contoso.Tool", null);
++
++        Assert.Equal(
++            "Contoso Tool",
++            PingetCliHelper.ResolveDisplayName(match, _ => throw new InvalidOperationException(), new())
++        );
++    }
++
++    [Theory]
++    [InlineData(
++        "ms-resource:AppStoreName",
++        "@{Microsoft.WindowsTerminal_1.25.2733.0_x64__8wekyb3d8bbwe?ms-resource://Microsoft.WindowsTerminal/Resources/AppStoreName}"
++    )]
++    [InlineData(
++        "ms-resource:Resources/AppStoreName",
++        "@{Microsoft.WindowsTerminal_1.25.2733.0_x64__8wekyb3d8bbwe?ms-resource://Microsoft.WindowsTerminal/Resources/AppStoreName}"
++    )]
++    [InlineData(
++        "ms-resource:/Resources/AppStoreName",
++        "@{Microsoft.WindowsTerminal_1.25.2733.0_x64__8wekyb3d8bbwe?ms-resource://Microsoft.WindowsTerminal/Resources/AppStoreName}"
++    )]
++    [InlineData(
++        "ms-resource://Microsoft.WindowsTerminal/Resources/AppStoreName",
++        "@{Microsoft.WindowsTerminal_1.25.2733.0_x64__8wekyb3d8bbwe?ms-resource://Microsoft.WindowsTerminal/Resources/AppStoreName}"
++    )]
++    public void PingetCliHelperResolvesMsResourceDisplayNamesAgainstThePackage(string name, string expectedSource)
++    {
++        ListMatch match = PingetListMatch(
++            name,
++            "Microsoft.WindowsTerminal",
++            "MSIX\\Microsoft.WindowsTerminal_1.25.2733.0_x64__8wekyb3d8bbwe"
++        );
++
++        Assert.Equal(
++            "Windows Terminal",
++            PingetCliHelper.ResolveDisplayName(
++                match,
++                source => source == expectedSource ? "Windows Terminal" : null,
++                new()
++            )
++        );
++    }
++
++    [Fact]
++    public void PingetCliHelperFallsBackToThePackageNameWhenTheResourceDoesNotResolve()
++    {
++        List<string> requested = [];
++        ListMatch match = PingetListMatch(
++            "ms-resource:AppStoreName",
++            "MSIX\\Microsoft.WindowsCalculator_11.2607.0.0_x64__8wekyb3d8bbwe",
++            null
++        );
++
++        string name = PingetCliHelper.ResolveDisplayName(
++            match,
++            source =>
++            {
++                requested.Add(source);
++                return null;
++            },
++            new()
++        );
++
++        Assert.Equal("Microsoft.WindowsCalculator", name);
++        Assert.Equal(
++            [
++                "@{Microsoft.WindowsCalculator_11.2607.0.0_x64__8wekyb3d8bbwe?ms-resource://Microsoft.WindowsCalculator/Resources/AppStoreName}",
++                "@{Microsoft.WindowsCalculator_11.2607.0.0_x64__8wekyb3d8bbwe?ms-resource://Microsoft.WindowsCalculator/AppStoreName}",
++            ],
++            requested
++        );
++    }
++
++    [Fact]
++    public void PingetCliHelperFallsBackToTheIdWhenTheMsResourceNameHasNoMsixPackage()
++    {
++        ListMatch match = PingetListMatch("ms-resource:AppStoreName", "Contoso.Tool", null);
++
++        Assert.Equal(
++            "Contoso.Tool",
++            PingetCliHelper.ResolveDisplayName(match, _ => throw new InvalidOperationException(), new())
++        );
++    }
++
++    [Fact]
++    public void PingetCliHelperKeepsTheMsResourceNameOfANonMsixLocalPackage()
++    {
++        ListMatch match = PingetListMatch("ms-resource:AppStoreName", "ARP\\Machine\\X64\\{8F2A}", null);
++
++        Assert.Equal(
++            "ms-resource:AppStoreName",
++            PingetCliHelper.ResolveDisplayName(match, _ => throw new InvalidOperationException(), new())
++        );
++    }
++
++    [Fact]
++    public void PingetCliHelperResolvesEachMsResourceDisplayNameOnce()
++    {
++        int calls = 0;
++        ConcurrentDictionary<(string Identity, string Name), string> cache = new();
++        ListMatch match = PingetListMatch(
++            "ms-resource:AppStoreName",
++            "MSIX\\Microsoft.WindowsCalculator_11.2607.0.0_x64__8wekyb3d8bbwe",
++            null
++        );
++
++        for (int i = 0; i < 3; i++)
++        {
++            Assert.Equal(
++                "Windows Calculator",
++                PingetCliHelper.ResolveDisplayName(
++                    match,
++                    _ =>
++                    {
++                        calls++;
++                        return "Windows Calculator";
++                    },
++                    cache
++                )
++            );
++        }
++
++        Assert.Equal(1, calls);
++    }
++
++    [Fact]
++    public void PingetCliHelperResolvesMsResourceNamesInTheInstalledAndUpdateLists()
++    {
++        var helper = new PingetCliHelper(new WinGet(), @"C:\Program Files\UniGetUI\pinget.exe");
++        const string json = """
++            {
++                "Matches": [
++                    {
++                        "Name": "ms-resource:AppStoreName",
++                        "Id": "Contoso.StoreApp",
++                        "LocalId": null,
++                        "InstalledVersion": "1.0.0",
++                        "AvailableVersion": "2.0.0",
++                        "SourceName": "winget",
++                        "PackageFamilyNames": [],
++                        "ProductCodes": [],
++                        "UpgradeCodes": []
++                    }
++                ],
++                "Warnings": [],
++                "Truncated": false
++            }
++            """;
++        ListResponse response = PingetCliHelper.DeserializeJson<ListResponse>(json);
++
++        Assert.Equal("Contoso.StoreApp", Assert.Single(helper.BuildInstalledPackages(response)).Name);
++        Assert.Equal("Contoso.StoreApp", Assert.Single(helper.BuildUpdatePackages(response)).Name);
++    }
++
+     [Fact]
+     public void GetCliToolPreferenceUsesEnvironmentBeforeSettings()
+     {
+@@ -1995,6 +2179,53 @@ public sealed class WinGetManagerTests : IDisposable
+         OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
+     }
+ 
++    [Fact]
++    public void WinGetUpdateReturnsToTheCatalogIdentifierAfterTheLocalIdentifierAlsoFindsNothing()
++    {
++        const string ventoyLocalIdentifier =
++            @"ARP\User\X64\Ventoy.Ventoy_Microsoft.Winget.Source_8wekyb3d8bbwe";
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Ventoy.Ventoy")
++            .WithVersion("1.1.17")
++            .WithNewVersion("1.1.18")
++            .Build();
++        NativePackageHandler.AddLocalIdentifier(package, ventoyLocalIdentifier);
++
++        var firstVeredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A150014)
++        );
++        OperationAssert.HasVeredict(firstVeredict, OperationVeredict.AutoRetry);
++
++        var localIdentifierAttempt = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Update
++        );
++        Assert.Contains($"\"{ventoyLocalIdentifier}\"", localIdentifierAttempt);
++
++        var secondVeredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A150014)
++        );
++        OperationAssert.HasVeredict(secondVeredict, OperationVeredict.Failure);
++
++        var manualRetry = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Update
++        );
++        Assert.Contains("\"Ventoy.Ventoy\"", manualRetry);
++        Assert.DoesNotContain($"\"{ventoyLocalIdentifier}\"", manualRetry);
++    }
++
+     [Fact]
+     public void WinGetUpdateDoesNotRetryWhenTheLocalIdentifierIsUnknown()
+     {
+diff --git a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml
+index b033c4d..be70ddd 100644
+--- a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml
++++ b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml
+@@ -246,6 +246,13 @@
+                         SelectionChanged="VersionComboBox_SelectionChanged"
+                       />
+ 
++                      <TextBox
++                        Name="VersionTextBox"
++                        Grid.Column="1"
++                        HorizontalAlignment="Stretch"
++                        Visibility="Collapsed"
++                      />
++
+                       <ProgressBar
+                         Name="VersionProgress"
+                         Grid.Column="1"
+diff --git a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+index 6212b9f..b32dd94 100644
+--- a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
++++ b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+@@ -150,6 +150,20 @@ namespace UniGetUI.Interface.Dialogs
+ 
+             VersionComboBox.Items.Add(CoreTools.Translate("Latest"));
+             VersionComboBox.SelectedIndex = 0;
++            if (!package.Manager.Capabilities.CanListVersions)
++            {
++                VersionComboBox.Visibility = Visibility.Collapsed;
++                VersionTextBox.Visibility = Visibility.Visible;
++                VersionTextBox.PlaceholderText = CoreTools.Translate("Latest");
++                VersionTextBox.Text = Options.Version;
++                VersionTextBox.TextChanged += (_, _) =>
++                {
++                    string version = VersionTextBox.Text.Trim();
++                    IgnoreUpdatesCheckbox.IsChecked = version.Length > 0;
++                    if (version.Length == 0 || CoreTools.IsValidPackageVersion(version))
++                        _ = GenerateCommand();
++                };
++            }
+             if (package.Manager.Capabilities.SupportsPreRelease)
+             {
+                 VersionComboBox.Items.Add(CoreTools.Translate("PreRelease"));
+@@ -163,7 +177,7 @@ namespace UniGetUI.Interface.Dialogs
+             SkipMinorLevelComboBox.SelectedIndex = Options.SkipMinorUpdatesLevel - 2;
+             SkipMinorLevelComboBox.IsEnabled = Options.SkipMinorUpdates;
+ 
+-            if (Package.Manager.Capabilities.SupportsCustomVersions)
++            if (Package.Manager.Capabilities.SupportsCustomVersions && Package.Manager.Capabilities.CanListVersions)
+             {
+                 _ = LoadVersions();
+             }
+@@ -282,6 +296,7 @@ namespace UniGetUI.Interface.Dialogs
+                         Package.Manager.Capabilities.SupportsCustomVersions
+                         || Package.Manager.Capabilities.SupportsPreRelease
+                     );
++                VersionTextBox.IsEnabled = operation is OperationType.Install or OperationType.None;
+                 ScopeCombo.IsEnabled =
+                     Package.Manager.Capabilities.SupportsCustomScopes
+                     && operation switch
+@@ -412,7 +427,11 @@ namespace UniGetUI.Interface.Dialogs
+             foreach (var p in ProcessesToKill)
+                 options.KillBeforeOperation.Add(p.Name);
+ 
+-            if (
++            if (!Package.Manager.Capabilities.CanListVersions)
++            {
++                options.Version = VersionTextBox.Text.Trim();
++            }
++            else if (
+                 VersionComboBox.SelectedValue.ToString() != CoreTools.Translate("PreRelease")
+                 && VersionComboBox.SelectedValue.ToString() != CoreTools.Translate("Latest")
+             )
+-- 
+2.51.1
+

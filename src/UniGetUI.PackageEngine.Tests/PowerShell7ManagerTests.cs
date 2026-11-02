@@ -383,8 +383,32 @@ public sealed class PowerShell7ManagerTests
         Assert.Equal("2025.2.0", update.NewVersionString);
         Assert.Equal(PackageScope.Machine, update.OverridenOptions.Scope);
 
+        var parameters = manager.OperationHelper.GetParameters(
+            update, new InstallOptions(), OperationType.Update);
         Assert.Contains("AllUsers", parameters);
         Assert.DoesNotContain("CurrentUser", parameters);
+    }
+
+    [Fact]
+    public void SelectNewestInstalled_UsesTheNewestVersionAndItsScope()
+    {
+        var manager = new PowerShell7();
+        var installed = PowerShell7.ParseInstalledPackages(
+            [
+                "##SCOPE:AllUsers##", "XKCD\t1.12.6\tPSGallery",
+                "##SCOPE:CurrentUser##", "XKCD\t1.9.0\tPSGallery",
+            ], manager);
+
+        var newest = manager.SelectNewestInstalled(installed);
+        var selected = newest["xkcd"];
+        Assert.Equal("1.12.6", selected.VersionString);
+        Assert.Equal(PackageScope.Machine, BaseNuGet.BuildInstalledScopeMap(newest.Values)["xkcd"]);
+        var update = Assert.Single(BaseNuGet.ParseUpdatesResponse(
+            "<entry><d:Id>XKCD</d:Id><d:Version>1.12.7</d:Version></entry>",
+            new Dictionary<string, string> { ["xkcd"] = selected.VersionString },
+            BaseNuGet.BuildInstalledScopeMap(newest.Values), selected.Source, manager));
+        Assert.Equal("1.12.6", update.VersionString);
+        Assert.Equal(PackageScope.Machine, update.OverridenOptions.Scope);
     }
 
     // Regression for https://github.com/Devolutions/UniGetUI/issues/4781:
