@@ -1,0 +1,337 @@
+From 5e772def844bcf74bb87e1e512db2d624ad046d5 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 17:24:48 +0200
+Subject: [PATCH] backport: allow hiding the Classic tray icon
+
+Keep background updates and notifications active, and explain how to reopen the app.
+
+Upstream-Commit: 5bf948249488fae3498a78db20d7cf89e2454867
+Upstream-PR: Devolutions/UniGetUI#5612
+Classic-Source-Commit: 95bab82380b29efe10067dc080a8f5d99e37c477
+---
+ src/Languages/lang_en.json                    |  8 +-
+ .../SettingsTest.cs                           | 18 ++++
+ .../SettingsEngine_Extras.cs                  |  3 +
+ .../SettingsEngine_Names.cs                   |  4 +
+ src/UniGetUI/MainWindow.xaml.cs               | 82 +++++++++++++++----
+ .../GeneralPages/Interface_P.xaml             | 11 ++-
+ .../GeneralPages/Interface_P.xaml.cs          | 24 +++++-
+ .../GeneralPages/SettingsHomepage.xaml        |  1 +
+ testing/automation/run-winui-ui-e2e.ps1       | 19 ++++-
+ 9 files changed, 152 insertions(+), 18 deletions(-)
+
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+index 195ed0b..59b5b9e 100644
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -853,5 +853,11 @@
+   "There are no packages to export.": "There are no packages to export.",
+   "CSV file": "CSV file",
+   "The file was saved to {0}": "The file was saved to {0}",
+-  "The file could not be saved:": "The file could not be saved:"
++  "The file could not be saved:": "The file could not be saved:",
++  "Keep UniGetUI running in the background when its window is closed": "Keep UniGetUI running in the background when its window is closed",
++  "Show the UniGetUI icon in the system tray": "Show the UniGetUI icon in the system tray",
++  "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu.": "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu.",
++  "UniGetUI stops checking for updates and sending notifications until you open it again.": "UniGetUI stops checking for updates and sending notifications until you open it again.",
++  "UniGetUI is still running": "UniGetUI is still running",
++  "UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences.": "UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences."
+ }
+diff --git a/src/UniGetUI.Core.Settings.Tests/SettingsTest.cs b/src/UniGetUI.Core.Settings.Tests/SettingsTest.cs
+index 0354bcb..64868b0 100644
+--- a/src/UniGetUI.Core.Settings.Tests/SettingsTest.cs
++++ b/src/UniGetUI.Core.Settings.Tests/SettingsTest.cs
+@@ -92,6 +92,24 @@ namespace UniGetUI.Core.SettingsEngine.Tests
+             Assert.False(File.Exists(oldPath));
+         }
+ 
++        [Theory]
++        [InlineData(false, false, true)]
++        [InlineData(false, true, false)]
++        [InlineData(true, false, false)]
++        [InlineData(true, true, false)]
++        public void TrayIconVisibilityFollowsBackgroundAndIconSettings(
++            bool disableSystemTray,
++            bool hideSystemTrayIcon,
++            bool expectedVisible
++        )
++        {
++            Settings.Set(Settings.K.DisableSystemTray, disableSystemTray);
++            Settings.Set(Settings.K.HideSystemTrayIcon, hideSystemTrayIcon);
++
++            Assert.Equal(expectedVisible, Settings.IsSystemTrayIconVisible());
++            Assert.Equal(disableSystemTray, Settings.AreNotificationsDisabled());
++        }
++
+         [Theory]
+         [InlineData(Settings.K.Test1, true, false, false, true)]
+         [InlineData(Settings.K.Test2, true, false, false, false)]
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Extras.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Extras.cs
+index adb3746..bbdd47a 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Extras.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Extras.cs
+@@ -12,6 +12,9 @@ public partial class Settings
+      *
+      */
+ 
++    public static bool IsSystemTrayIconVisible() =>
++        !Get(K.DisableSystemTray) && !Get(K.HideSystemTrayIcon);
++
+     public static bool AreNotificationsDisabled() =>
+         Get(K.DisableSystemTray) || Get(K.DisableNotifications);
+ 
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+index 3b56798..8d7d45c 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+@@ -28,6 +28,8 @@ public static partial class Settings
+         TransferredOldSettings,
+         DisableApi,
+         DisableSystemTray,
++        HideSystemTrayIcon,
++        ShownHiddenTrayIconNotice,
+         MaintainSuccessfulInstalls,
+         AutomaticallyUpdatePackages,
+         DisableAUPOnMeteredConnections,
+@@ -145,6 +147,8 @@ public static partial class Settings
+             K.TransferredOldSettings => "TransferredOldSettings",
+             K.DisableApi => "DisableApi",
+             K.DisableSystemTray => "DisableSystemTray",
++            K.HideSystemTrayIcon => "HideSystemTrayIcon",
++            K.ShownHiddenTrayIconNotice => "ShownHiddenTrayIconNotice",
+             K.MaintainSuccessfulInstalls => "MaintainSuccessfulInstalls",
+             K.AutomaticallyUpdatePackages => "AutomaticallyUpdatePackages",
+             K.DisableAUPOnMeteredConnections => "DisableAUPOnMeteredConnections",
+diff --git a/src/UniGetUI/MainWindow.xaml.cs b/src/UniGetUI/MainWindow.xaml.cs
+index cee67de..dad45a9 100644
+--- a/src/UniGetUI/MainWindow.xaml.cs
++++ b/src/UniGetUI/MainWindow.xaml.cs
+@@ -39,6 +39,7 @@ namespace UniGetUI.Interface
+ 
+         private TaskbarIcon? TrayIcon;
+         private bool HasLoadedLastGeometry;
++        private bool _showingHiddenTrayIconNotice;
+ 
+         public MainView NavigationPage = null!;
+         public bool IsInterfaceVisible => MainContentFrame.Content is not null;
+@@ -268,21 +269,17 @@ namespace UniGetUI.Interface
+                 )
+                 {
+                     args.Cancel = true;
+-                    DWMThreadHelper.ChangeState_DWM(true);
+-                    DWMThreadHelper.ChangeState_XAML(true);
+-
+-                    try
+-                    {
+-                        EfficiencyModeUtilities.SetEfficiencyMode(true);
+-                    }
+-                    catch (Exception ex)
++                    if (
++                        !Settings.Get(Settings.K.DisableSystemTray)
++                        && Settings.Get(Settings.K.HideSystemTrayIcon)
++                        && !Settings.Get(Settings.K.ShownHiddenTrayIconNotice)
++                    )
+                     {
+-                        Logger.Error("Could not disable efficiency mode");
+-                        Logger.Error(ex);
++                        if (!_showingHiddenTrayIconNotice)
++                            _ = ShowHiddenTrayIconNoticeAsync();
++                        return;
+                     }
+-
+-                    MainContentFrame.Content = null;
+-                    AppWindow.Hide();
++                    HideToBackground();
+                 }
+                 else
+                 {
+@@ -299,6 +296,63 @@ namespace UniGetUI.Interface
+             }
+         }
+ 
++        private void HideToBackground()
++        {
++            DWMThreadHelper.ChangeState_DWM(true);
++            DWMThreadHelper.ChangeState_XAML(true);
++            try
++            {
++                EfficiencyModeUtilities.SetEfficiencyMode(true);
++            }
++            catch (Exception ex)
++            {
++                Logger.Error("Could not enable efficiency mode");
++                Logger.Error(ex);
++            }
++
++            MainContentFrame.Content = null;
++            AppWindow.Hide();
++        }
++
++        private async Task ShowHiddenTrayIconNoticeAsync()
++        {
++            _showingHiddenTrayIconNotice = true;
++            try
++            {
++                var dialog = new ContentDialog
++                {
++                    XamlRoot = XamlRoot,
++                    Title = CoreTools.Translate("UniGetUI is still running"),
++                    Content = new TextBlock
++                    {
++                        Text = CoreTools.Translate("UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences."),
++                        TextWrapping = TextWrapping.Wrap,
++                    },
++                    PrimaryButtonText = CoreTools.Translate("OK"),
++                    SecondaryButtonText = CoreTools.Translate("Quit UniGetUI"),
++                    DefaultButton = ContentDialogButton.Primary,
++                };
++                var result = await DialogHelper.ShowDialogAsync(dialog);
++                Settings.Set(Settings.K.ShownHiddenTrayIconNotice, true);
++                if (result is ContentDialogResult.Secondary)
++                {
++                    MainApp.Instance.DisposeAndQuit();
++                    return;
++                }
++            }
++            catch (Exception ex)
++            {
++                Logger.Error("Could not show the background notice:");
++                Logger.Error(ex);
++            }
++            finally
++            {
++                _showingHiddenTrayIconNotice = false;
++            }
++
++            HideToBackground();
++        }
++
+         /// <summary>
+         /// Ask the user if it wants to quit, and quit should this be the case
+         /// </summary>
+@@ -651,7 +705,7 @@ namespace UniGetUI.Interface
+                     }
+                 }
+ 
+-                if (Settings.Get(Settings.K.DisableSystemTray))
++                if (!Settings.IsSystemTrayIconVisible())
+                 {
+                     TrayIcon.Visibility = Visibility.Collapsed;
+                 }
+diff --git a/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml b/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml
+index 6687e00..34c8bf5 100644
+--- a/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml
++++ b/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml
+@@ -48,7 +48,16 @@
+         CornerRadius="8,8,0,0"
+         SettingName="DisableSystemTray"
+         StateChanged="DisableSystemTray_StateChanged"
+-        Text="Close UniGetUI to the system tray"
++        Text="Keep UniGetUI running in the background when its window is closed"
++      />
++      <widgets:CheckboxCard
++        x:Name="SystemTrayIconCard"
++        BorderThickness="1,0,1,1"
++        CornerRadius="0"
++        ForceInversion="True"
++        SettingName="HideSystemTrayIcon"
++        StateChanged="DisableSystemTray_StateChanged"
++        Text="Show the UniGetUI icon in the system tray"
+       />
+       <widgets:ButtonCard
+         BorderThickness="1,0,1,1"
+diff --git a/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml.cs b/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml.cs
+index f4eb0ad..aa6467f 100644
+--- a/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml.cs
++++ b/src/UniGetUI/Pages/SettingsPages/GeneralPages/Interface_P.xaml.cs
+@@ -40,6 +40,7 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
+             StartupPageSelector.AddItem(CoreTools.AutoTranslated("Package Bundles"), "bundles");
+             StartupPageSelector.AddItem(CoreTools.AutoTranslated("Settings"), "settings");
+             StartupPageSelector.ShowAddedItems();
++            UpdateSystemTrayCards();
+         }
+ 
+         protected override void OnNavigatedTo(NavigationEventArgs e)
+@@ -101,8 +102,29 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
+             );
+         }
+ 
+-        private void DisableSystemTray_StateChanged(object sender, EventArgs e) =>
++        private void DisableSystemTray_StateChanged(object sender, EventArgs e)
++        {
++            UpdateSystemTrayCards();
+             MainApp.Instance.MainWindow.UpdateSystemTrayStatus();
++        }
++
++        private void UpdateSystemTrayCards()
++        {
++            if (SystemTrayIconCard is null)
++                return;
++
++            bool keepsRunning = !Settings.Get(Settings.K.DisableSystemTray);
++            SystemTrayIconCard.IsEnabled = keepsRunning;
++            SystemTrayIconCard.WarningText = keepsRunning && Settings.Get(Settings.K.HideSystemTrayIcon)
++                ? "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu."
++                : "";
++            if (DisableSystemTray is not null)
++            {
++                DisableSystemTray.WarningText = keepsRunning
++                    ? ""
++                    : "UniGetUI stops checking for updates and sending notifications until you open it again.";
++            }
++        }
+ 
+         private void ThemeSelector_ValueChanged(object sender, EventArgs e) =>
+             MainApp.Instance.MainWindow.ApplyTheme();
+diff --git a/src/UniGetUI/Pages/SettingsPages/GeneralPages/SettingsHomepage.xaml b/src/UniGetUI/Pages/SettingsPages/GeneralPages/SettingsHomepage.xaml
+index 54d35d4..cf8e358 100644
+--- a/src/UniGetUI/Pages/SettingsPages/GeneralPages/SettingsHomepage.xaml
++++ b/src/UniGetUI/Pages/SettingsPages/GeneralPages/SettingsHomepage.xaml
+@@ -33,6 +33,7 @@
+ 
+       <widgets:SettingsPageButton
+         x:Name="InterfaceSettingsExpander"
++        AutomationProperties.AutomationId="InterfaceSettingsEntry"
+         Click="Interface"
+         CornerRadius="8,8,0,0"
+         Icon="interactive"
+diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
+index 643b6d0..9659d82 100644
+--- a/testing/automation/run-winui-ui-e2e.ps1
++++ b/testing/automation/run-winui-ui-e2e.ps1
+@@ -145,6 +145,23 @@ try {
+     [void](Find-ElementByAutomationId $window 'InstallerFileNameScheme')
+     [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
+ 
++    Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
++    Invoke-Element (Find-ElementByAutomationId $window 'InterfaceSettingsEntry')
++    Ensure-ToggleOn (Find-ElementByAutomationId $window 'DisableSystemTray')
++    $trayIcon = Find-ElementByAutomationId $window 'HideSystemTrayIcon'
++    Ensure-ToggleOn $trayIcon
++    $trayToggle = [System.Windows.Automation.TogglePattern]($trayIcon.GetCurrentPattern(
++        [System.Windows.Automation.TogglePattern]::Pattern
++    ))
++    $trayToggle.Toggle()
++    if ($trayToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
++        throw 'The tray icon setting did not turn off.'
++    }
++    $trayToggle.Toggle()
++    if ($trayToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
++        throw 'The tray icon setting did not turn on again.'
++    }
++
+     Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
+     Invoke-Element (Find-ElementByAutomationId $window 'BackupSettingsEntry')
+     Ensure-ToggleOn (Find-ElementByAutomationId $window 'EnablePackageBackup_LOCAL')
+@@ -181,7 +198,7 @@ try {
+ 
+     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
+ 
+-    Write-Host 'WinUI UI E2E passed: settings parity controls and CSV toolbar are reachable.'
++    Write-Host 'WinUI UI E2E passed: settings, tray icon control, and CSV toolbar are reachable.'
+ }
+ finally {
+     if ($appProcess -and -not $appProcess.HasExited) {
+-- 
+2.51.1
+

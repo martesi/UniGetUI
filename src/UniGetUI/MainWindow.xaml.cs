@@ -39,6 +39,7 @@ namespace UniGetUI.Interface
 
         private TaskbarIcon? TrayIcon;
         private bool HasLoadedLastGeometry;
+        private bool _showingHiddenTrayIconNotice;
 
         public MainView NavigationPage = null!;
         public bool IsInterfaceVisible => MainContentFrame.Content is not null;
@@ -268,21 +269,17 @@ namespace UniGetUI.Interface
                 )
                 {
                     args.Cancel = true;
-                    DWMThreadHelper.ChangeState_DWM(true);
-                    DWMThreadHelper.ChangeState_XAML(true);
-
-                    try
+                    if (
+                        !Settings.Get(Settings.K.DisableSystemTray)
+                        && Settings.Get(Settings.K.HideSystemTrayIcon)
+                        && !Settings.Get(Settings.K.ShownHiddenTrayIconNotice)
+                    )
                     {
-                        EfficiencyModeUtilities.SetEfficiencyMode(true);
+                        if (!_showingHiddenTrayIconNotice)
+                            _ = ShowHiddenTrayIconNoticeAsync();
+                        return;
                     }
-                    catch (Exception ex)
-                    {
-                        Logger.Error("Could not disable efficiency mode");
-                        Logger.Error(ex);
-                    }
-
-                    MainContentFrame.Content = null;
-                    AppWindow.Hide();
+                    HideToBackground();
                 }
                 else
                 {
@@ -297,6 +294,63 @@ namespace UniGetUI.Interface
             {
                 Logger.Error(ex);
             }
+        }
+
+        private void HideToBackground()
+        {
+            DWMThreadHelper.ChangeState_DWM(true);
+            DWMThreadHelper.ChangeState_XAML(true);
+            try
+            {
+                EfficiencyModeUtilities.SetEfficiencyMode(true);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Could not enable efficiency mode");
+                Logger.Error(ex);
+            }
+
+            MainContentFrame.Content = null;
+            AppWindow.Hide();
+        }
+
+        private async Task ShowHiddenTrayIconNoticeAsync()
+        {
+            _showingHiddenTrayIconNotice = true;
+            try
+            {
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = XamlRoot,
+                    Title = CoreTools.Translate("UniGetUI is still running"),
+                    Content = new TextBlock
+                    {
+                        Text = CoreTools.Translate("UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences."),
+                        TextWrapping = TextWrapping.Wrap,
+                    },
+                    PrimaryButtonText = CoreTools.Translate("OK"),
+                    SecondaryButtonText = CoreTools.Translate("Quit UniGetUI"),
+                    DefaultButton = ContentDialogButton.Primary,
+                };
+                var result = await DialogHelper.ShowDialogAsync(dialog);
+                Settings.Set(Settings.K.ShownHiddenTrayIconNotice, true);
+                if (result is ContentDialogResult.Secondary)
+                {
+                    MainApp.Instance.DisposeAndQuit();
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Could not show the background notice:");
+                Logger.Error(ex);
+            }
+            finally
+            {
+                _showingHiddenTrayIconNotice = false;
+            }
+
+            HideToBackground();
         }
 
         /// <summary>
@@ -651,7 +705,7 @@ namespace UniGetUI.Interface
                     }
                 }
 
-                if (Settings.Get(Settings.K.DisableSystemTray))
+                if (!Settings.IsSystemTrayIconVisible())
                 {
                     TrayIcon.Visibility = Visibility.Collapsed;
                 }

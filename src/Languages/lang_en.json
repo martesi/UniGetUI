@@ -853,5 +853,11 @@
   "There are no packages to export.": "There are no packages to export.",
   "CSV file": "CSV file",
   "The file was saved to {0}": "The file was saved to {0}",
-  "The file could not be saved:": "The file could not be saved:"
+  "The file could not be saved:": "The file could not be saved:",
+  "Keep UniGetUI running in the background when its window is closed": "Keep UniGetUI running in the background when its window is closed",
+  "Show the UniGetUI icon in the system tray": "Show the UniGetUI icon in the system tray",
+  "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu.": "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu.",
+  "UniGetUI stops checking for updates and sending notifications until you open it again.": "UniGetUI stops checking for updates and sending notifications until you open it again.",
+  "UniGetUI is still running": "UniGetUI is still running",
+  "UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences.": "UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences."
 }
