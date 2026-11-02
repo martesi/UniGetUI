@@ -75,3 +75,4 @@ backports/0700-tray-validation-fixes.patch
 backports/0710-tray-switch-automation.patch
 backports/0720-update-ignored-once.patch
 backports/0730-ignored-update-guard.patch
+backports/0740-isolate-nuget-tests.patch
