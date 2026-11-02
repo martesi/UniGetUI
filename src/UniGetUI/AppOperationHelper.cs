@@ -331,7 +331,8 @@ public partial class MainApp
             bool? interactive = null,
             bool? no_integrity = null,
             bool ignoreParallel = false,
-            AbstractOperation? req = null
+            AbstractOperation? req = null,
+            bool keepUpdatesPaused = false
         )
         {
             if (package is null)
@@ -356,7 +357,10 @@ public partial class MainApp
                 interactive,
                 no_integrity
             );
-            var operation = new UpdatePackageOperation(package, options, ignoreParallel, req);
+            var operation = new UpdatePackageOperation(package, options, ignoreParallel, req)
+            {
+                KeepUpdatesPaused = keepUpdatesPaused,
+            };
             operation.OperationSucceeded += (_, _) =>
                 TelemetryHandler.UpdatePackage(package, TEL_OP_RESULT.SUCCESS);
             operation.OperationFailed += (_, _) =>

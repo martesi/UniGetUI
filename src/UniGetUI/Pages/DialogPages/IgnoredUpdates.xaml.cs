@@ -1,12 +1,16 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine;
 using UniGetUI.PackageEngine.Classes.Packages.Classes;
+using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.Managers.WingetManager;
+using UniGetUI.PackageEngine.Operations;
 using UniGetUI.PackageEngine.PackageLoader;
 
 // To learn more about WinUI, the WinUI project structure,
@@ -24,9 +28,9 @@ namespace UniGetUI.Interface
 
         public IgnoredUpdatesManager()
         {
-            UpdateData();
             InitializeComponent();
             IgnoredUpdatesList.ItemsSource = ignoredPackages;
+            UpdateData();
         }
 
         private void UpdateData()
@@ -44,6 +48,8 @@ namespace UniGetUI.Interface
 
             foreach (var (ignoredId, version) in rawIgnoredPackages)
             {
+                int separator = ignoredId.IndexOf('\\');
+                string packageId = separator < 0 ? ignoredId : ignoredId[(separator + 1)..];
                 IPackageManager? manager = PEInterface.WinGet; // Manager by default
                 if (ManagerNameReference.ContainsKey(ignoredId.Split("\\")[0]))
                 {
@@ -55,10 +61,12 @@ namespace UniGetUI.Interface
 
                 ignoredPackages.Add(
                     new IgnoredPackageEntry(
-                        ignoredId.Split("\\")[^1],
+                        ignoredId,
+                        packageId,
                         version,
                         manager,
-                        ignoredPackages
+                        ignoredPackages,
+                        () => { DispatcherQueue.TryEnqueue(UpdateData); }
                     )
                 );
             }
@@ -95,22 +103,38 @@ namespace UniGetUI.Interface
         }
     }
 
-    public class IgnoredPackageEntry
+    public class IgnoredPackageEntry : INotifyPropertyChanged
     {
+        public event PropertyChangedEventHandler? PropertyChanged;
         public string Id { get; }
         public string Name { get; }
         public string Version { get; }
         public string NewVersion { get; }
         public IPackageManager Manager { get; }
+        public string UpdateToolTip => CoreTools.Translate("Update {0} once, keeping its updates ignored", Name);
+        public Visibility UpdateVisibility =>
+            !_isUpdating && IgnoredUpdatesDatabase.GetAvailableUpdate(_ignoredId) is not null
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+
+        private readonly string _ignoredId;
+        private readonly Action _refresh;
+        private UpdatePackageOperation? _operation;
+        private bool _isUpdating;
+        private int _operationFinished;
         private ObservableCollection<IgnoredPackageEntry> List { get; }
 
         public IgnoredPackageEntry(
+            string ignoredId,
             string id,
             string version,
             IPackageManager manager,
-            ObservableCollection<IgnoredPackageEntry> list
+            ObservableCollection<IgnoredPackageEntry> list,
+            Action refresh
         )
         {
+            _ignoredId = ignoredId;
+            _refresh = refresh;
             Id = id;
 
             if (manager is WinGet && id.Contains('.'))
@@ -131,11 +155,7 @@ namespace UniGetUI.Interface
                 InstalledPackagesLoader.Instance.GetPackageForId(id)?.VersionString ?? "Unknown";
 
             if (
-                UpgradablePackagesLoader.Instance.IgnoredPackages.TryGetValue(
-                    Id,
-                    out IPackage? package
-                )
-                && package.NewVersionString != package.VersionString
+                IgnoredUpdatesDatabase.GetAvailableUpdate(_ignoredId) is { } package
             )
             {
                 NewVersion = CurrentVersion + " \u27a4 " + package.NewVersionString;
@@ -152,14 +172,90 @@ namespace UniGetUI.Interface
 
             Manager = manager;
             List = list;
+
+            if (FindRunningUpdate() is { } running)
+                Track(running);
+        }
+
+        private UpdatePackageOperation? FindRunningUpdate() =>
+            MainApp.Operations._operationList
+                .Select(control => control.Operation)
+                .OfType<UpdatePackageOperation>()
+                .FirstOrDefault(operation =>
+                    (operation.Status is OperationStatus.InQueue or OperationStatus.Running)
+                    && IgnoredUpdatesDatabase.GetIgnoredIdForPackage(operation.Package) == _ignoredId
+                );
+
+        public void UpdateOnce() => _ = UpdateOnceAsync();
+
+        private async Task UpdateOnceAsync()
+        {
+            if (_isUpdating)
+                return;
+
+            if (FindRunningUpdate() is { } running)
+            {
+                Track(running);
+                return;
+            }
+
+            if (IgnoredUpdatesDatabase.GetAvailableUpdate(_ignoredId) is not { } package)
+            {
+                _refresh();
+                return;
+            }
+
+            _isUpdating = true;
+            PropertyChanged?.Invoke(this, new(nameof(UpdateVisibility)));
+            try
+            {
+                if (await MainApp.Operations.Update(package, keepUpdatesPaused: true) is UpdatePackageOperation operation)
+                    Track(operation);
+                else
+                    _refresh();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Could not update the ignored package:");
+                Logger.Error(ex);
+                _refresh();
+            }
+        }
+
+        private void Track(UpdatePackageOperation operation)
+        {
+            _operation = operation;
+            _operationFinished = 0;
+            _isUpdating = true;
+            PropertyChanged?.Invoke(this, new(nameof(UpdateVisibility)));
+            operation.OperationFinished += OnOperationFinished;
+            if (operation.Status is OperationStatus.Succeeded or OperationStatus.Failed or OperationStatus.Canceled)
+                OnOperationFinished(operation, EventArgs.Empty);
+        }
+
+        private async void OnOperationFinished(object? sender, EventArgs e)
+        {
+            if (sender is not UpdatePackageOperation operation || Interlocked.Exchange(ref _operationFinished, 1) == 1)
+                return;
+
+            operation.OperationFinished -= OnOperationFinished;
+            try
+            {
+                await operation.SuccessHandled;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex);
+            }
+            if (ReferenceEquals(_operation, operation))
+                _refresh();
         }
 
         public void RemoveFromIgnoredUpdates() => _ = RemoveFromIgnoredUpdatesAsync();
 
         public async Task RemoveFromIgnoredUpdatesAsync()
         {
-            string ignoredId = $"{Manager.Properties.Name.ToLower()}\\{Id}";
-            await Task.Run(() => IgnoredUpdatesDatabase.Remove(ignoredId));
+            await Task.Run(() => IgnoredUpdatesDatabase.Remove(_ignoredId));
 
             // If possible, add the package to the software updates tab again
             if (

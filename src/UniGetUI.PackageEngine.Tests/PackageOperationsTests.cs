@@ -1,9 +1,12 @@
 using System.Diagnostics;
 using System.Reflection;
+using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
+using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine.Classes.Manager;
+using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.Managers.NpmManager;
@@ -779,6 +782,48 @@ public sealed class PackageOperationsTests
             InstalledPackagesLoader.Instance.GetEquivalentPackages(searchResult),
             package => package.VersionString == "3.0.3"
         );
+    }
+
+    [Fact]
+    public async Task UpdatingAnIgnoredPackageOnceKeepsItsPause()
+    {
+        string testRoot = Path.Combine(Path.GetTempPath(), $"ignored-once-{Guid.NewGuid():N}");
+        CoreData.TEST_DataDirectoryOverride = testRoot;
+        try
+        {
+            Directory.CreateDirectory(CoreData.UniGetUIUserConfigurationDirectory);
+            Directory.CreateDirectory(CoreData.UniGetUIInstallationOptionsDirectory);
+            Settings.ResetSettings();
+            Package? installed = null;
+            var manager = new PackageManagerBuilder()
+                .WithInstalledPackages(_ => [Assert.IsType<Package>(installed)])
+                .Build();
+            const string id = "ignored-once-test";
+            var update = new PackageBuilder()
+                .WithManager(manager).WithId(id).WithVersion("1.0.0").WithNewVersion("2.0.0").Build();
+            installed = new PackageBuilder().WithManager(manager).WithId(id).WithVersion("2.0.0").Build();
+            InitializeLoaders();
+            await InstalledPackagesLoader.Instance.AddForeign(update);
+            string ignoredId = IgnoredUpdatesDatabase.GetIgnoredIdForPackage(update);
+            IgnoredUpdatesDatabase.Add(ignoredId, "<2099-12-31");
+            UpgradablePackagesLoader.Instance.IgnoredPackages[update.Id] = update;
+            using var operation = new SimulatedUpdatePackageOperation(
+                update, new InstallOptions(), OperationVeredict.Success
+            ) { KeepUpdatesPaused = true };
+
+            await operation.MainThread();
+            await operation.SuccessHandled;
+
+            Assert.Equal("<2099-12-31", IgnoredUpdatesDatabase.GetIgnoredVersion(ignoredId));
+            Assert.False(UpgradablePackagesLoader.Instance.IgnoredPackages.ContainsKey(update.Id));
+        }
+        finally
+        {
+            Settings.ResetSettings();
+            CoreData.TEST_DataDirectoryOverride = null;
+            if (Directory.Exists(testRoot))
+                Directory.Delete(testRoot, recursive: true);
+        }
     }
 
     [Fact]
