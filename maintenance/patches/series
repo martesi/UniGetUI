@@ -67,3 +67,4 @@ backports/0620-late-october-backports.patch
 backports/0630-winget-search-build-fixes.patch
 backports/0640-deduplicate-winget-tests.patch
 backports/0650-headless-bulk-updates.patch
+backports/0660-ci-build-fixes.patch
