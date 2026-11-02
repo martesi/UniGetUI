@@ -809,7 +809,10 @@ public sealed class PackageOperationsTests
             UpgradablePackagesLoader.Instance.IgnoredPackages[update.Id] = update;
             using var operation = new SimulatedUpdatePackageOperation(
                 update, new InstallOptions(), OperationVeredict.Success
-            ) { KeepUpdatesPaused = true };
+            )
+            {
+                KeepUpdatesPaused = true,
+            };
 
             await operation.MainThread();
             await operation.SuccessHandled;

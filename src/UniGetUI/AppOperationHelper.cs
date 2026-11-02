@@ -357,6 +357,8 @@ public partial class MainApp
                 interactive,
                 no_integrity
             );
+            if (keepUpdatesPaused && AlreadyBeingUpdated(package))
+                return null;
             var operation = new UpdatePackageOperation(package, options, ignoreParallel, req)
             {
                 KeepUpdatesPaused = keepUpdatesPaused,

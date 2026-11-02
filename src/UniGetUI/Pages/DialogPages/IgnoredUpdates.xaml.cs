@@ -30,6 +30,11 @@ namespace UniGetUI.Interface
         {
             InitializeComponent();
             IgnoredUpdatesList.ItemsSource = ignoredPackages;
+            Unloaded += (_, _) =>
+            {
+                foreach (var entry in ignoredPackages)
+                    entry.Detach();
+            };
             UpdateData();
         }
 
@@ -42,6 +47,8 @@ namespace UniGetUI.Interface
                 ManagerNameReference.Add(Manager.Name.ToLower(), Manager);
             }
 
+            foreach (var entry in ignoredPackages)
+                entry.Detach();
             ignoredPackages.Clear();
 
             var rawIgnoredPackages = IgnoredUpdatesDatabase.GetDatabase();
@@ -82,6 +89,8 @@ namespace UniGetUI.Interface
 
         private void CloseButton_Click(object sender, RoutedEventArgs e)
         {
+            foreach (var entry in ignoredPackages)
+                entry.Detach();
             Close?.Invoke(this, EventArgs.Empty);
         }
 
@@ -121,6 +130,7 @@ namespace UniGetUI.Interface
         private readonly Action _refresh;
         private UpdatePackageOperation? _operation;
         private bool _isUpdating;
+        private bool _detached;
         private int _operationFinished;
         private ObservableCollection<IgnoredPackageEntry> List { get; }
 
@@ -201,7 +211,7 @@ namespace UniGetUI.Interface
 
             if (IgnoredUpdatesDatabase.GetAvailableUpdate(_ignoredId) is not { } package)
             {
-                _refresh();
+                RequestRefresh();
                 return;
             }
 
@@ -212,18 +222,20 @@ namespace UniGetUI.Interface
                 if (await MainApp.Operations.Update(package, keepUpdatesPaused: true) is UpdatePackageOperation operation)
                     Track(operation);
                 else
-                    _refresh();
+                    RequestRefresh();
             }
             catch (Exception ex)
             {
                 Logger.Error("Could not update the ignored package:");
                 Logger.Error(ex);
-                _refresh();
+                RequestRefresh();
             }
         }
 
         private void Track(UpdatePackageOperation operation)
         {
+            if (_detached)
+                return;
             _operation = operation;
             _operationFinished = 0;
             _isUpdating = true;
@@ -248,7 +260,26 @@ namespace UniGetUI.Interface
                 Logger.Warn(ex);
             }
             if (ReferenceEquals(_operation, operation))
+            {
+                _operation = null;
+                RequestRefresh();
+            }
+        }
+
+        private void RequestRefresh()
+        {
+            if (!_detached)
                 _refresh();
+        }
+
+        public void Detach()
+        {
+            _detached = true;
+            var operation = _operation;
+            _operation = null;
+            if (operation is null)
+                return;
+            operation.OperationFinished -= OnOperationFinished;
         }
 
         public void RemoveFromIgnoredUpdates() => _ = RemoveFromIgnoredUpdatesAsync();
@@ -278,6 +309,7 @@ namespace UniGetUI.Interface
                 }
             }
 
+            Detach();
             List.Remove(this);
         }
     }
