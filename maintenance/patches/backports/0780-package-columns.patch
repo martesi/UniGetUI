@@ -1,0 +1,851 @@
+From 65d9b289754616a34fe6bbfe83bb568930fc39ea Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 13:13:48 -0800
+Subject: [PATCH] backport: add configurable package columns and release dates
+
+Run the Windows solution build serially to avoid compiler file locks.
+
+Upstream-Commit: b45b2ba83efc7ee43372836e5d9984048a522ccc
+Upstream-PR: Devolutions/UniGetUI#5623
+Upstream-Commit: 9a9bc8823ef7fabd9e3d3765e2f71552f991556a
+Upstream-PR: Devolutions/UniGetUI#5632
+Classic-Source-Commit: 9fde82de747870349c3df815db2a5e581d63ce85
+---
+ .github/workflows/dotnet-test.yml             |   5 +-
+ src/Languages/lang_en.json                    |   6 +-
+ .../SettingsEngine_Names.cs                   |   8 +
+ .../Controls/ObservablePackageCollection.cs   |  12 ++
+ src/UniGetUI/Controls/PackageWrapper.cs       | 110 +++++++++++
+ .../SoftwarePages/AbstractPackagesPage.xaml   |  84 +++++----
+ .../AbstractPackagesPage.xaml.cs              | 171 ++++++++++++++++++
+ testing/automation/run-winui-ui-e2e.ps1       |  51 ++++++
+ 8 files changed, 413 insertions(+), 34 deletions(-)
+
+diff --git a/.github/workflows/dotnet-test.yml b/.github/workflows/dotnet-test.yml
+index d42c4b2..821b71b 100644
+--- a/.github/workflows/dotnet-test.yml
++++ b/.github/workflows/dotnet-test.yml
+@@ -6,6 +6,7 @@ on:
+       - 'global.json'
+       - '**.cs'
+       - '**.axaml'
++      - '**.xaml'
+       - '**.csproj'
+       - '**.props'
+       - '**.targets'
+@@ -20,6 +21,7 @@ on:
+       - 'global.json'
+       - '**.cs'
+       - '**.axaml'
++      - '**.xaml'
+       - '**.csproj'
+       - '**.props'
+       - '**.targets'
+@@ -88,11 +90,10 @@ jobs:
+ 
+     - name: Build Windows solution
+       working-directory: src
+-      run: dotnet build UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64
++      run: dotnet build UniGetUI.Windows.slnx --no-restore --verbosity minimal /m:1 /p:UseSharedCompilation=false /p:Platform=x64
+ 
+     - name: Run Tests
+       working-directory: src
+       env:
+         GITHUB_TOKEN: ${{ github.token }}
+       run: dotnet test UniGetUI.Windows.slnx --no-build --no-restore --verbosity q --nologo /p:Platform=x64
+-
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+index 3c5f46a..75472f8 100644
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -872,5 +872,9 @@
+     "Looking for {0}...": "Looking for {0}...",
+     "{0} was not found.": "{0} was not found.",
+     "{0} does not support installing a specified version.": "{0} does not support installing a specified version.",
+-    "The package link could not be opened": "The package link could not be opened"
++    "The package link could not be opened": "The package link could not be opened",
++  "Columns": "Columns",
++  "Installer host": "Installer host",
++  "Download size": "Download size",
++  "Release date": "Release date"
+ }
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+index 8d7d45c..71bb4b2 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+@@ -71,6 +71,10 @@ public static partial class Settings
+         DependencyManagement,
+         DisabledPackageManagerNotifications,
+         PackageListViewMode,
++        HiddenPackageListColumns,
++        ShowInstallerHostColumn,
++        ShowDownloadSizeColumn,
++        ShowReleaseDateColumn,
+         DisableInstantSearch,
+         SidepanelWidths,
+         HideToggleFilters,
+@@ -190,6 +194,10 @@ public static partial class Settings
+             K.DependencyManagement => "DependencyManagement",
+             K.DisabledPackageManagerNotifications => "DisabledPackageManagerNotifications",
+             K.PackageListViewMode => "PackageListViewMode",
++            K.HiddenPackageListColumns => "HiddenPackageListColumns",
++            K.ShowInstallerHostColumn => "ShowInstallerHostColumn",
++            K.ShowDownloadSizeColumn => "ShowDownloadSizeColumn",
++            K.ShowReleaseDateColumn => "ShowReleaseDateColumn",
+             K.DisableInstantSearch => "DisableInstantSearch",
+             K.SidepanelWidths => "SidepanelWidths",
+             K.HideToggleFilters => "HideToggleFilters",
+diff --git a/src/UniGetUI/Controls/ObservablePackageCollection.cs b/src/UniGetUI/Controls/ObservablePackageCollection.cs
+index 4ec5698..d65cc2a 100644
+--- a/src/UniGetUI/Controls/ObservablePackageCollection.cs
++++ b/src/UniGetUI/Controls/ObservablePackageCollection.cs
+@@ -16,6 +16,8 @@ namespace UniGetUI.PackageEngine.PackageClasses
+             Version,
+             NewVersion,
+             Source,
++            DownloadSize,
++            ReleaseDate,
+         }
+ 
+         public Sorter CurrentSorter { get; private set; }
+@@ -74,6 +76,16 @@ namespace UniGetUI.PackageEngine.PackageClasses
+                 case Sorter.Source:
+                     SortingSelector = x => x.Package.Source.AsString_DisplayName;
+                     break;
++
++                case Sorter.DownloadSize:
++                    SortingSelector = x => x.DownloadSizeBytes > 0
++                        ? x.DownloadSizeBytes : Descending ? long.MinValue : long.MaxValue;
++                    break;
++
++                case Sorter.ReleaseDate:
++                    SortingSelector = x => x.ReleaseDate != default
++                        ? x.ReleaseDate : Descending ? DateTime.MinValue : DateTime.MaxValue;
++                    break;
+             }
+         }
+ 
+diff --git a/src/UniGetUI/Controls/PackageWrapper.cs b/src/UniGetUI/Controls/PackageWrapper.cs
+index 8761fc4..d5b9ff5 100644
+--- a/src/UniGetUI/Controls/PackageWrapper.cs
++++ b/src/UniGetUI/Controls/PackageWrapper.cs
+@@ -1,7 +1,9 @@
+ using System.Collections.Concurrent;
+ using System.ComponentModel;
++using System.Globalization;
+ using System.Runtime.InteropServices;
+ using Microsoft.UI.Dispatching;
++using Microsoft.UI.Xaml;
+ using Microsoft.UI.Xaml.Input;
+ using Microsoft.UI.Xaml.Media;
+ using Microsoft.UI.Xaml.Media.Imaging;
+@@ -71,6 +73,113 @@ namespace UniGetUI.PackageEngine.PackageClasses
+ 
+         private CancellationTokenSource? _installerHostCheckCts;
+ 
++        private static readonly SemaphoreSlim OptionalDetailsGate = new(8, 8);
++        private readonly CancellationTokenSource _optionalDetailsCts = new();
++        private Task? _optionalDetailsTask;
++        private bool _listRowRealized;
++        public string InstallerHostText { get; private set; } = "—";
++        public string DownloadSizeText { get; private set; } = "—";
++        public string ReleaseDateText { get; private set; } = "—";
++        public long DownloadSizeBytes { get; private set; }
++        public DateTime ReleaseDate { get; private set; }
++
++        private GridLength WidthFor(string column) =>
++            new(_page.IsColumnVisible(column) ? 1 : 0, GridUnitType.Star);
++        private Visibility VisibilityFor(string column) =>
++            _page.IsColumnVisible(column) ? Visibility.Visible : Visibility.Collapsed;
++
++        public GridLength NameColumnWidth => WidthFor("Name");
++        public GridLength IdColumnWidth => WidthFor("Id");
++        public GridLength VersionColumnWidth => WidthFor("Version");
++        public GridLength NewVersionColumnWidth => WidthFor("NewVersion");
++        public GridLength SourceColumnWidth => WidthFor("Source");
++        public GridLength InstallerHostColumnWidth => WidthFor("InstallerHost");
++        public GridLength DownloadSizeColumnWidth => WidthFor("DownloadSize");
++        public GridLength ReleaseDateColumnWidth => WidthFor("ReleaseDate");
++        public double NameColumnMinWidth => _page.IsColumnVisible("Name") ? 125 : 0;
++        public double IdColumnMinWidth => _page.IsColumnVisible("Id") ? 125 : 0;
++        public Visibility NameColumnVisibility => VisibilityFor("Name");
++        public Visibility IdColumnVisibility => VisibilityFor("Id");
++        public Visibility VersionColumnVisibility => VisibilityFor("Version");
++        public Visibility NewVersionColumnVisibility => VisibilityFor("NewVersion");
++        public Visibility SourceColumnVisibility => VisibilityFor("Source");
++        public Visibility InstallerHostColumnVisibility => VisibilityFor("InstallerHost");
++        public Visibility DownloadSizeColumnVisibility => VisibilityFor("DownloadSize");
++        public Visibility ReleaseDateColumnVisibility => VisibilityFor("ReleaseDate");
++
++        public void NotifyColumnVisibilityChanged()
++        {
++            foreach (string property in new[]
++            {
++                nameof(NameColumnWidth), nameof(IdColumnWidth), nameof(VersionColumnWidth),
++                nameof(NewVersionColumnWidth), nameof(SourceColumnWidth),
++                nameof(InstallerHostColumnWidth), nameof(DownloadSizeColumnWidth),
++                nameof(ReleaseDateColumnWidth), nameof(NameColumnMinWidth), nameof(IdColumnMinWidth),
++                nameof(NameColumnVisibility), nameof(IdColumnVisibility), nameof(VersionColumnVisibility),
++                nameof(NewVersionColumnVisibility), nameof(SourceColumnVisibility),
++                nameof(InstallerHostColumnVisibility), nameof(DownloadSizeColumnVisibility),
++                nameof(ReleaseDateColumnVisibility),
++            })
++                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(property));
++            if (_listRowRealized)
++                _ = EnsureOptionalDetailsLoadedAsync();
++        }
++
++        public void PackageListRow_Loaded(object sender, RoutedEventArgs e)
++        {
++            _listRowRealized = true;
++            _ = EnsureOptionalDetailsLoadedAsync();
++        }
++
++        public void PackageListRow_Unloaded(object sender, RoutedEventArgs e) => _listRowRealized = false;
++
++        public Task EnsureOptionalDetailsLoadedAsync()
++        {
++            if (!_page.OptionalColumnsVisible || _optionalDetailsCts.IsCancellationRequested)
++                return Task.CompletedTask;
++            return _optionalDetailsTask ??= LoadOptionalDetailsAsync();
++        }
++
++        private async Task LoadOptionalDetailsAsync()
++        {
++            CancellationToken token = _optionalDetailsCts.Token;
++            try
++            {
++                await OptionalDetailsGate.WaitAsync(token);
++                IPackageDetails details;
++                try
++                {
++                    IPackage target = Package.IsUpgradable && Package.NewVersionString != Package.VersionString
++                        ? new Package(Package.Name, Package.Id, Package.NewVersionString,
++                            Package.NewVersionString, Package.Source, Package.Manager, Package.OverridenOptions)
++                        : Package;
++                    details = target.Details;
++                    if (!details.IsPopulated)
++                        await Task.Run(() => details.Load(), token);
++                }
++                finally
++                {
++                    OptionalDetailsGate.Release();
++                }
++                token.ThrowIfCancellationRequested();
++                InstallerHostText = details.InstallerUrl?.Host is { Length: > 0 } host ? host : "—";
++                DownloadSizeBytes = details.InstallerSize;
++                DownloadSizeText = DownloadSizeBytes > 0 ? CoreTools.FormatAsSize(DownloadSizeBytes) : "—";
++                ReleaseDate = DateTime.TryParse(details.UpdateDate, CultureInfo.InvariantCulture,
++                    DateTimeStyles.None, out DateTime date) ? date : default;
++                ReleaseDateText = ReleaseDate != default ? ReleaseDate.ToString("d", CultureInfo.CurrentCulture) : "—";
++                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallerHostText)));
++                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DownloadSizeText)));
++                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ReleaseDateText)));
++                _page.NotifyOptionalDetailsLoaded();
++            }
++            catch (OperationCanceledException) { }
++            catch (Exception ex)
++            {
++                Logger.Warn($"Could not load list details for {Package.Id}: {ex.Message}");
++            }
++        }
++
+         public int NewVersionLabelWidth
+         {
+             get => Package.IsUpgradable ? 125 : 0;
+@@ -251,6 +360,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         public void Dispose()
+         {
+             Package.PropertyChanged -= Package_PropertyChanged;
++            _optionalDetailsCts.Cancel();
+             _installerHostCheckCts?.Cancel();
+             _installerHostCheckCts?.Dispose();
+             _installerHostCheckCts = null;
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
+index f473535..293ef68 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
+@@ -26,6 +26,8 @@
+         AutomationProperties.Name="{x:Bind Package.AutomationName}"
+         CornerRadius="4"
+         DoubleTapped="{x:Bind PackageItemContainer_DoubleTapped}"
++        Loaded="{x:Bind PackageListRow_Loaded}"
++        Unloaded="{x:Bind PackageListRow_Unloaded}"
+         Package="{x:Bind Package}"
+         PreviewKeyDown="{x:Bind PackageItemContainer_PreviewKeyDown}"
+         RightTapped="{x:Bind PackageItemContainer_RightTapped}"
+@@ -37,11 +39,14 @@
+           </Grid.RowDefinitions>
+           <Grid.ColumnDefinitions>
+             <ColumnDefinition Width="24" />
+-            <ColumnDefinition Width="*" MinWidth="125" />
+-            <ColumnDefinition Width="*" MinWidth="125" />
+-            <ColumnDefinition Width="*" MaxWidth="150" />
+-            <ColumnDefinition Width="*" MaxWidth="{x:Bind NewVersionLabelWidth}" />
+-            <ColumnDefinition Width="*" MaxWidth="175" />
++            <ColumnDefinition Width="{x:Bind NameColumnWidth, Mode=OneWay}" MinWidth="{x:Bind NameColumnMinWidth, Mode=OneWay}" />
++            <ColumnDefinition Width="{x:Bind IdColumnWidth, Mode=OneWay}" MinWidth="{x:Bind IdColumnMinWidth, Mode=OneWay}" />
++            <ColumnDefinition Width="{x:Bind VersionColumnWidth, Mode=OneWay}" MaxWidth="150" />
++            <ColumnDefinition Width="{x:Bind NewVersionColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind NewVersionLabelWidth}" />
++            <ColumnDefinition Width="{x:Bind SourceColumnWidth, Mode=OneWay}" MaxWidth="175" />
++            <ColumnDefinition Width="{x:Bind InstallerHostColumnWidth, Mode=OneWay}" MaxWidth="175" />
++            <ColumnDefinition Width="{x:Bind DownloadSizeColumnWidth, Mode=OneWay}" MaxWidth="125" />
++            <ColumnDefinition Width="{x:Bind ReleaseDateColumnWidth, Mode=OneWay}" MaxWidth="125" />
+           </Grid.ColumnDefinitions>
+           <CheckBox
+             Grid.Row="0"
+@@ -52,10 +57,10 @@
+             AutomationProperties.AccessibilityView="Raw"
+           />
+ 
++          <Grid Grid.Column="1" Visibility="{x:Bind NameColumnVisibility, Mode=OneWay}">
+           <!--  Regular or package icon  -->
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="1"
+             Width="24"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+@@ -68,7 +73,6 @@
+ 
+           <Image
+             Grid.Row="0"
+-            Grid.Column="1"
+             Width="24"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+@@ -80,7 +84,6 @@
+           <!--  Package tag icon  -->
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="1"
+             Width="20"
+             Height="20"
+             Margin="8,0,-4,-2"
+@@ -96,7 +99,6 @@
+ 
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="1"
+             Width="20"
+             Height="20"
+             Margin="8,0,-4,-2"
+@@ -111,7 +113,6 @@
+ 
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="1"
+             Margin="28,-2,0,0"
+             VerticalAlignment="Center"
+             FontSize="13"
+@@ -119,9 +120,10 @@
+             ToolTipService.ToolTip="{x:Bind ListedNameTooltip, Mode=OneWay}"
+           />
+ 
++          </Grid>
++          <Grid Grid.Column="2" Visibility="{x:Bind IdColumnVisibility, Mode=OneWay}">
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="2"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+             widgets:IconBuilder.Icon="Id"
+@@ -132,7 +134,6 @@
+ 
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="2"
+             Margin="28,-2,0,0"
+             VerticalAlignment="Center"
+             FontSize="13"
+@@ -140,9 +141,10 @@
+             ToolTipService.ToolTip="{x:Bind Package.Id}"
+           />
+ 
++          </Grid>
++          <Grid Grid.Column="3" Visibility="{x:Bind VersionColumnVisibility, Mode=OneWay}">
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="3"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+             widgets:IconBuilder.Icon="version"
+@@ -153,7 +155,6 @@
+ 
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="3"
+             Margin="28,-2,0,0"
+             VerticalAlignment="Center"
+             FontSize="13"
+@@ -161,9 +162,10 @@
+             ToolTipService.ToolTip="{x:Bind Package.VersionString}"
+           />
+ 
++          </Grid>
++          <Grid Grid.Column="4" Visibility="{x:Bind NewVersionColumnVisibility, Mode=OneWay}">
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="4"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+             widgets:IconBuilder.Icon="download"
+@@ -175,7 +177,6 @@
+ 
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="4"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+             widgets:IconBuilder.Icon="Warning_Filled"
+@@ -187,7 +188,6 @@
+ 
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="4"
+             Margin="28,-2,0,0"
+             VerticalAlignment="Center"
+             FontSize="13"
+@@ -196,9 +196,10 @@
+             Visibility="{x:Bind Package.IsUpgradable}"
+           />
+ 
++          </Grid>
++          <Grid Grid.Column="5" Visibility="{x:Bind SourceColumnVisibility, Mode=OneWay}">
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="5"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+             widgets:IconBuilder.Icon="{x:Bind Package.Source.IconId}"
+@@ -209,13 +210,22 @@
+ 
+           <TextBlock
+             Grid.Row="0"
+-            Grid.Column="5"
+             Margin="28,-2,0,0"
+             VerticalAlignment="Center"
+             FontSize="13"
+             Text="{x:Bind Package.Source.AsString_DisplayName}"
+             ToolTipService.ToolTip="{x:Bind Package.Source.AsString_DisplayName}"
+           />
++          </Grid>
++          <TextBlock Grid.Column="6" Margin="4,0" VerticalAlignment="Center"
++            Text="{x:Bind InstallerHostText, Mode=OneWay}" TextTrimming="CharacterEllipsis"
++            Visibility="{x:Bind InstallerHostColumnVisibility, Mode=OneWay}" />
++          <TextBlock Grid.Column="7" Margin="4,0" VerticalAlignment="Center"
++            Text="{x:Bind DownloadSizeText, Mode=OneWay}" TextTrimming="CharacterEllipsis"
++            Visibility="{x:Bind DownloadSizeColumnVisibility, Mode=OneWay}" />
++          <TextBlock Grid.Column="8" AutomationProperties.AutomationId="PackageReleaseDate" Margin="4,0" VerticalAlignment="Center"
++            Text="{x:Bind ReleaseDateText, Mode=OneWay}" TextTrimming="CharacterEllipsis"
++            Visibility="{x:Bind ReleaseDateColumnVisibility, Mode=OneWay}" />
+         </Grid>
+       </widgets:PackageItemContainer>
+     </DataTemplate>
+@@ -1005,7 +1015,7 @@
+             <RowDefinition Height="37" />
+             <RowDefinition Height="*" />
+           </Grid.RowDefinitions>
+-          <Grid Grid.Row="0" Margin="4,2,4,5" ColumnSpacing="0">
++          <Grid x:Name="ColumnsHeader" Grid.Row="0" Margin="4,2,4,5" ColumnSpacing="0">
+             <Grid.RowDefinitions>
+               <RowDefinition Height="30" />
+             </Grid.RowDefinitions>
+@@ -1013,15 +1023,18 @@
+               <ColumnDefinition Width="8" />
+               <ColumnDefinition Width="32" />
+               <ColumnDefinition Width="28" />
+-              <ColumnDefinition Width="*" MinWidth="100" />
+-              <ColumnDefinition Width="32" />
+-              <ColumnDefinition Width="*" MinWidth="100" />
+-              <ColumnDefinition Width="32" />
+-              <ColumnDefinition Width="*" MaxWidth="125" />
+-              <ColumnDefinition Width="32" MaxWidth="{x:Bind NewVersionIconWidth}" />
+-              <ColumnDefinition Width="*" MaxWidth="{x:Bind NewVersionLabelWidth}" />
+-              <ColumnDefinition Width="32" />
+-              <ColumnDefinition Width="*" MaxWidth="150" />
++              <ColumnDefinition x:Name="NameHeaderWidth" Width="*" MinWidth="100" />
++              <ColumnDefinition x:Name="IdHeaderIconWidth" Width="32" />
++              <ColumnDefinition x:Name="IdHeaderWidth" Width="*" MinWidth="100" />
++              <ColumnDefinition x:Name="VersionHeaderIconWidth" Width="32" />
++              <ColumnDefinition x:Name="VersionHeaderWidth" Width="*" MaxWidth="125" />
++              <ColumnDefinition x:Name="NewVersionHeaderIconWidth" Width="32" MaxWidth="{x:Bind NewVersionIconWidth}" />
++              <ColumnDefinition x:Name="NewVersionHeaderWidth" Width="*" MaxWidth="{x:Bind NewVersionLabelWidth}" />
++              <ColumnDefinition x:Name="SourceHeaderIconWidth" Width="32" />
++              <ColumnDefinition x:Name="SourceHeaderWidth" Width="*" MaxWidth="150" />
++              <ColumnDefinition x:Name="InstallerHostHeaderWidth" Width="0" MaxWidth="175" />
++              <ColumnDefinition x:Name="DownloadSizeHeaderWidth" Width="0" MaxWidth="125" />
++              <ColumnDefinition x:Name="ReleaseDateHeaderWidth" Width="0" MaxWidth="125" />
+               <ColumnDefinition Width="11" />
+             </Grid.ColumnDefinitions>
+             <Button
+@@ -1045,6 +1058,7 @@
+             </Button>
+             <Button
+               Name="NameHeader"
++              AutomationProperties.AutomationId="NameHeader"
+               Grid.Column="3"
+               Grid.ColumnSpan="1"
+               HorizontalAlignment="Stretch"
+@@ -1083,12 +1097,15 @@
+             <Button
+               Name="SourceHeader"
+               Grid.Column="10"
+-              Grid.ColumnSpan="3"
++              Grid.ColumnSpan="2"
+               HorizontalAlignment="Stretch"
+               VerticalAlignment="Stretch"
+               BorderThickness="0"
+               CornerRadius="0,4,4,0"
+             />
++            <Button x:Name="InstallerHostHeader" Grid.Column="12" BorderThickness="0" CornerRadius="0" />
++            <Button x:Name="DownloadSizeHeader" Grid.Column="13" BorderThickness="0" CornerRadius="0" />
++            <Button x:Name="ReleaseDateHeader" AutomationProperties.AutomationId="ReleaseDateHeader" Grid.Column="14" BorderThickness="0" CornerRadius="0" />
+           </Grid>
+ 
+           <Toolkit:SwitchPresenter
+@@ -1206,6 +1223,7 @@
+           </Grid.ColumnDefinitions>
+           <TextBox
+             x:Name="MegaQueryBlock"
++            AutomationProperties.AutomationId="MegaQueryBlock"
+             Grid.Row="1"
+             Grid.Column="1"
+             Padding="16,8,10,8"
+@@ -1216,6 +1234,7 @@
+           />
+           <Button
+             x:Name="MegaFindButton"
++            AutomationProperties.AutomationId="MegaFindButton"
+             Grid.Row="1"
+             Grid.Column="2"
+             Width="64"
+@@ -1254,7 +1273,7 @@
+           Spacing="4"
+         >
+           <widgets:TranslatedTextBlock FontSize="12" VerticalAlignment="Center" Text="Order by:" />
+-          <DropDownButton x:Name="OrderByButton" FontSize="12">
++          <DropDownButton x:Name="OrderByButton" AutomationProperties.AutomationId="OrderByButton" FontSize="12">
+             <DropDownButton.Flyout>
+               <widgets:BetterMenu Placement="Top">
+                 <widgets:BetterToggleMenuItem x:Name="OrderByName_Menu" Text="Name" />
+@@ -1266,6 +1285,9 @@
+                   Visibility="{x:Bind RoleIsUpdateLike}"
+                 />
+                 <widgets:BetterToggleMenuItem x:Name="OrderBySrc_Menu" Text="Source" />
++                <widgets:BetterToggleMenuItem x:Name="OrderBySize_Menu" Text="Download size" />
++                <widgets:BetterToggleMenuItem x:Name="OrderByDate_Menu" Text="Release date" />
++                <MenuFlyoutSubItem x:Name="ColumnsMenu" AutomationProperties.AutomationId="ColumnsMenu" Text="Columns" />
+                 <MenuFlyoutSeparator />
+                 <widgets:BetterToggleMenuItem x:Name="OrderAsc_Menu" Text="Ascendant" />
+                 <widgets:BetterToggleMenuItem x:Name="OrderDesc_Menu" Text="Descendant" />
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+index 422b7d1..2b5cab7 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+@@ -8,6 +8,7 @@ using ExternalLibraries.Pickers;
+ using Microsoft.UI;
+ using Microsoft.UI.Input;
+ using Microsoft.UI.Xaml;
++using Microsoft.UI.Xaml.Automation;
+ using Microsoft.UI.Xaml.Controls;
+ using Microsoft.UI.Xaml.Controls.Primitives;
+ using Microsoft.UI.Xaml.Input;
+@@ -213,6 +214,128 @@ namespace UniGetUI.Interface
+         private readonly ObservableCollection<PackageWrapper> WrappedPackages = [];
+         private IEnumerable<PackageWrapper>? LastQueryResult;
+ 
++        private static readonly (string Key, string Label)[] ListColumns =
++        [
++            ("Name", "Package Name"), ("Id", "Package ID"), ("Version", "Version"),
++            ("NewVersion", "New version"), ("Source", "Source"),
++            ("InstallerHost", "Installer host"), ("DownloadSize", "Download size"),
++            ("ReleaseDate", "Release date"),
++        ];
++        private static event Action? ColumnVisibilityChanged;
++        private readonly List<(string Key, ToggleMenuFlyoutItem Item)> _columnMenuItems = [];
++        private bool _optionalSortPending;
++
++        private bool ColumnIsAvailable(string column) => column switch
++        {
++            "NewVersion" => RoleIsUpdateLike,
++            "InstallerHost" or "DownloadSize" or "ReleaseDate" => PAGE_ROLE != OperationType.Uninstall,
++            _ => true,
++        };
++
++        private static bool ColumnSettingVisible(string column) => column switch
++        {
++            "InstallerHost" => Settings.Get(Settings.K.ShowInstallerHostColumn),
++            "DownloadSize" => Settings.Get(Settings.K.ShowDownloadSizeColumn),
++            "ReleaseDate" => Settings.Get(Settings.K.ShowReleaseDateColumn),
++            _ => !Settings.GetDictionaryItem<string, bool>(Settings.K.HiddenPackageListColumns, column),
++        };
++
++        public bool IsColumnVisible(string column)
++        {
++            if (!ColumnIsAvailable(column)) return false;
++            if (ColumnSettingVisible(column)) return true;
++            return column == "Name" && !ListColumns.Any(item => item.Key != "Name"
++                && ColumnIsAvailable(item.Key) && ColumnSettingVisible(item.Key));
++        }
++
++        public bool OptionalColumnsVisible => IsColumnVisible("InstallerHost")
++            || IsColumnVisible("DownloadSize") || IsColumnVisible("ReleaseDate");
++
++        private static void SetColumnVisible(string column, bool visible)
++        {
++            switch (column)
++            {
++                case "InstallerHost": Settings.Set(Settings.K.ShowInstallerHostColumn, visible); break;
++                case "DownloadSize": Settings.Set(Settings.K.ShowDownloadSizeColumn, visible); break;
++                case "ReleaseDate": Settings.Set(Settings.K.ShowReleaseDateColumn, visible); break;
++                default:
++                    Settings.SetDictionaryItem(Settings.K.HiddenPackageListColumns, column, !visible);
++                    break;
++            }
++            ColumnVisibilityChanged?.Invoke();
++        }
++
++        private void SetupColumnMenus()
++        {
++            MenuFlyout headerMenu = new();
++            ColumnsHeader.ContextFlyout = headerMenu;
++            ColumnsMenu.Text = CoreTools.Translate("Columns");
++            foreach ((string key, string label) in ListColumns.Where(item => ColumnIsAvailable(item.Key)))
++            {
++                AddColumnItem(headerMenu.Items, key, label);
++                AddColumnItem(ColumnsMenu.Items, key, label);
++            }
++            Loaded += (_, _) =>
++            {
++                ColumnVisibilityChanged -= RefreshColumnVisibility;
++                ColumnVisibilityChanged += RefreshColumnVisibility;
++                RefreshColumnVisibility();
++            };
++            Unloaded += (_, _) => ColumnVisibilityChanged -= RefreshColumnVisibility;
++            RefreshColumnVisibility();
++        }
++
++        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label)
++        {
++            ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
++            AutomationProperties.SetAutomationId(item, "Column" + key);
++            item.Click += (_, _) => SetColumnVisible(key, item.IsChecked);
++            items.Add(item);
++            _columnMenuItems.Add((key, item));
++        }
++
++        private void RefreshColumnVisibility()
++        {
++            static GridLength Star(bool visible) => new(visible ? 1 : 0, GridUnitType.Star);
++            static GridLength Icon(bool visible) => new(visible ? 32 : 0);
++            bool name = IsColumnVisible("Name"), id = IsColumnVisible("Id");
++            bool version = IsColumnVisible("Version"), next = IsColumnVisible("NewVersion");
++            bool source = IsColumnVisible("Source"), host = IsColumnVisible("InstallerHost");
++            bool size = IsColumnVisible("DownloadSize"), date = IsColumnVisible("ReleaseDate");
++            NameHeaderWidth.MinWidth = name ? 100 : 0;
++            IdHeaderWidth.MinWidth = id ? 100 : 0;
++            NameHeaderWidth.Width = Star(name);
++            IdHeaderIconWidth.Width = Icon(id); IdHeaderWidth.Width = Star(id);
++            VersionHeaderIconWidth.Width = Icon(version); VersionHeaderWidth.Width = Star(version);
++            NewVersionHeaderIconWidth.Width = Icon(next); NewVersionHeaderWidth.Width = Star(next);
++            SourceHeaderIconWidth.Width = Icon(source); SourceHeaderWidth.Width = Star(source);
++            InstallerHostHeaderWidth.Width = Star(host);
++            DownloadSizeHeaderWidth.Width = Star(size);
++            ReleaseDateHeaderWidth.Width = Star(date);
++            NameHeader.Visibility = name ? Visibility.Visible : Visibility.Collapsed;
++            IdHeader.Visibility = id ? Visibility.Visible : Visibility.Collapsed;
++            VersionHeader.Visibility = version ? Visibility.Visible : Visibility.Collapsed;
++            NewVersionHeader.Visibility = next ? Visibility.Visible : Visibility.Collapsed;
++            SourceHeader.Visibility = source ? Visibility.Visible : Visibility.Collapsed;
++            InstallerHostHeader.Visibility = host ? Visibility.Visible : Visibility.Collapsed;
++            DownloadSizeHeader.Visibility = size ? Visibility.Visible : Visibility.Collapsed;
++            ReleaseDateHeader.Visibility = date ? Visibility.Visible : Visibility.Collapsed;
++            OrderBySize_Menu.Visibility = size ? Visibility.Visible : Visibility.Collapsed;
++            OrderByDate_Menu.Visibility = date ? Visibility.Visible : Visibility.Collapsed;
++
++            int visibleCount = ListColumns.Count(item => IsColumnVisible(item.Key));
++            foreach ((string key, ToggleMenuFlyoutItem item) in _columnMenuItems)
++            {
++                item.IsChecked = IsColumnVisible(key);
++                item.IsEnabled = !item.IsChecked || visibleCount > 1;
++            }
++            foreach (PackageWrapper wrapper in WrappedPackages)
++                wrapper.NotifyColumnVisibilityChanged();
++            if ((!size && FilteredPackages.CurrentSorter == ObservablePackageCollection.Sorter.DownloadSize)
++                || (!date && FilteredPackages.CurrentSorter == ObservablePackageCollection.Sorter.ReleaseDate))
++                SortPackagesBy(ObservablePackageCollection.Sorter.Name);
++        }
++
+         protected List<IPackageManager> UsedManagers = [];
+         protected ConcurrentDictionary<
+             IPackageManager,
+@@ -320,6 +443,7 @@ namespace UniGetUI.Interface
+ 
+             // Load UI
+             InitializeComponent();
++            SetupColumnMenus();
+ 
+             // Selection of grid view mode
+             int viewMode = Settings.GetDictionaryItem<string, int>(
+@@ -450,6 +574,10 @@ namespace UniGetUI.Interface
+                 SortPackagesBy(ObservablePackageCollection.Sorter.NewVersion);
+             SourceHeader.Click += (_, _) =>
+                 SortPackagesBy(ObservablePackageCollection.Sorter.Source);
++            DownloadSizeHeader.Click += (_, _) =>
++                SortPackagesBy(ObservablePackageCollection.Sorter.DownloadSize);
++            ReleaseDateHeader.Click += (_, _) =>
++                SortPackagesBy(ObservablePackageCollection.Sorter.ReleaseDate);
+ 
+             OrderByName_Menu.Click += (_, _) =>
+                 SortPackagesBy(ObservablePackageCollection.Sorter.Name);
+@@ -460,6 +588,10 @@ namespace UniGetUI.Interface
+                 SortPackagesBy(ObservablePackageCollection.Sorter.NewVersion);
+             OrderBySrc_Menu.Click += (_, _) =>
+                 SortPackagesBy(ObservablePackageCollection.Sorter.Source);
++            OrderBySize_Menu.Click += (_, _) =>
++                SortPackagesBy(ObservablePackageCollection.Sorter.DownloadSize);
++            OrderByDate_Menu.Click += (_, _) =>
++                SortPackagesBy(ObservablePackageCollection.Sorter.ReleaseDate);
+ 
+             OrderAsc_Menu.Click += (_, _) => SortPackagesBy(ascendent: true);
+             OrderDesc_Menu.Click += (_, _) => SortPackagesBy(ascendent: false);
+@@ -489,6 +621,9 @@ namespace UniGetUI.Interface
+                 VersionHeader.Content = CoreTools.Translate("Version");
+                 NewVersionHeader.Content = CoreTools.Translate("New version");
+                 SourceHeader.Content = CoreTools.Translate("Source");
++                InstallerHostHeader.Content = CoreTools.Translate("Installer host");
++                DownloadSizeHeader.Content = CoreTools.Translate("Download size");
++                ReleaseDateHeader.Content = CoreTools.Translate("Release date");
+             }
+             else
+             {
+@@ -497,6 +632,9 @@ namespace UniGetUI.Interface
+                 VersionHeader.Content = "";
+                 NewVersionHeader.Content = "";
+                 SourceHeader.Content = "";
++                InstallerHostHeader.Content = "";
++                DownloadSizeHeader.Content = "";
++                ReleaseDateHeader.Content = "";
+             }
+         }
+ 
+@@ -1192,6 +1330,33 @@ namespace UniGetUI.Interface
+             FilteredPackages.SetSorter(sorter);
+             FilteredPackages.Sort();
+             UpdateSortingMenu();
++            if (sorter is ObservablePackageCollection.Sorter.DownloadSize or ObservablePackageCollection.Sorter.ReleaseDate)
++                _ = LoadDetailsAndSortAsync(sorter);
++        }
++
++        private async Task LoadDetailsAndSortAsync(ObservablePackageCollection.Sorter sorter)
++        {
++            await Task.WhenAll(FilteredPackages.ToArray().Select(item => item.EnsureOptionalDetailsLoadedAsync()));
++            if (FilteredPackages.CurrentSorter == sorter)
++                FilteredPackages.Sort();
++        }
++
++        public void NotifyOptionalDetailsLoaded()
++        {
++            if (_optionalSortPending || FilteredPackages.CurrentSorter is not
++                (ObservablePackageCollection.Sorter.DownloadSize or ObservablePackageCollection.Sorter.ReleaseDate))
++                return;
++            _optionalSortPending = true;
++            _ = RefreshOptionalSortAsync();
++        }
++
++        private async Task RefreshOptionalSortAsync()
++        {
++            await Task.Delay(250);
++            _optionalSortPending = false;
++            if (FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.DownloadSize
++                or ObservablePackageCollection.Sorter.ReleaseDate)
++                FilteredPackages.Sort();
+         }
+ 
+         public void SortPackagesBy(bool ascendent)
+@@ -1213,6 +1378,10 @@ namespace UniGetUI.Interface
+                 FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.NewVersion;
+             OrderBySrc_Menu.IsChecked =
+                 FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.Source;
++            OrderBySize_Menu.IsChecked =
++                FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.DownloadSize;
++            OrderByDate_Menu.IsChecked =
++                FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.ReleaseDate;
+ 
+             OrderAsc_Menu.IsChecked = !FilteredPackages.Descending;
+             OrderDesc_Menu.IsChecked = FilteredPackages.Descending;
+@@ -1224,6 +1393,8 @@ namespace UniGetUI.Interface
+                 ObservablePackageCollection.Sorter.Version => CoreTools.Translate("Version"),
+                 ObservablePackageCollection.Sorter.NewVersion => CoreTools.Translate("New version"),
+                 ObservablePackageCollection.Sorter.Source => CoreTools.Translate("Source"),
++                ObservablePackageCollection.Sorter.DownloadSize => CoreTools.Translate("Download size"),
++                ObservablePackageCollection.Sorter.ReleaseDate => CoreTools.Translate("Release date"),
+                 _ => throw new InvalidDataException(),
+             };
+         }
+diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
+index 81ab491..f24450a 100644
+--- a/testing/automation/run-winui-ui-e2e.ps1
++++ b/testing/automation/run-winui-ui-e2e.ps1
+@@ -236,6 +236,57 @@ try {
+ 
+     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
+ 
++    Write-Host 'Enabling the release date column on Discover'
++    $null = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
++        -ArgumentList 'unigetui://showDiscoverPage' -PassThru
++    $root = [System.Windows.Automation.AutomationElement]::RootElement
++    $query = Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120
++    Invoke-Element (Find-ElementByAutomationId $root 'OrderByButton')
++    $columnsMenu = Find-ElementByAutomationId $root 'ColumnsMenu'
++    try {
++        $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
++            [System.Windows.Automation.ExpandCollapsePattern]::Pattern
++        )
++        $expand.Expand()
++    }
++    catch {
++        $columnsMenu.SetFocus()
++        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
++    }
++    Invoke-Element (Find-ElementByAutomationId $root 'ColumnReleaseDate')
++    [void](Find-ElementByAutomationId $root 'ReleaseDateHeader')
++    $value = [System.Windows.Automation.ValuePattern]$query.GetCurrentPattern(
++        [System.Windows.Automation.ValuePattern]::Pattern
++    )
++    $value.SetValue('dotnetsay')
++    Invoke-Element (Find-ElementByAutomationId $root 'MegaFindButton')
++    $dateCondition = [System.Windows.Automation.PropertyCondition]::new(
++        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PackageReleaseDate'
++    )
++    $deadline = (Get-Date).AddSeconds(180)
++    $dateFound = $false
++    do {
++        foreach ($element in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $dateCondition)) {
++            $parsedDate = [datetime]::MinValue
++            if ([datetime]::TryParse($element.Current.Name, [ref]$parsedDate)) {
++                $dateFound = $true
++                break
++            }
++        }
++        if (-not $dateFound) { Start-Sleep -Milliseconds 500 }
++    } while (-not $dateFound -and (Get-Date) -lt $deadline)
++    if (-not $dateFound) { throw 'A package release date was not displayed.' }
++    Invoke-Element (Find-ElementByAutomationId $root 'ReleaseDateHeader')
++
++    Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
++    Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
++    $appProcess = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
++        -ArgumentList 'unigetui://showDiscoverPage' -PassThru
++    $dateHeader = Find-ElementByAutomationId $root 'ReleaseDateHeader' -TimeoutSeconds 120
++    if ($dateHeader.Current.ProcessId -ne $appProcess.Id) {
++        throw 'The release date column did not remain enabled after restart.'
++    }
++
+     $toolsBefore = (& dotnet tool list --global | Out-String)
+     $packageLink = 'unigetui://package?manager=dotnet-tool&id=dotnetsay&version=2.1.4'
+     Write-Host 'Opening a package link in the running app'
+-- 
+2.51.1
+

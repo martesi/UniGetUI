@@ -236,6 +236,57 @@ try {
 
     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
 
+    Write-Host 'Enabling the release date column on Discover'
+    $null = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+        -ArgumentList 'unigetui://showDiscoverPage' -PassThru
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $query = Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120
+    Invoke-Element (Find-ElementByAutomationId $root 'OrderByButton')
+    $columnsMenu = Find-ElementByAutomationId $root 'ColumnsMenu'
+    try {
+        $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
+            [System.Windows.Automation.ExpandCollapsePattern]::Pattern
+        )
+        $expand.Expand()
+    }
+    catch {
+        $columnsMenu.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
+    }
+    Invoke-Element (Find-ElementByAutomationId $root 'ColumnReleaseDate')
+    [void](Find-ElementByAutomationId $root 'ReleaseDateHeader')
+    $value = [System.Windows.Automation.ValuePattern]$query.GetCurrentPattern(
+        [System.Windows.Automation.ValuePattern]::Pattern
+    )
+    $value.SetValue('dotnetsay')
+    Invoke-Element (Find-ElementByAutomationId $root 'MegaFindButton')
+    $dateCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PackageReleaseDate'
+    )
+    $deadline = (Get-Date).AddSeconds(180)
+    $dateFound = $false
+    do {
+        foreach ($element in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $dateCondition)) {
+            $parsedDate = [datetime]::MinValue
+            if ([datetime]::TryParse($element.Current.Name, [ref]$parsedDate)) {
+                $dateFound = $true
+                break
+            }
+        }
+        if (-not $dateFound) { Start-Sleep -Milliseconds 500 }
+    } while (-not $dateFound -and (Get-Date) -lt $deadline)
+    if (-not $dateFound) { throw 'A package release date was not displayed.' }
+    Invoke-Element (Find-ElementByAutomationId $root 'ReleaseDateHeader')
+
+    Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+    Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
+    $appProcess = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+        -ArgumentList 'unigetui://showDiscoverPage' -PassThru
+    $dateHeader = Find-ElementByAutomationId $root 'ReleaseDateHeader' -TimeoutSeconds 120
+    if ($dateHeader.Current.ProcessId -ne $appProcess.Id) {
+        throw 'The release date column did not remain enabled after restart.'
+    }
+
     $toolsBefore = (& dotnet tool list --global | Out-String)
     $packageLink = 'unigetui://package?manager=dotnet-tool&id=dotnetsay&version=2.1.4'
     Write-Host 'Opening a package link in the running app'

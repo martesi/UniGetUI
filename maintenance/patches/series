@@ -79,3 +79,4 @@ backports/0740-isolate-nuget-tests.patch
 backports/0750-winui-startup-wait.patch
 backports/0760-avoid-ci-test-rebuild.patch
 backports/0770-package-links.patch
+backports/0780-package-columns.patch

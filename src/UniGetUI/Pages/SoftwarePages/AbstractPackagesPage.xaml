@@ -26,6 +26,8 @@
         AutomationProperties.Name="{x:Bind Package.AutomationName}"
         CornerRadius="4"
         DoubleTapped="{x:Bind PackageItemContainer_DoubleTapped}"
+        Loaded="{x:Bind PackageListRow_Loaded}"
+        Unloaded="{x:Bind PackageListRow_Unloaded}"
         Package="{x:Bind Package}"
         PreviewKeyDown="{x:Bind PackageItemContainer_PreviewKeyDown}"
         RightTapped="{x:Bind PackageItemContainer_RightTapped}"
@@ -37,11 +39,14 @@
           </Grid.RowDefinitions>
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="24" />
-            <ColumnDefinition Width="*" MinWidth="125" />
-            <ColumnDefinition Width="*" MinWidth="125" />
-            <ColumnDefinition Width="*" MaxWidth="150" />
-            <ColumnDefinition Width="*" MaxWidth="{x:Bind NewVersionLabelWidth}" />
-            <ColumnDefinition Width="*" MaxWidth="175" />
+            <ColumnDefinition Width="{x:Bind NameColumnWidth, Mode=OneWay}" MinWidth="{x:Bind NameColumnMinWidth, Mode=OneWay}" />
+            <ColumnDefinition Width="{x:Bind IdColumnWidth, Mode=OneWay}" MinWidth="{x:Bind IdColumnMinWidth, Mode=OneWay}" />
+            <ColumnDefinition Width="{x:Bind VersionColumnWidth, Mode=OneWay}" MaxWidth="150" />
+            <ColumnDefinition Width="{x:Bind NewVersionColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind NewVersionLabelWidth}" />
+            <ColumnDefinition Width="{x:Bind SourceColumnWidth, Mode=OneWay}" MaxWidth="175" />
+            <ColumnDefinition Width="{x:Bind InstallerHostColumnWidth, Mode=OneWay}" MaxWidth="175" />
+            <ColumnDefinition Width="{x:Bind DownloadSizeColumnWidth, Mode=OneWay}" MaxWidth="125" />
+            <ColumnDefinition Width="{x:Bind ReleaseDateColumnWidth, Mode=OneWay}" MaxWidth="125" />
           </Grid.ColumnDefinitions>
           <CheckBox
             Grid.Row="0"
@@ -52,10 +57,10 @@
             AutomationProperties.AccessibilityView="Raw"
           />
 
+          <Grid Grid.Column="1" Visibility="{x:Bind NameColumnVisibility, Mode=OneWay}">
           <!--  Regular or package icon  -->
           <TextBlock
             Grid.Row="0"
-            Grid.Column="1"
             Width="24"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"
@@ -68,7 +73,6 @@
 
           <Image
             Grid.Row="0"
-            Grid.Column="1"
             Width="24"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"
@@ -80,7 +84,6 @@
           <!--  Package tag icon  -->
           <TextBlock
             Grid.Row="0"
-            Grid.Column="1"
             Width="20"
             Height="20"
             Margin="8,0,-4,-2"
@@ -96,7 +99,6 @@
 
           <TextBlock
             Grid.Row="0"
-            Grid.Column="1"
             Width="20"
             Height="20"
             Margin="8,0,-4,-2"
@@ -111,7 +113,6 @@
 
           <TextBlock
             Grid.Row="0"
-            Grid.Column="1"
             Margin="28,-2,0,0"
             VerticalAlignment="Center"
             FontSize="13"
@@ -119,9 +120,10 @@
             ToolTipService.ToolTip="{x:Bind ListedNameTooltip, Mode=OneWay}"
           />
 
+          </Grid>
+          <Grid Grid.Column="2" Visibility="{x:Bind IdColumnVisibility, Mode=OneWay}">
           <TextBlock
             Grid.Row="0"
-            Grid.Column="2"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"
             widgets:IconBuilder.Icon="Id"
@@ -132,7 +134,6 @@
 
           <TextBlock
             Grid.Row="0"
-            Grid.Column="2"
             Margin="28,-2,0,0"
             VerticalAlignment="Center"
             FontSize="13"
@@ -140,9 +141,10 @@
             ToolTipService.ToolTip="{x:Bind Package.Id}"
           />
 
+          </Grid>
+          <Grid Grid.Column="3" Visibility="{x:Bind VersionColumnVisibility, Mode=OneWay}">
           <TextBlock
             Grid.Row="0"
-            Grid.Column="3"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"
             widgets:IconBuilder.Icon="version"
@@ -153,7 +155,6 @@
 
           <TextBlock
             Grid.Row="0"
-            Grid.Column="3"
             Margin="28,-2,0,0"
             VerticalAlignment="Center"
             FontSize="13"
@@ -161,9 +162,10 @@
             ToolTipService.ToolTip="{x:Bind Package.VersionString}"
           />
 
+          </Grid>
+          <Grid Grid.Column="4" Visibility="{x:Bind NewVersionColumnVisibility, Mode=OneWay}">
           <TextBlock
             Grid.Row="0"
-            Grid.Column="4"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"
             widgets:IconBuilder.Icon="download"
@@ -175,7 +177,6 @@
 
           <TextBlock
             Grid.Row="0"
-            Grid.Column="4"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"
             widgets:IconBuilder.Icon="Warning_Filled"
@@ -187,7 +188,6 @@
 
           <TextBlock
             Grid.Row="0"
-            Grid.Column="4"
             Margin="28,-2,0,0"
             VerticalAlignment="Center"
             FontSize="13"
@@ -196,9 +196,10 @@
             Visibility="{x:Bind Package.IsUpgradable}"
           />
 
+          </Grid>
+          <Grid Grid.Column="5" Visibility="{x:Bind SourceColumnVisibility, Mode=OneWay}">
           <TextBlock
             Grid.Row="0"
-            Grid.Column="5"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"
             widgets:IconBuilder.Icon="{x:Bind Package.Source.IconId}"
@@ -209,13 +210,22 @@
 
           <TextBlock
             Grid.Row="0"
-            Grid.Column="5"
             Margin="28,-2,0,0"
             VerticalAlignment="Center"
             FontSize="13"
             Text="{x:Bind Package.Source.AsString_DisplayName}"
             ToolTipService.ToolTip="{x:Bind Package.Source.AsString_DisplayName}"
           />
+          </Grid>
+          <TextBlock Grid.Column="6" Margin="4,0" VerticalAlignment="Center"
+            Text="{x:Bind InstallerHostText, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+            Visibility="{x:Bind InstallerHostColumnVisibility, Mode=OneWay}" />
+          <TextBlock Grid.Column="7" Margin="4,0" VerticalAlignment="Center"
+            Text="{x:Bind DownloadSizeText, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+            Visibility="{x:Bind DownloadSizeColumnVisibility, Mode=OneWay}" />
+          <TextBlock Grid.Column="8" AutomationProperties.AutomationId="PackageReleaseDate" Margin="4,0" VerticalAlignment="Center"
+            Text="{x:Bind ReleaseDateText, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+            Visibility="{x:Bind ReleaseDateColumnVisibility, Mode=OneWay}" />
         </Grid>
       </widgets:PackageItemContainer>
     </DataTemplate>
@@ -1005,7 +1015,7 @@
             <RowDefinition Height="37" />
             <RowDefinition Height="*" />
           </Grid.RowDefinitions>
-          <Grid Grid.Row="0" Margin="4,2,4,5" ColumnSpacing="0">
+          <Grid x:Name="ColumnsHeader" Grid.Row="0" Margin="4,2,4,5" ColumnSpacing="0">
             <Grid.RowDefinitions>
               <RowDefinition Height="30" />
             </Grid.RowDefinitions>
@@ -1013,15 +1023,18 @@
               <ColumnDefinition Width="8" />
               <ColumnDefinition Width="32" />
               <ColumnDefinition Width="28" />
-              <ColumnDefinition Width="*" MinWidth="100" />
-              <ColumnDefinition Width="32" />
-              <ColumnDefinition Width="*" MinWidth="100" />
-              <ColumnDefinition Width="32" />
-              <ColumnDefinition Width="*" MaxWidth="125" />
-              <ColumnDefinition Width="32" MaxWidth="{x:Bind NewVersionIconWidth}" />
-              <ColumnDefinition Width="*" MaxWidth="{x:Bind NewVersionLabelWidth}" />
-              <ColumnDefinition Width="32" />
-              <ColumnDefinition Width="*" MaxWidth="150" />
+              <ColumnDefinition x:Name="NameHeaderWidth" Width="*" MinWidth="100" />
+              <ColumnDefinition x:Name="IdHeaderIconWidth" Width="32" />
+              <ColumnDefinition x:Name="IdHeaderWidth" Width="*" MinWidth="100" />
+              <ColumnDefinition x:Name="VersionHeaderIconWidth" Width="32" />
+              <ColumnDefinition x:Name="VersionHeaderWidth" Width="*" MaxWidth="125" />
+              <ColumnDefinition x:Name="NewVersionHeaderIconWidth" Width="32" MaxWidth="{x:Bind NewVersionIconWidth}" />
+              <ColumnDefinition x:Name="NewVersionHeaderWidth" Width="*" MaxWidth="{x:Bind NewVersionLabelWidth}" />
+              <ColumnDefinition x:Name="SourceHeaderIconWidth" Width="32" />
+              <ColumnDefinition x:Name="SourceHeaderWidth" Width="*" MaxWidth="150" />
+              <ColumnDefinition x:Name="InstallerHostHeaderWidth" Width="0" MaxWidth="175" />
+              <ColumnDefinition x:Name="DownloadSizeHeaderWidth" Width="0" MaxWidth="125" />
+              <ColumnDefinition x:Name="ReleaseDateHeaderWidth" Width="0" MaxWidth="125" />
               <ColumnDefinition Width="11" />
             </Grid.ColumnDefinitions>
             <Button
@@ -1045,6 +1058,7 @@
             </Button>
             <Button
               Name="NameHeader"
+              AutomationProperties.AutomationId="NameHeader"
               Grid.Column="3"
               Grid.ColumnSpan="1"
               HorizontalAlignment="Stretch"
@@ -1083,12 +1097,15 @@
             <Button
               Name="SourceHeader"
               Grid.Column="10"
-              Grid.ColumnSpan="3"
+              Grid.ColumnSpan="2"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch"
               BorderThickness="0"
               CornerRadius="0,4,4,0"
             />
+            <Button x:Name="InstallerHostHeader" Grid.Column="12" BorderThickness="0" CornerRadius="0" />
+            <Button x:Name="DownloadSizeHeader" Grid.Column="13" BorderThickness="0" CornerRadius="0" />
+            <Button x:Name="ReleaseDateHeader" AutomationProperties.AutomationId="ReleaseDateHeader" Grid.Column="14" BorderThickness="0" CornerRadius="0" />
           </Grid>
 
           <Toolkit:SwitchPresenter
@@ -1206,6 +1223,7 @@
           </Grid.ColumnDefinitions>
           <TextBox
             x:Name="MegaQueryBlock"
+            AutomationProperties.AutomationId="MegaQueryBlock"
             Grid.Row="1"
             Grid.Column="1"
             Padding="16,8,10,8"
@@ -1216,6 +1234,7 @@
           />
           <Button
             x:Name="MegaFindButton"
+            AutomationProperties.AutomationId="MegaFindButton"
             Grid.Row="1"
             Grid.Column="2"
             Width="64"
@@ -1254,7 +1273,7 @@
           Spacing="4"
         >
           <widgets:TranslatedTextBlock FontSize="12" VerticalAlignment="Center" Text="Order by:" />
-          <DropDownButton x:Name="OrderByButton" FontSize="12">
+          <DropDownButton x:Name="OrderByButton" AutomationProperties.AutomationId="OrderByButton" FontSize="12">
             <DropDownButton.Flyout>
               <widgets:BetterMenu Placement="Top">
                 <widgets:BetterToggleMenuItem x:Name="OrderByName_Menu" Text="Name" />
@@ -1266,6 +1285,9 @@
                   Visibility="{x:Bind RoleIsUpdateLike}"
                 />
                 <widgets:BetterToggleMenuItem x:Name="OrderBySrc_Menu" Text="Source" />
+                <widgets:BetterToggleMenuItem x:Name="OrderBySize_Menu" Text="Download size" />
+                <widgets:BetterToggleMenuItem x:Name="OrderByDate_Menu" Text="Release date" />
+                <MenuFlyoutSubItem x:Name="ColumnsMenu" AutomationProperties.AutomationId="ColumnsMenu" Text="Columns" />
                 <MenuFlyoutSeparator />
                 <widgets:BetterToggleMenuItem x:Name="OrderAsc_Menu" Text="Ascendant" />
                 <widgets:BetterToggleMenuItem x:Name="OrderDesc_Menu" Text="Descendant" />
