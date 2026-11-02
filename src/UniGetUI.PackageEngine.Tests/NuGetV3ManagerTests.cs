@@ -12,6 +12,7 @@ using UniGetUI.PackageEngine.Tests.Infrastructure.Helpers;
 
 namespace UniGetUI.PackageEngine.Tests;
 
+[Collection(NuGetV3TestCollection.Name)]
 public sealed class NuGetV3ManagerTests
 {
     [Fact]

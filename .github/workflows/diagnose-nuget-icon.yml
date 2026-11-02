@@ -19,6 +19,6 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-      - name: Run package-engine tests with detailed results
+      - name: Check isolated NuGet fixtures
         shell: pwsh
-        run: dotnet test src/UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --framework net10.0 --logger "console;verbosity=normal" /p:Platform=x64
+        run: dotnet test src/UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --framework net10.0 --filter "FullyQualifiedName~NuGetV3ClientTests|FullyQualifiedName~NuGetV3ManagerTests" --logger "console;verbosity=normal" /p:Platform=x64
