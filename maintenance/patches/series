@@ -73,3 +73,4 @@ backports/0680-refresh-headless-updates.patch
 backports/0690-portable-session-log.patch
 backports/0700-tray-validation-fixes.patch
 backports/0710-tray-switch-automation.patch
+backports/0720-update-ignored-once.patch

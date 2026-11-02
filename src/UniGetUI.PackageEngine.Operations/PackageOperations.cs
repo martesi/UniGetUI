@@ -26,6 +26,7 @@ namespace UniGetUI.PackageEngine.Operations
         public readonly IPackage Package;
         public readonly InstallOptions Options;
         public readonly OperationType Role;
+        public Task SuccessHandled { get; private set; } = Task.CompletedTask;
 
         protected abstract Task HandleSuccess();
         protected abstract Task HandleFailure();
@@ -67,7 +68,7 @@ namespace UniGetUI.PackageEngine.Operations
                     Package.SetTag(PackageTag.Default);
             };
             OperationSucceeded += (_, _) => Package.Manager.InvalidateInstalledPackages();
-            OperationSucceeded += (_, _) => HandleSuccess();
+            OperationSucceeded += (_, _) => SuccessHandled = HandleSuccess();
             OperationFailed += (_, _) => HandleFailure();
         }
 
@@ -533,6 +534,8 @@ namespace UniGetUI.PackageEngine.Operations
         )
             : base(package, options, OperationType.Update, IgnoreParallelInstalls, req) { }
 
+        public bool KeepUpdatesPaused { get; init; }
+
         protected override Task HandleFailure()
         {
             Package.SetTag(PackageTag.Failed);
@@ -553,12 +556,14 @@ namespace UniGetUI.PackageEngine.Operations
             bool explicitVersionRequested =
                 !string.IsNullOrWhiteSpace(Options.Version)
                 && Package.Manager.Capabilities.SupportsCustomVersionsOnUpdate;
+            string targetVersion = explicitVersionRequested
+                ? Options.Version
+                : string.IsNullOrWhiteSpace(Package.NewVersionString)
+                    ? Package.VersionString
+                    : Package.NewVersionString;
+            IgnoredUpdatesDatabase.ForgetAvailableUpdate(Package, targetVersion);
             var installedPackage = await ResolveInstalledPackageSnapshotAsync(
-                explicitVersionRequested
-                    ? Options.Version
-                    : string.IsNullOrWhiteSpace(Package.NewVersionString)
-                        ? Package.VersionString
-                        : Package.NewVersionString,
+                targetVersion,
                 preferFallbackVersionWhenMissing: explicitVersionRequested
             );
             await InstalledPackagesLoader.Instance.AddForeign(installedPackage);
@@ -569,7 +574,8 @@ namespace UniGetUI.PackageEngine.Operations
             }
 
             if (
-                await Package.HasUpdatesIgnoredAsync()
+                !KeepUpdatesPaused
+                && await Package.HasUpdatesIgnoredAsync()
                 && await Package.GetIgnoredUpdatesVersionAsync() != "*"
             )
                 await Package.RemoveFromIgnoredUpdatesAsync();
