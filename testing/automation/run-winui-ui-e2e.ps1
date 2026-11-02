@@ -86,6 +86,34 @@ function Invoke-Element {
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
 }
 
+function Find-ToggleByAutomationId {
+    param(
+        [System.Windows.Automation.AutomationElement] $Root,
+        [string] $AutomationId,
+        [int] $TimeoutSeconds = 30
+    )
+
+    $condition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+            $AutomationId
+        ),
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::IsTogglePatternAvailableProperty,
+            $true
+        )
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $element = $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+        if ($element) {
+            return $element
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "UI toggle '$AutomationId' was not found."
+}
+
 function Ensure-ToggleOn {
     param([System.Windows.Automation.AutomationElement] $Element)
 
@@ -149,9 +177,9 @@ try {
     Write-Host 'Opening interface settings'
     Invoke-Element (Find-ElementByAutomationId $window 'InterfaceSettingsEntry')
     Write-Host 'Enabling background mode'
-    Ensure-ToggleOn (Find-ElementByAutomationId $window 'DisableSystemTray')
+    Ensure-ToggleOn (Find-ToggleByAutomationId $window 'DisableSystemTray')
     Write-Host 'Checking tray icon toggle'
-    $trayIcon = Find-ElementByAutomationId $window 'HideSystemTrayIcon'
+    $trayIcon = Find-ToggleByAutomationId $window 'HideSystemTrayIcon'
     $deadline = (Get-Date).AddSeconds(15)
     while (-not $trayIcon.Current.IsEnabled -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 250

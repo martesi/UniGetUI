@@ -72,3 +72,4 @@ backports/0670-hide-tray-icon.patch
 backports/0680-refresh-headless-updates.patch
 backports/0690-portable-session-log.patch
 backports/0700-tray-validation-fixes.patch
+backports/0710-tray-switch-automation.patch
