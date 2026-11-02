@@ -65,3 +65,4 @@ backports/0600-validate-backport-update-branches-on-push.patch
 backports/0610-finish-backport-compatibility-and-regression-fixes.patch
 backports/0620-late-october-backports.patch
 backports/0630-winget-search-build-fixes.patch
+backports/0640-deduplicate-winget-tests.patch
