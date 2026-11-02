@@ -11,6 +11,14 @@ using UniGetUI.PackageEngine.Tests.Infrastructure.Helpers;
 
 namespace UniGetUI.PackageEngine.Tests;
 
+// Both fixture classes reset process-wide NuGet caches.
+[CollectionDefinition("NuGet V3 shared cache tests", DisableParallelization = true)]
+public sealed class NuGetV3TestCollection
+{
+    public const string Name = "NuGet V3 shared cache tests";
+}
+
+[Collection(NuGetV3TestCollection.Name)]
 public sealed class NuGetV3ClientTests
 {
     private static readonly string[] DefaultVersions =
