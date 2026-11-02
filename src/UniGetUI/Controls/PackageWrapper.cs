@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -70,6 +72,113 @@ namespace UniGetUI.PackageEngine.PackageClasses
         public bool ShowUpgradeDownloadIcon => Package.IsUpgradable && !InstallerHostChanged;
 
         private CancellationTokenSource? _installerHostCheckCts;
+
+        private static readonly SemaphoreSlim OptionalDetailsGate = new(8, 8);
+        private readonly CancellationTokenSource _optionalDetailsCts = new();
+        private Task? _optionalDetailsTask;
+        private bool _listRowRealized;
+        public string InstallerHostText { get; private set; } = "—";
+        public string DownloadSizeText { get; private set; } = "—";
+        public string ReleaseDateText { get; private set; } = "—";
+        public long DownloadSizeBytes { get; private set; }
+        public DateTime ReleaseDate { get; private set; }
+
+        private GridLength WidthFor(string column) =>
+            new(_page.IsColumnVisible(column) ? 1 : 0, GridUnitType.Star);
+        private Visibility VisibilityFor(string column) =>
+            _page.IsColumnVisible(column) ? Visibility.Visible : Visibility.Collapsed;
+
+        public GridLength NameColumnWidth => WidthFor("Name");
+        public GridLength IdColumnWidth => WidthFor("Id");
+        public GridLength VersionColumnWidth => WidthFor("Version");
+        public GridLength NewVersionColumnWidth => WidthFor("NewVersion");
+        public GridLength SourceColumnWidth => WidthFor("Source");
+        public GridLength InstallerHostColumnWidth => WidthFor("InstallerHost");
+        public GridLength DownloadSizeColumnWidth => WidthFor("DownloadSize");
+        public GridLength ReleaseDateColumnWidth => WidthFor("ReleaseDate");
+        public double NameColumnMinWidth => _page.IsColumnVisible("Name") ? 125 : 0;
+        public double IdColumnMinWidth => _page.IsColumnVisible("Id") ? 125 : 0;
+        public Visibility NameColumnVisibility => VisibilityFor("Name");
+        public Visibility IdColumnVisibility => VisibilityFor("Id");
+        public Visibility VersionColumnVisibility => VisibilityFor("Version");
+        public Visibility NewVersionColumnVisibility => VisibilityFor("NewVersion");
+        public Visibility SourceColumnVisibility => VisibilityFor("Source");
+        public Visibility InstallerHostColumnVisibility => VisibilityFor("InstallerHost");
+        public Visibility DownloadSizeColumnVisibility => VisibilityFor("DownloadSize");
+        public Visibility ReleaseDateColumnVisibility => VisibilityFor("ReleaseDate");
+
+        public void NotifyColumnVisibilityChanged()
+        {
+            foreach (string property in new[]
+            {
+                nameof(NameColumnWidth), nameof(IdColumnWidth), nameof(VersionColumnWidth),
+                nameof(NewVersionColumnWidth), nameof(SourceColumnWidth),
+                nameof(InstallerHostColumnWidth), nameof(DownloadSizeColumnWidth),
+                nameof(ReleaseDateColumnWidth), nameof(NameColumnMinWidth), nameof(IdColumnMinWidth),
+                nameof(NameColumnVisibility), nameof(IdColumnVisibility), nameof(VersionColumnVisibility),
+                nameof(NewVersionColumnVisibility), nameof(SourceColumnVisibility),
+                nameof(InstallerHostColumnVisibility), nameof(DownloadSizeColumnVisibility),
+                nameof(ReleaseDateColumnVisibility),
+            })
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(property));
+            if (_listRowRealized)
+                _ = EnsureOptionalDetailsLoadedAsync();
+        }
+
+        public void PackageListRow_Loaded(object sender, RoutedEventArgs e)
+        {
+            _listRowRealized = true;
+            _ = EnsureOptionalDetailsLoadedAsync();
+        }
+
+        public void PackageListRow_Unloaded(object sender, RoutedEventArgs e) => _listRowRealized = false;
+
+        public Task EnsureOptionalDetailsLoadedAsync()
+        {
+            if (!_page.OptionalColumnsVisible || _optionalDetailsCts.IsCancellationRequested)
+                return Task.CompletedTask;
+            return _optionalDetailsTask ??= LoadOptionalDetailsAsync();
+        }
+
+        private async Task LoadOptionalDetailsAsync()
+        {
+            CancellationToken token = _optionalDetailsCts.Token;
+            try
+            {
+                await OptionalDetailsGate.WaitAsync(token);
+                IPackageDetails details;
+                try
+                {
+                    IPackage target = Package.IsUpgradable && Package.NewVersionString != Package.VersionString
+                        ? new Package(Package.Name, Package.Id, Package.NewVersionString,
+                            Package.NewVersionString, Package.Source, Package.Manager, Package.OverridenOptions)
+                        : Package;
+                    details = target.Details;
+                    if (!details.IsPopulated)
+                        await Task.Run(() => details.Load(), token);
+                }
+                finally
+                {
+                    OptionalDetailsGate.Release();
+                }
+                token.ThrowIfCancellationRequested();
+                InstallerHostText = details.InstallerUrl?.Host is { Length: > 0 } host ? host : "—";
+                DownloadSizeBytes = details.InstallerSize;
+                DownloadSizeText = DownloadSizeBytes > 0 ? CoreTools.FormatAsSize(DownloadSizeBytes) : "—";
+                ReleaseDate = DateTime.TryParse(details.UpdateDate, CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out DateTime date) ? date : default;
+                ReleaseDateText = ReleaseDate != default ? ReleaseDate.ToString("d", CultureInfo.CurrentCulture) : "—";
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallerHostText)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DownloadSizeText)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ReleaseDateText)));
+                _page.NotifyOptionalDetailsLoaded();
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not load list details for {Package.Id}: {ex.Message}");
+            }
+        }
 
         public int NewVersionLabelWidth
         {
@@ -251,6 +360,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
         public void Dispose()
         {
             Package.PropertyChanged -= Package_PropertyChanged;
+            _optionalDetailsCts.Cancel();
             _installerHostCheckCts?.Cancel();
             _installerHostCheckCts?.Dispose();
             _installerHostCheckCts = null;

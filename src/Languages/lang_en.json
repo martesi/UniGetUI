@@ -872,5 +872,9 @@
     "Looking for {0}...": "Looking for {0}...",
     "{0} was not found.": "{0} was not found.",
     "{0} does not support installing a specified version.": "{0} does not support installing a specified version.",
-    "The package link could not be opened": "The package link could not be opened"
+    "The package link could not be opened": "The package link could not be opened",
+  "Columns": "Columns",
+  "Installer host": "Installer host",
+  "Download size": "Download size",
+  "Release date": "Release date"
 }
