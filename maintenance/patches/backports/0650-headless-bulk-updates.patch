@@ -1,0 +1,917 @@
+From 7d52abb5754b5a1ead3db41bc49c0b0d853100f9 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 17:16:25 +0200
+Subject: [PATCH] backport: support headless bulk package updates
+
+Adapt bulk update dispatch and operation tracking to Classic WinUI.
+
+Upstream-Commit: 1badf3704e964a0078998e6e77a4ce4e8871ce25
+Upstream-PR: Devolutions/UniGetUI#5609
+Classic-Source-Commit: ba2e21cf4b00d564cc3a2c45f4452dae854fc944
+---
+ docs/CLI.md                                   |   6 +-
+ docs/IPC.md                                   |   6 +-
+ .../Infrastructure/AvaloniaBootstrapper.cs    |  10 +-
+ .../AvaloniaPackageOperationHelper.cs         |  35 +++---
+ .../IpcCliCommandRunner.cs                    |  34 +++++-
+ src/UniGetUI.Interface.IpcApi/IpcCliSyntax.cs |   5 +-
+ src/UniGetUI.Interface.IpcApi/IpcClient.cs    | 110 ++++++++++++++++-
+ src/UniGetUI.Interface.IpcApi/IpcJson.cs      |   1 +
+ .../IpcOperationApi.cs                        |   8 ++
+ .../IpcPackageApi.cs                          |  97 +++++++++++++++
+ src/UniGetUI.Interface.IpcApi/IpcServer.cs    |  70 ++++++-----
+ src/UniGetUI.Tests/IpcBulkUpdateTests.cs      | 113 ++++++++++++++++++
+ src/UniGetUI/App.xaml.cs                      |  17 +--
+ src/UniGetUI/AppOperationHelper.cs            |  43 ++++---
+ testing/automation/run-cli-e2e.ps1            |  52 ++++++--
+ 15 files changed, 499 insertions(+), 108 deletions(-)
+ create mode 100644 src/UniGetUI.Tests/IpcBulkUpdateTests.cs
+
+diff --git a/docs/CLI.md b/docs/CLI.md
+index b7c9211..dcdfda4 100644
+--- a/docs/CLI.md
++++ b/docs/CLI.md
+@@ -187,8 +187,8 @@ Available keys live in:
+ | `package ignored list` | None | None | Lists ignored-update rules tracked by UniGetUI. |
+ | `package ignored add` | `--id <package-id>` | `--manager <id>`, `--version <version>`, `--source <source>` | Adds an ignored-update rule. |
+ | `package ignored remove` | `--id <package-id>` | `--manager <id>`, `--version <version>`, `--source <source>` | Removes an ignored-update rule. |
+-| `package update-all` | None | None | Queues updates for all currently upgradable packages. |
+-| `package update-manager` | `--manager <id>` | None | Queues updates for all upgradable packages handled by one manager. |
++| `package update-all` | None | `--manager <id>`, `--wait true\|false`, `--timeout <seconds>`, `--delay <seconds>` | Queues an update for every available update and returns their operation ids. With `--wait true`, waits for all of them (default timeout 3600 seconds) and exits with `1` if any did not succeed or the wait timed out. Works in headless sessions. |
++| `package update-manager` | `--manager <id>` | `--wait true\|false`, `--timeout <seconds>`, `--delay <seconds>` | Same as `package update-all --manager <id>`. |
+ 
+ ## Headless behavior
+ 
+@@ -200,7 +200,7 @@ When UniGetUI is started with `--headless`, it exposes the same automation API w
+ | `app show` | Fails with “the current UniGetUI session is running headless and has no window to show.” |
+ | `app navigate` | Fails with “the current UniGetUI session is running headless and cannot navigate UI pages.” |
+ | `package show` | UI-oriented; may fail or be meaningless in pure headless sessions. |
+-| `package update-all`, `package update-manager` | Require GUI-side upgrade handlers. Headless sessions may return “cannot update all packages” or “cannot update manager packages.” |
++| `package update-all`, `package update-manager` | Fully supported. The headless session queues the updates itself. |
+ 
+ ## Headless IPC options
+ 
+diff --git a/docs/IPC.md b/docs/IPC.md
+index f3056b6..4b90fa0 100644
+--- a/docs/IPC.md
++++ b/docs/IPC.md
+@@ -366,8 +366,8 @@ These keys are used by package-related endpoints such as install, update, uninst
+ | `POST` | `/uniget/v1/packages/uninstall` | Yes | Package action query set | `package uninstall` | Uninstalls package. |
+ | `POST` | `/uniget/v1/packages/uninstall-then-reinstall` | Yes | Package action query set | `package repair` | Repair flow. |
+ | `POST` | `/uniget/v1/packages/show` | Yes | Query `packageId`, `packageSource` | `package show` | UI-oriented package-details flow. |
+-| `POST` | `/uniget/v1/packages/update-all` | Yes | None | `package update-all` | Requires `OnUpgradeAll` handler to be wired. |
+-| `POST` | `/uniget/v1/packages/update-manager` | Yes | Query `manager` | `package update-manager` | Requires `OnUpgradeAllForManager` handler to be wired. |
++| `POST` | `/uniget/v1/packages/update-all` | Yes | Optional query `manager` | `package update-all` | Queues updates and returns operation IDs. |
++| `POST` | `/uniget/v1/packages/update-manager` | Yes | Query `manager` | `package update-manager` | Queues updates for one manager. |
+ 
+ ## Headless-specific limitations
+ 
+@@ -375,8 +375,6 @@ In headless sessions:
+ 
+ - `POST /uniget/v1/app/show` fails because there is no window to show.
+ - `POST /uniget/v1/app/navigate` fails because there is no UI page stack to navigate.
+-- `POST /uniget/v1/packages/update-all` fails unless a host wires `OnUpgradeAll`.
+-- `POST /uniget/v1/packages/update-manager` fails unless a host wires `OnUpgradeAllForManager`.
+ 
+ These failures are intentional and surfaced as HTTP `400` with a descriptive message.
+ 
+diff --git a/src/UniGetUI.Avalonia/Infrastructure/AvaloniaBootstrapper.cs b/src/UniGetUI.Avalonia/Infrastructure/AvaloniaBootstrapper.cs
+index c7ccf41..178de8e 100644
+--- a/src/UniGetUI.Avalonia/Infrastructure/AvaloniaBootstrapper.cs
++++ b/src/UniGetUI.Avalonia/Infrastructure/AvaloniaBootstrapper.cs
+@@ -171,12 +171,10 @@ internal static class AvaloniaBootstrapper
+             _ipcApi.ShowPackageHandler = request =>
+                 Dispatcher.UIThread.InvokeAsync(() => ShowPackage(request)).GetAwaiter().GetResult();
+ 
+-            _ipcApi.OnUpgradeAll += (_, _) =>
+-                Dispatcher.UIThread.Post(() => _ = AvaloniaPackageOperationHelper.UpdateAllAsync());
+-
+-            _ipcApi.OnUpgradeAllForManager += (_, managerName) =>
+-                Dispatcher.UIThread.Post(() =>
+-                    _ = AvaloniaPackageOperationHelper.UpdateAllForManagerAsync(managerName));
++            _ipcApi.UpdateAllHandler = managerName =>
++                Dispatcher.UIThread.InvokeAsync(() => managerName is null
++                    ? AvaloniaPackageOperationHelper.UpdateAllAsync()
++                    : AvaloniaPackageOperationHelper.UpdateAllForManagerAsync(managerName));
+ 
+             await _ipcApi.Start();
+         }
+diff --git a/src/UniGetUI.Avalonia/Infrastructure/AvaloniaPackageOperationHelper.cs b/src/UniGetUI.Avalonia/Infrastructure/AvaloniaPackageOperationHelper.cs
+index ff2167a..194a9c2 100644
+--- a/src/UniGetUI.Avalonia/Infrastructure/AvaloniaPackageOperationHelper.cs
++++ b/src/UniGetUI.Avalonia/Infrastructure/AvaloniaPackageOperationHelper.cs
+@@ -29,26 +29,25 @@ namespace UniGetUI.Avalonia.Infrastructure;
+ /// </summary>
+ internal static class AvaloniaPackageOperationHelper
+ {
+-    public static async Task UpdateAllAsync()
+-    {
+-        foreach (var pkg in UpgradablePackagesLoader.Instance.Packages.ToList())
+-        {
+-            if (pkg.Tag is PackageTag.BeingProcessed or PackageTag.OnQueue) continue;
+-            var opts = await InstallOptionsFactory.LoadApplicableAsync(pkg);
+-            var op = new UpdatePackageOperation(pkg, opts);
+-            op.OperationSucceeded += (_, _) => TelemetryHandler.UpdatePackage(pkg, TEL_OP_RESULT.SUCCESS);
+-            op.OperationFailed += (_, _) => TelemetryHandler.UpdatePackage(pkg, TEL_OP_RESULT.FAILED);
+-            AvaloniaOperationRegistry.Add(op);
+-            _ = op.MainThread();
+-        }
+-    }
++    public static Task<IReadOnlyList<AbstractOperation>> UpdateAllAsync() =>
++        UpdatePackagesAsync(null);
++
++    public static Task<IReadOnlyList<AbstractOperation>> UpdateAllForManagerAsync(string managerName) =>
++        UpdatePackagesAsync(managerName);
+ 
+-    public static async Task UpdateAllForManagerAsync(string managerName)
++    private static async Task<IReadOnlyList<AbstractOperation>> UpdatePackagesAsync(string? managerName)
+     {
+-        foreach (var pkg in UpgradablePackagesLoader.Instance.Packages
+-            .Where(p => p.Manager.Id == managerName)
+-            .ToList())
++        var loader = UpgradablePackagesLoader.Instance;
++        if (loader.IsLoading)
++            await loader.WaitForCurrentLoadAsync();
++        else if (!loader.IsLoaded)
++            await loader.ReloadPackages();
++
++        List<AbstractOperation> started = [];
++        foreach (var pkg in loader.Packages.ToList())
+         {
++            if (managerName is not null && !pkg.Manager.Id.Equals(managerName, StringComparison.OrdinalIgnoreCase))
++                continue;
+             if (pkg.Tag is PackageTag.BeingProcessed or PackageTag.OnQueue) continue;
+             var opts = await InstallOptionsFactory.LoadApplicableAsync(pkg);
+             var op = new UpdatePackageOperation(pkg, opts);
+@@ -56,7 +55,9 @@ internal static class AvaloniaPackageOperationHelper
+             op.OperationFailed += (_, _) => TelemetryHandler.UpdatePackage(pkg, TEL_OP_RESULT.FAILED);
+             AvaloniaOperationRegistry.Add(op);
+             _ = op.MainThread();
++            started.Add(op);
+         }
++        return started;
+     }
+ 
+     public static async Task UpdateForIdAsync(string packageId)
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcCliCommandRunner.cs b/src/UniGetUI.Interface.IpcApi/IpcCliCommandRunner.cs
+index bc04bcf..aaa18e7 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcCliCommandRunner.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcCliCommandRunner.cs
+@@ -472,9 +472,16 @@ public static class IpcCliCommandRunner
+                         )
+                     )
+                 ),
+-                "update-all" => await WriteJsonAsync(output, await client.UpdateAllAsync()),
+-                "update-manager" => await WriteJsonAsync(
++                "update-all" => await WriteBulkOperationAsync(
+                     output,
++                    client,
++                    args,
++                    await client.UpdateAllAsync(GetOptionalArgument(args, "--manager"))
++                ),
++                "update-manager" => await WriteBulkOperationAsync(
++                    output,
++                    client,
++                    args,
+                     await client.UpdateManagerAsync(
+                         GetRequiredArgument(
+                             args,
+@@ -838,6 +845,29 @@ public static class IpcCliCommandRunner
+         return (int)IpcCliExitCode.Success;
+     }
+ 
++    private static async Task<int> WriteBulkOperationAsync(
++        TextWriter output,
++        IpcClient client,
++        IReadOnlyList<string> args,
++        IpcPackageBulkOperationResult queued
++    )
++    {
++        if (GetOptionalBoolArgument(args, "--wait") != true)
++        {
++            return await WriteJsonAsync(output, queued);
++        }
++
++        var result = await client.WaitForBulkOperationAsync(
++            queued,
++            GetOptionalIntArgument(args, "--timeout") ?? 3600,
++            (GetOptionalIntArgument(args, "--delay") ?? 1) * 1000
++        );
++        await output.WriteLineAsync(IpcJson.Serialize(result));
++        return result.Status == "success"
++            ? (int)IpcCliExitCode.Success
++            : (int)IpcCliExitCode.Failed;
++    }
++
+     private static async Task<int> WriteWrappedJsonAsync<T>(
+         TextWriter output,
+         string propertyName,
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcCliSyntax.cs b/src/UniGetUI.Interface.IpcApi/IpcCliSyntax.cs
+index 48f1998..5ce6437 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcCliSyntax.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcCliSyntax.cs
+@@ -172,8 +172,8 @@ Core commands:
+   bundle get|reset|import|export|add|remove|install
+   package search|details|versions|installed|updates|install|download|reinstall|repair|update|uninstall|show
+   package ignored list|add|remove
+-  package update-all
+-  package update-manager
++  package update-all [--manager <id>] [--wait true|false] [--timeout <seconds>]
++  package update-manager --manager <id> [--wait true|false] [--timeout <seconds>]
+ 
+ Examples:
+   unigetui status
+@@ -181,6 +181,7 @@ Examples:
+   unigetui package search --manager dotnet-tool --query dotnetsay
+   unigetui package install --manager dotnet-tool --id dotnetsay --version 2.1.4 --scope Global
+   unigetui operation wait --id 123 --timeout 300
++  unigetui package update-all --wait true
+   unigetui backup local create
+   unigetui backup github login start --launch-browser
+ """;
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcClient.cs b/src/UniGetUI.Interface.IpcApi/IpcClient.cs
+index ee40c07..eae2213 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcClient.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcClient.cs
+@@ -977,19 +977,104 @@ public sealed class IpcClient : IDisposable
+         );
+     }
+ 
+-    public async Task<IpcCommandResult> UpdateAllAsync()
++    public async Task<IpcPackageBulkOperationResult> UpdateAllAsync(string? managerName = null)
+     {
+-        return await SendCommandAsync(IpcHttpRoutes.Path("/packages/update-all"));
++        return await SendBulkOperationAsync(
++            IpcHttpRoutes.Path("/packages/update-all"),
++            string.IsNullOrWhiteSpace(managerName)
++                ? null
++                : new Dictionary<string, string> { ["manager"] = managerName }
++        );
+     }
+ 
+-    public async Task<IpcCommandResult> UpdateManagerAsync(string managerName)
++    public async Task<IpcPackageBulkOperationResult> UpdateManagerAsync(string managerName)
+     {
+-        return await SendCommandAsync(
++        return await SendBulkOperationAsync(
+             IpcHttpRoutes.Path("/packages/update-manager"),
+             new Dictionary<string, string> { ["manager"] = managerName }
+         );
+     }
+ 
++    /// <summary>
++    /// Waits for every operation a bulk command queued. On timeout, returns the statuses reached
++    /// so far with <c>Completed</c> unset; the remaining operations keep running.
++    /// </summary>
++    public async Task<IpcPackageBulkOperationResult> WaitForBulkOperationAsync(
++        IpcPackageBulkOperationResult queued,
++        int timeoutSeconds = 3600,
++        int delayMilliseconds = 1000
++    )
++    {
++        if (queued.Completed || queued.Status != "success")
++        {
++            return queued;
++        }
++
++        timeoutSeconds = Math.Clamp(timeoutSeconds, 1, 86400);
++        delayMilliseconds = Math.Clamp(delayMilliseconds, 100, 10000);
++
++        DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
++        while (true)
++        {
++            var operations = (await ListOperationsAsync()).ToDictionary(operation => operation.Id);
++            var results = queued.Results
++                .Select(result => ToWaitedResult(
++                    result,
++                    operations.GetValueOrDefault(result.OperationId)
++                ))
++                .ToArray();
++            bool completed = results.All(result => result.Completed);
++
++            if (completed || DateTime.UtcNow >= deadline)
++            {
++                int failed = results.Count(result => result.Completed && result.Status == "error");
++                return new IpcPackageBulkOperationResult
++                {
++                    Status = completed && failed == 0 ? "success" : "error",
++                    Command = queued.Command,
++                    Completed = completed,
++                    Message = completed
++                        ? failed == 0 ? null : $"{failed} of {results.Length} updates did not succeed."
++                        : $"Timed out while waiting for {results.Count(result => !result.Completed)} of {results.Length} updates. They keep running in UniGetUI.",
++                    QueuedCount = queued.QueuedCount,
++                    SucceededCount = results.Count(result => result.Completed && result.Status == "success"),
++                    FailedCount = failed,
++                    Results = results,
++                };
++            }
++
++            await Task.Delay(delayMilliseconds);
++        }
++    }
++
++    internal static IpcPackageOperationResult ToWaitedResult(
++        IpcPackageOperationResult queued,
++        IpcOperationInfo? operation
++    )
++    {
++        // An operation drops out of the list when it is forgotten or pruned, which only
++        // happens once it has finished.
++        string status = operation?.Status ?? "unknown";
++        bool completed = status is "succeeded" or "failed" or "canceled" or "unknown";
++        return new IpcPackageOperationResult
++        {
++            Status = !completed || status == "succeeded" ? "success" : "error",
++            Command = queued.Command,
++            OperationId = queued.OperationId,
++            OperationStatus = status,
++            Completed = completed,
++            Message = status switch
++            {
++                "succeeded" => null,
++                "canceled" => "The operation was canceled.",
++                "unknown" => "UniGetUI no longer tracks this operation, so its result is unknown.",
++                _ when !completed => queued.Message,
++                _ => operation?.LiveLine,
++            },
++            Package = operation?.Package ?? queued.Package,
++        };
++    }
++
+     public async Task<IpcPackageOperationResult> InstallPackageAsync(
+         IpcPackageActionRequest request
+     )
+@@ -1133,6 +1218,23 @@ public sealed class IpcClient : IDisposable
+             };
+     }
+ 
++    private async Task<IpcPackageBulkOperationResult> SendBulkOperationAsync(
++        string relativePath,
++        IReadOnlyDictionary<string, string>? queryParameters
++    )
++    {
++        return await ReadAuthenticatedJsonAsync<IpcPackageBulkOperationResult>(
++                HttpMethod.Post,
++                relativePath,
++                queryParameters
++            )
++            ?? new IpcPackageBulkOperationResult
++            {
++                Status = "error",
++                Message = "The IPC API returned an empty response.",
++            };
++    }
++
+     private async Task<IpcSourceOperationResult> SendSourceOperationAsync(
+         string relativePath,
+         IpcSourceRequest request
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcJson.cs b/src/UniGetUI.Interface.IpcApi/IpcJson.cs
+index b77eec3..58a47c2 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcJson.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcJson.cs
+@@ -103,6 +103,7 @@ internal static class IpcJson
+ [JsonSerializable(typeof(IpcPackageInfo))]
+ [JsonSerializable(typeof(IpcPackageActionRequest))]
+ [JsonSerializable(typeof(IpcPackageOperationResult))]
++[JsonSerializable(typeof(IpcPackageBulkOperationResult))]
+ [JsonSerializable(typeof(IpcPackageDependencyInfo))]
+ [JsonSerializable(typeof(IpcPackageDetailsInfo))]
+ [JsonSerializable(typeof(IpcIgnoredUpdateInfo))]
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcOperationApi.cs b/src/UniGetUI.Interface.IpcApi/IpcOperationApi.cs
+index 782d833..4bbc7de 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcOperationApi.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcOperationApi.cs
+@@ -1,6 +1,7 @@
+ using System.Collections.Concurrent;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.PackageEngine.Enums;
++using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.Operations;
+ using UniGetUI.PackageOperations;
+ 
+@@ -118,6 +119,13 @@ public static class IpcOperationApi
+     private static readonly ConcurrentDictionary<string, TrackedOperation> Operations = new();
+     private const int MaxTrackedOperations = 200;
+ 
++    internal static bool HasPendingPackageOperation(IPackage package) =>
++        Operations.Values.Any(tracked =>
++            tracked.Operation is PackageOperation operation
++            && (operation.Status is OperationStatus.InQueue or OperationStatus.Running)
++            && operation.Package.GetHash() == package.GetHash()
++        );
++
+     public static string Track(AbstractOperation operation)
+     {
+         ArgumentNullException.ThrowIfNull(operation);
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs b/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
+index 70f3a6a..a6bffa6 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
+@@ -54,6 +54,18 @@ public sealed class IpcPackageOperationResult
+     public IReadOnlyList<string> Output { get; set; } = [];
+ }
+ 
++public sealed class IpcPackageBulkOperationResult
++{
++    public string Status { get; set; } = "success";
++    public string Command { get; set; } = "";
++    public bool Completed { get; set; }
++    public string? Message { get; set; }
++    public int QueuedCount { get; set; }
++    public int SucceededCount { get; set; }
++    public int FailedCount { get; set; }
++    public IReadOnlyList<IpcPackageOperationResult> Results { get; set; } = [];
++}
++
+ public sealed class IpcPackageDependencyInfo
+ {
+     public string Name { get; set; } = "";
+@@ -114,6 +126,8 @@ internal enum IpcPackageLookupMode
+ 
+ public static class IpcPackageApi
+ {
++    private static readonly SemaphoreSlim BulkUpdateQueueLock = new(1, 1);
++
+     public static IReadOnlyList<IpcPackageInfo> SearchPackages(
+         string query,
+         string? managerName = null,
+@@ -188,6 +202,89 @@ public static class IpcPackageApi
+         );
+     }
+ 
++    /// <summary>
++    /// Queues an update for every available update, or for those of one manager, and returns the
++    /// operations it started. Sessions with a window queue them through the window instead, so
++    /// they show in its operations list; this is what a headless session uses.
++    /// </summary>
++    public static async Task<IReadOnlyList<AbstractOperation>> QueueAllUpdatesAsync(
++        string? managerName = null
++    )
++    {
++        await BulkUpdateQueueLock.WaitAsync();
++        try
++        {
++            List<AbstractOperation> operations = [];
++            foreach (var package in await GetUpdatesToApplyAsync(managerName))
++            {
++                if (
++                    package.Tag is PackageTag.OnQueue or PackageTag.BeingProcessed
++                    || IpcOperationApi.HasPendingPackageOperation(package)
++                )
++                    continue;
++
++                var options = await InstallOptionsFactory.LoadApplicableAsync(package);
++                var operation = new UpdatePackageOperation(package, options);
++                IpcOperationApi.Track(operation);
++                _ = Task.Run(() => RunTrackedOperationAsync(operation));
++                operations.Add(operation);
++            }
++
++            return operations;
++        }
++        finally
++        {
++            BulkUpdateQueueLock.Release();
++        }
++    }
++
++    internal static IpcPackageBulkOperationResult CreateQueuedBulkResult(
++        string command,
++        IReadOnlyList<AbstractOperation> operations
++    )
++    {
++        var results = operations
++            .OfType<PackageOperation>()
++            .Select(operation =>
++                CreateOperationResult(command, operation.Package, operation, completed: false)
++            )
++            .ToArray();
++
++        return new IpcPackageBulkOperationResult
++        {
++            Command = command,
++            Completed = results.Length == 0,
++            Message = results.Length == 0
++                ? "No updates are available."
++                : "The updates were queued for background execution.",
++            QueuedCount = results.Length,
++            Results = results,
++        };
++    }
++
++    // Reads the update list the app shows, never the managers' raw lists: only the loader applies
++    // ignored updates, skipped minor updates and the minimum update age.
++    private static async Task<IReadOnlyList<IPackage>> GetUpdatesToApplyAsync(string? managerName)
++    {
++        var loader = UpgradablePackagesLoader.Instance
++            ?? throw new InvalidOperationException(
++                "The current UniGetUI session has not loaded its package updates."
++            );
++
++        if (loader.IsLoading)
++        {
++            await loader.WaitForCurrentLoadAsync();
++        }
++        else if (!loader.IsLoaded)
++        {
++            await loader.ReloadPackages();
++        }
++
++        return loader.Packages
++            .Where(package => MatchesManager(package.Manager, managerName))
++            .ToArray();
++    }
++
+     public static Task<IpcPackageOperationResult> UninstallPackageAsync(
+         IpcPackageActionRequest request
+     )
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcServer.cs b/src/UniGetUI.Interface.IpcApi/IpcServer.cs
+index b4b8aca..09461ff 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcServer.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcServer.cs
+@@ -16,6 +16,7 @@ using UniGetUI.Interface.Enums;
+ using UniGetUI.PackageEngine;
+ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.PackageLoader;
++using UniGetUI.PackageOperations;
+ 
+ namespace UniGetUI.Interface
+ {
+@@ -32,8 +33,7 @@ namespace UniGetUI.Interface
+     {
+         public string SessionId { get; } = Guid.NewGuid().ToString("N");
+         public string SessionKind { get; init; } = IpcTransportOptions.GuiSessionKind;
+-        public event EventHandler<EventArgs>? OnUpgradeAll;
+-        public event EventHandler<string>? OnUpgradeAllForManager;
++        public Func<string?, Task<IReadOnlyList<AbstractOperation>>>? UpdateAllHandler;
+         public Func<IpcAppInfo>? AppInfoProvider;
+         public Func<IpcCommandResult>? ShowAppHandler;
+         public Func<IpcAppNavigateRequest, IpcCommandResult>? NavigateAppHandler;
+@@ -1562,41 +1562,55 @@ namespace UniGetUI.Interface
+ 
+         private async Task V3_UpdateAllPackages(HttpContext context)
+         {
+-            await HandleCommandAsync(
++            await HandleUpdateAllAsync(
+                 context,
+-                () =>
+-                {
+-                    if (OnUpgradeAll is null)
+-                    {
+-                        throw new InvalidOperationException(
+-                            "The current UniGetUI session cannot update all packages."
+-                        );
+-                    }
+-
+-                    OnUpgradeAll.Invoke(null, EventArgs.Empty);
+-                    return IpcCommandResult.Success("update-all");
+-                }
++                "update-all",
++                () => GetOptionalQueryValue(context.Request, "manager")
+             );
+         }
+ 
+         private async Task V3_UpdateAllPackagesForManager(HttpContext context)
+         {
+-            await HandleCommandAsync(
++            await HandleUpdateAllAsync(
+                 context,
+-                () =>
++                "update-manager",
++                () => GetRequiredQueryValue(context, "manager")
++            );
++        }
++
++        private async Task HandleUpdateAllAsync(
++            HttpContext context,
++            string command,
++            Func<string?> getManagerName
++        )
++        {
++            if (!AuthenticateToken(context.Request.Query["token"]))
++            {
++                context.Response.StatusCode = 401;
++                return;
++            }
++
++            try
++            {
++                string? managerName = getManagerName();
++                if (managerName is not null)
+                 {
+-                    if (OnUpgradeAllForManager is null)
+-                    {
+-                        throw new InvalidOperationException(
+-                            "The current UniGetUI session cannot update manager packages."
+-                        );
+-                    }
+-
+-                    string managerName = GetRequiredQueryValue(context, "manager");
+-                    OnUpgradeAllForManager.Invoke(null, managerName);
+-                    return IpcCommandResult.Success("update-manager");
++                    managerName = IpcManagerSettingsApi.ResolveManager(managerName).Id;
+                 }
+-            );
++
++                var operations = await (UpdateAllHandler ?? IpcPackageApi.QueueAllUpdatesAsync)(
++                    managerName
++                );
++                await context.Response.WriteAsJsonAsync(
++                    IpcPackageApi.CreateQueuedBulkResult(command, operations),
++                    IpcJson.Options
++                );
++            }
++            catch (InvalidOperationException ex)
++            {
++                context.Response.StatusCode = 400;
++                await context.Response.WriteAsync(ex.Message);
++            }
+         }
+ 
+         private static async Task HandlePackageActionAsync(
+diff --git a/src/UniGetUI.Tests/IpcBulkUpdateTests.cs b/src/UniGetUI.Tests/IpcBulkUpdateTests.cs
+new file mode 100644
+index 0000000..3a0edb3
+--- /dev/null
++++ b/src/UniGetUI.Tests/IpcBulkUpdateTests.cs
+@@ -0,0 +1,113 @@
++using UniGetUI.Interface;
++
++namespace UniGetUI.Tests;
++
++public sealed class IpcBulkUpdateTests
++{
++    private static IpcPackageOperationResult Queued(string operationId) => new()
++    {
++        Command = "update-all",
++        OperationId = operationId,
++        OperationStatus = "inqueue",
++        Completed = false,
++        Message = "The operation was queued for background execution.",
++        Package = new IpcPackageInfo { Id = "Git.Git", Manager = "winget" },
++    };
++
++    [Fact]
++    public void ParseKeepsUpdateAllOptions()
++    {
++        IpcCliParseResult result = IpcCliSyntax.Parse(
++            ["package", "update-all", "--manager", "winget", "--wait", "true", "--timeout", "60"]
++        );
++
++        Assert.Equal(IpcCliParseStatus.Success, result.Status);
++        Assert.Equal("update-all", result.Command);
++        Assert.Equal(
++            ["--manager", "winget", "--wait", "true", "--timeout", "60"],
++            Assert.IsType<string[]>(result.EffectiveArgs)
++        );
++    }
++
++    [Fact]
++    public void QueuedResultWithNoUpdatesIsComplete()
++    {
++        IpcPackageBulkOperationResult result = IpcPackageApi.CreateQueuedBulkResult("update-all", []);
++
++        Assert.Equal("success", result.Status);
++        Assert.True(result.Completed);
++        Assert.Equal(0, result.QueuedCount);
++        Assert.Empty(result.Results);
++        Assert.Equal("No updates are available.", result.Message);
++    }
++
++    [Fact]
++    public void BulkResultRoundTripsThroughTheIpcJsonContext()
++    {
++        var result = new IpcPackageBulkOperationResult
++        {
++            Command = "update-manager",
++            QueuedCount = 1,
++            Results = [Queued("op-1")],
++        };
++
++        IpcPackageBulkOperationResult? parsed = IpcJson.Deserialize<IpcPackageBulkOperationResult>(
++            IpcJson.Serialize(result)
++        );
++
++        Assert.NotNull(parsed);
++        Assert.Equal("update-manager", parsed.Command);
++        Assert.Equal(1, parsed.QueuedCount);
++        Assert.Equal("op-1", Assert.Single(parsed.Results).OperationId);
++    }
++
++    [Fact]
++    public void WaitedResultStaysPendingWhileTheOperationRuns()
++    {
++        IpcPackageOperationResult result = IpcClient.ToWaitedResult(
++            Queued("op-1"),
++            new IpcOperationInfo { Id = "op-1", Status = "running" }
++        );
++
++        Assert.False(result.Completed);
++        Assert.Equal("success", result.Status);
++        Assert.Equal("running", result.OperationStatus);
++    }
++
++    [Fact]
++    public void WaitedResultReportsSuccess()
++    {
++        IpcPackageOperationResult result = IpcClient.ToWaitedResult(
++            Queued("op-1"),
++            new IpcOperationInfo { Id = "op-1", Status = "succeeded" }
++        );
++
++        Assert.True(result.Completed);
++        Assert.Equal("success", result.Status);
++        Assert.Null(result.Message);
++    }
++
++    [Fact]
++    public void WaitedResultReportsFailureWithTheLastLine()
++    {
++        IpcPackageOperationResult result = IpcClient.ToWaitedResult(
++            Queued("op-1"),
++            new IpcOperationInfo { Id = "op-1", Status = "failed", LiveLine = "Installer exited with code 1603" }
++        );
++
++        Assert.True(result.Completed);
++        Assert.Equal("error", result.Status);
++        Assert.Equal("Installer exited with code 1603", result.Message);
++    }
++
++    [Fact]
++    public void WaitedResultTreatsAnUntrackedOperationAsFailed()
++    {
++        IpcPackageOperationResult result = IpcClient.ToWaitedResult(Queued("op-1"), null);
++
++        Assert.True(result.Completed);
++        Assert.Equal("error", result.Status);
++        Assert.Equal("unknown", result.OperationStatus);
++        Assert.Equal("Git.Git", result.Package?.Id);
++    }
++}
+diff --git a/src/UniGetUI/App.xaml.cs b/src/UniGetUI/App.xaml.cs
+index ba9ff9d..55fe2d2 100644
+--- a/src/UniGetUI/App.xaml.cs
++++ b/src/UniGetUI/App.xaml.cs
+@@ -437,17 +437,12 @@ namespace UniGetUI
+                 IpcApi.QuitAppHandler = () => RunOnUiThread(QuitApp);
+                 IpcApi.ShowPackageHandler = request => RunOnUiThread(() => ShowPackage(request));
+ 
+-                IpcApi.OnUpgradeAll += (_, _) =>
+-                    MainWindow.DispatcherQueue.TryEnqueue(() =>
+-                    {
+-                        _ = Operations.UpdateAll();
+-                    });
+-
+-                IpcApi.OnUpgradeAllForManager += (s, managerName) =>
+-                    MainWindow.DispatcherQueue.TryEnqueue(() =>
+-                    {
+-                        _ = Operations.UpdateAllForManager(managerName);
+-                    });
++                IpcApi.UpdateAllHandler = managerName =>
++                    RunOnUiThread(() =>
++                        managerName is null
++                            ? Operations.UpdateAll()
++                            : Operations.UpdateAllForManager(managerName)
++                    );
+ 
+                 await IpcApi.Start();
+             }
+diff --git a/src/UniGetUI/AppOperationHelper.cs b/src/UniGetUI/AppOperationHelper.cs
+index f4cc6d7..049c08f 100644
+--- a/src/UniGetUI/AppOperationHelper.cs
++++ b/src/UniGetUI/AppOperationHelper.cs
+@@ -389,35 +389,30 @@ public partial class MainApp
+             );
+         }
+ 
+-        public static async Task UpdateAll()
+-        {
+-            foreach (IPackage package in UpgradablePackagesLoader.Instance.Packages)
+-            { // First check will only work if the package has not been reloaded, deeper check is needed, hence AlreadyBeingUpdated
+-                if (
+-                    package.Tag is PackageTag.BeingProcessed or PackageTag.OnQueue
+-                    || AlreadyBeingUpdated(package)
+-                )
+-                {
+-                    Logger.Warn(
+-                        $"Update operation for package {package.Id} is already queued or running. Skipping duplicate in UpdateAll."
+-                    );
+-                    continue;
+-                }
++        public static Task<IReadOnlyList<AbstractOperation>> UpdateAll() => UpdateAllForManagerCore(null);
+ 
+-                await Update(package);
+-            }
+-        }
++        public static Task<IReadOnlyList<AbstractOperation>> UpdateAllForManager(string managerName) =>
++            UpdateAllForManagerCore(managerName);
+ 
+-        public static async Task UpdateAllForManager(string managerName)
++        private static async Task<IReadOnlyList<AbstractOperation>> UpdateAllForManagerCore(
++            string? managerName
++        )
+         {
+-            foreach (IPackage package in UpgradablePackagesLoader.Instance.Packages)
++            var loader = UpgradablePackagesLoader.Instance;
++            if (loader.IsLoading)
++                await loader.WaitForCurrentLoadAsync();
++            else if (!loader.IsLoaded)
++                await loader.ReloadPackages();
++
++            List<AbstractOperation> started = [];
++            foreach (IPackage package in loader.Packages.ToList())
+             {
+                 if (
+-                    package.Manager.Id != managerName
++                    managerName is not null
++                    && !package.Manager.Id.Equals(managerName, StringComparison.OrdinalIgnoreCase)
+                 )
+-                    continue; // Package not from the desired package manager
++                    continue;
+ 
+-                // First check will only work if the package has not been reloaded, deeper check is needed, hence AlreadyBeingUpdated
+                 if (
+                     package.Tag is PackageTag.BeingProcessed or PackageTag.OnQueue
+                     || AlreadyBeingUpdated(package)
+@@ -429,8 +424,10 @@ public partial class MainApp
+                     continue;
+                 }
+ 
+-                await Update(package);
++                if (await Update(package) is { } operation)
++                    started.Add(operation);
+             }
++            return started;
+         }
+ 
+         public static async Task UpdateForId(string packageId)
+diff --git a/testing/automation/run-cli-e2e.ps1 b/testing/automation/run-cli-e2e.ps1
+index 63962cd..d1b89ee 100644
+--- a/testing/automation/run-cli-e2e.ps1
++++ b/testing/automation/run-cli-e2e.ps1
+@@ -997,17 +997,53 @@ try {
+     Wait-ForInstalledPackage -Fixture $specificUpdateFixture -ExpectedVersion ([string]$fixtureState[$specificUpdateFixture.manager].latestVersion) | Out-Null
+     Add-Tested 'package update'
+ 
+-    $updateManager = Invoke-CliFailure -Arguments @('package', 'update-manager', '--manager', [string]$bundleFixture.manager)
+-    if ($updateManager.Text -notmatch 'cannot update manager packages') {
+-        throw "package update-manager did not report the expected headless limitation: $($updateManager.Text)"
++    # Both bulk updates are scoped to a fixture manager: an unscoped update-all would update
++    # whatever else the runner image has installed.
++    foreach ($bulkUpdate in @(
++            @{ Command = 'update-manager'; Role = 'update-manager' },
++            @{ Command = 'update-all'; Role = 'update-all' }
++        )) {
++        $bulkFixture = Get-ManifestManagerByRole -Role $bulkUpdate.Role
++        if ($null -eq $bulkFixture) {
++            throw "The CLI E2E manifest must define a package manager fixture with the $($bulkUpdate.Role) role."
++        }
++
++        # Restore the old fixture version so each bulk command must perform a real update.
++        $removeOldFixture = Invoke-CliJson -Arguments (@('package', 'uninstall') + (Get-PackageArguments -Fixture $bulkFixture -IncludeSource))
++        Assert-JsonCommandSucceeded -Response $removeOldFixture -Label "prepare $($bulkUpdate.Command): uninstall $($bulkFixture.packageId)"
++        if (-not [string]::IsNullOrWhiteSpace($removeOldFixture.operationId)) {
++            $waitedRemoval = Invoke-CliJson -Arguments @('operation', 'wait', '--id', [string]$removeOldFixture.operationId, '--timeout', '300', '--delay', '1')
++            if ($waitedRemoval.operation.status -ne 'succeeded') {
++                throw "Preparing $($bulkUpdate.Command) could not remove $($bulkFixture.packageId): $($waitedRemoval | ConvertTo-Json -Depth 10)"
++            }
++        }
++        Invoke-CliJson -Arguments @('manager', 'reload', '--manager', [string]$bulkFixture.manager) | Out-Null
++        Wait-ForPackageRemoval -Fixture $bulkFixture | Out-Null
++        $restoreOldFixture = Invoke-CliJson -Arguments (@('package', 'install') + (Get-PackageArguments -Fixture $bulkFixture -IncludeVersion -IncludeSource))
++        Assert-JsonCommandSucceeded -Response $restoreOldFixture -Label "prepare $($bulkUpdate.Command): install $($bulkFixture.packageId)"
++        Wait-ForInstalledPackage -Fixture $bulkFixture -ExpectedVersion $bulkFixture.installVersion | Out-Null
++        Invoke-CliJson -Arguments @('manager', 'reload', '--manager', [string]$bulkFixture.manager) | Out-Null
++        Wait-ForPackageUpdateVisibility -Fixture $bulkFixture | Out-Null
++
++        $bulkResult = Invoke-CliJson -Arguments @('package', $bulkUpdate.Command, '--manager', [string]$bulkFixture.manager, '--wait', 'true', '--timeout', '600')
++        Assert-JsonCommandSucceeded -Response $bulkResult -Label "package $($bulkUpdate.Command) $($bulkFixture.manager)"
++        if (-not $bulkResult.completed) {
++            throw "package $($bulkUpdate.Command) did not wait for its updates: $($bulkResult | ConvertTo-Json -Depth 10)"
++        }
++        if (@($bulkResult.results | Where-Object { $_.package.manager -ne $bulkFixture.manager }).Count -ne 0) {
++            throw "package $($bulkUpdate.Command) --manager $($bulkFixture.manager) queued updates for another manager: $($bulkResult | ConvertTo-Json -Depth 10)"
++        }
++        if (@($bulkResult.results | Where-Object { $_.package.id -eq $bulkFixture.packageId -and $_.operationStatus -eq 'succeeded' }).Count -ne 1) {
++            throw "package $($bulkUpdate.Command) did not update $($bulkFixture.packageId): $($bulkResult | ConvertTo-Json -Depth 10)"
++        }
++        Wait-ForInstalledPackage -Fixture $bulkFixture -ExpectedVersion ([string]$fixtureState[$bulkFixture.manager].latestVersion) | Out-Null
++        Add-Tested "package $($bulkUpdate.Command)"
+     }
+-    Add-Tested 'package update-manager' 'expected-failure'
+ 
+-    $updateAll = Invoke-CliFailure -Arguments @('package', 'update-all')
+-    if ($updateAll.Text -notmatch 'cannot update all packages') {
+-        throw "package update-all did not report the expected headless limitation: $($updateAll.Text)"
++    $unknownManagerUpdate = Invoke-CliFailure -Arguments @('package', 'update-all', '--manager', 'no-such-manager')
++    if ($unknownManagerUpdate.Text -notmatch 'No package manager matching') {
++        throw "package update-all did not reject an unknown manager: $($unknownManagerUpdate.Text)"
+     }
+-    Add-Tested 'package update-all' 'expected-failure'
+ 
+     $reinstall = Invoke-CliJson -Arguments (@('package', 'reinstall') + (Get-PackageArguments -Fixture $bundleFixture -IncludeSource))
+     Assert-JsonCommandSucceeded -Response $reinstall -Label 'package reinstall'
+-- 
+2.51.1
+

@@ -103,6 +103,7 @@ internal static class IpcJson
 [JsonSerializable(typeof(IpcPackageInfo))]
 [JsonSerializable(typeof(IpcPackageActionRequest))]
 [JsonSerializable(typeof(IpcPackageOperationResult))]
+[JsonSerializable(typeof(IpcPackageBulkOperationResult))]
 [JsonSerializable(typeof(IpcPackageDependencyInfo))]
 [JsonSerializable(typeof(IpcPackageDetailsInfo))]
 [JsonSerializable(typeof(IpcIgnoredUpdateInfo))]

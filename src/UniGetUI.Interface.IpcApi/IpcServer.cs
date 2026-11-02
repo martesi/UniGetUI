@@ -16,6 +16,7 @@ using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.PackageLoader;
+using UniGetUI.PackageOperations;
 
 namespace UniGetUI.Interface
 {
@@ -32,8 +33,7 @@ namespace UniGetUI.Interface
     {
         public string SessionId { get; } = Guid.NewGuid().ToString("N");
         public string SessionKind { get; init; } = IpcTransportOptions.GuiSessionKind;
-        public event EventHandler<EventArgs>? OnUpgradeAll;
-        public event EventHandler<string>? OnUpgradeAllForManager;
+        public Func<string?, Task<IReadOnlyList<AbstractOperation>>>? UpdateAllHandler;
         public Func<IpcAppInfo>? AppInfoProvider;
         public Func<IpcCommandResult>? ShowAppHandler;
         public Func<IpcAppNavigateRequest, IpcCommandResult>? NavigateAppHandler;
@@ -1562,41 +1562,55 @@ namespace UniGetUI.Interface
 
         private async Task V3_UpdateAllPackages(HttpContext context)
         {
-            await HandleCommandAsync(
+            await HandleUpdateAllAsync(
                 context,
-                () =>
-                {
-                    if (OnUpgradeAll is null)
-                    {
-                        throw new InvalidOperationException(
-                            "The current UniGetUI session cannot update all packages."
-                        );
-                    }
-
-                    OnUpgradeAll.Invoke(null, EventArgs.Empty);
-                    return IpcCommandResult.Success("update-all");
-                }
+                "update-all",
+                () => GetOptionalQueryValue(context.Request, "manager")
             );
         }
 
         private async Task V3_UpdateAllPackagesForManager(HttpContext context)
         {
-            await HandleCommandAsync(
+            await HandleUpdateAllAsync(
                 context,
-                () =>
-                {
-                    if (OnUpgradeAllForManager is null)
-                    {
-                        throw new InvalidOperationException(
-                            "The current UniGetUI session cannot update manager packages."
-                        );
-                    }
-
-                    string managerName = GetRequiredQueryValue(context, "manager");
-                    OnUpgradeAllForManager.Invoke(null, managerName);
-                    return IpcCommandResult.Success("update-manager");
-                }
+                "update-manager",
+                () => GetRequiredQueryValue(context, "manager")
             );
+        }
+
+        private async Task HandleUpdateAllAsync(
+            HttpContext context,
+            string command,
+            Func<string?> getManagerName
+        )
+        {
+            if (!AuthenticateToken(context.Request.Query["token"]))
+            {
+                context.Response.StatusCode = 401;
+                return;
+            }
+
+            try
+            {
+                string? managerName = getManagerName();
+                if (managerName is not null)
+                {
+                    managerName = IpcManagerSettingsApi.ResolveManager(managerName).Id;
+                }
+
+                var operations = await (UpdateAllHandler ?? IpcPackageApi.QueueAllUpdatesAsync)(
+                    managerName
+                );
+                await context.Response.WriteAsJsonAsync(
+                    IpcPackageApi.CreateQueuedBulkResult(command, operations),
+                    IpcJson.Options
+                );
+            }
+            catch (InvalidOperationException ex)
+            {
+                context.Response.StatusCode = 400;
+                await context.Response.WriteAsync(ex.Message);
+            }
         }
 
         private static async Task HandlePackageActionAsync(
