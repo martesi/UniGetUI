@@ -272,14 +272,22 @@ public static class IpcPackageApi
                 "The current UniGetUI session has not loaded its package updates."
             );
 
+        // Headless sessions have no visible page to refresh stale package lists. Refresh installed
+        // packages first so the update loader validates candidates against the current versions.
+        if (InstalledPackagesLoader.Instance is { } installedLoader)
+        {
+            if (installedLoader.IsLoading)
+                await installedLoader.WaitForCurrentLoadAsync();
+            await installedLoader.ReloadPackages();
+            if (installedLoader.IsLoading)
+                await installedLoader.WaitForCurrentLoadAsync();
+        }
+
         if (loader.IsLoading)
-        {
             await loader.WaitForCurrentLoadAsync();
-        }
-        else if (!loader.IsLoaded)
-        {
-            await loader.ReloadPackages();
-        }
+        await loader.ReloadPackages();
+        if (loader.IsLoading)
+            await loader.WaitForCurrentLoadAsync();
 
         return loader.Packages
             .Where(package => MatchesManager(package.Manager, managerName))
