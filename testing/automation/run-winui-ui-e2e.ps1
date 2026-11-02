@@ -146,6 +146,23 @@ try {
     [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
 
     Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
+    Invoke-Element (Find-ElementByAutomationId $window 'InterfaceSettingsEntry')
+    Ensure-ToggleOn (Find-ElementByAutomationId $window 'DisableSystemTray')
+    $trayIcon = Find-ElementByAutomationId $window 'HideSystemTrayIcon'
+    Ensure-ToggleOn $trayIcon
+    $trayToggle = [System.Windows.Automation.TogglePattern]($trayIcon.GetCurrentPattern(
+        [System.Windows.Automation.TogglePattern]::Pattern
+    ))
+    $trayToggle.Toggle()
+    if ($trayToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+        throw 'The tray icon setting did not turn off.'
+    }
+    $trayToggle.Toggle()
+    if ($trayToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
+        throw 'The tray icon setting did not turn on again.'
+    }
+
+    Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
     Invoke-Element (Find-ElementByAutomationId $window 'BackupSettingsEntry')
     Ensure-ToggleOn (Find-ElementByAutomationId $window 'EnablePackageBackup_LOCAL')
     Ensure-ToggleOn (Find-ElementByAutomationId $window 'EnableBackupTimestamping')
@@ -181,7 +198,7 @@ try {
 
     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
 
-    Write-Host 'WinUI UI E2E passed: settings parity controls and CSV toolbar are reachable.'
+    Write-Host 'WinUI UI E2E passed: settings, tray icon control, and CSV toolbar are reachable.'
 }
 finally {
     if ($appProcess -and -not $appProcess.HasExited) {

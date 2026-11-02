@@ -48,7 +48,16 @@
         CornerRadius="8,8,0,0"
         SettingName="DisableSystemTray"
         StateChanged="DisableSystemTray_StateChanged"
-        Text="Close UniGetUI to the system tray"
+        Text="Keep UniGetUI running in the background when its window is closed"
+      />
+      <widgets:CheckboxCard
+        x:Name="SystemTrayIconCard"
+        BorderThickness="1,0,1,1"
+        CornerRadius="0"
+        ForceInversion="True"
+        SettingName="HideSystemTrayIcon"
+        StateChanged="DisableSystemTray_StateChanged"
+        Text="Show the UniGetUI icon in the system tray"
       />
       <widgets:ButtonCard
         BorderThickness="1,0,1,1"
