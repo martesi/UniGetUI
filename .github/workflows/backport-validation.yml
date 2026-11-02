@@ -1,4 +1,5 @@
 name: Classic backport validation
+# Reuse the existing checks on dedicated CI branches.
 run-name: Classic checks on ${{ github.ref_name }}
 
 on:
