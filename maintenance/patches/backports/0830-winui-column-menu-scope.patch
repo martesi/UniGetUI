@@ -1,18 +1,18 @@
-From 15be8b3058605ba3814a739ae7d3393ece3255da Mon Sep 17 00:00:00 2001
+From 6700aecb2abbbf92c9124899a9ab48c788f4ed9a Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 14:17:00 +0900
-Subject: [PATCH] test: treat removed headers as hidden columns
+Date: Tue, 3 Nov 2026 14:29:00 +0900
+Subject: [PATCH] test: retry the WinUI column menu activation once
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: 15be8b3058605ba3814a739ae7d3393ece3255da
+Classic-Source-Commit: 6700aecb2abbbf92c9124899a9ab48c788f4ed9a
 ---
- testing/automation/run-winui-ui-e2e.ps1 | 834 ++++++++++++++++++++++++++++++++
- 1 file changed, 413 insertions(+), 421 deletions(-)
+ testing/automation/run-winui-ui-e2e.ps1 | 864 +443 -421
+ 1 file changed, 443 insertions(+), 421 deletions(-)
 
 diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
 --- a/testing/automation/run-winui-ui-e2e.ps1
 +++ b/testing/automation/run-winui-ui-e2e.ps1
-@@ -1,421 +1,413 @@
+@@ -1,421 +1,443 @@
 -param(
 -    [string] $ExecutablePath
 -)
@@ -525,20 +525,50 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +function Toggle-Column {
 +    param([System.Windows.Automation.AutomationElement] $Root, [string] $Column)
 +
-+    Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
-+    $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
-+    try {
-+        $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
-+            [System.Windows.Automation.ExpandCollapsePattern]::Pattern
-+        )
-+        $expand.Expand()
++    $headerId = switch ($Column) {
++        'ReleaseDate' { 'ReleaseDateHeader' }
++        'NewVersion' { 'NewVersionHeader' }
++        default { $null }
 +    }
-+    catch {
-+        $columnsMenu.SetFocus()
-+        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
++    $wasVisible = $false
++    if ($headerId) {
++        try {
++            [void](Wait-ColumnVisibility $Root $headerId $true -TimeoutSeconds 1)
++            $wasVisible = $true
++        }
++        catch {
++        }
 +    }
-+    Invoke-Element (Find-ElementByAutomationId $Root "Column$Column")
-+    Start-Sleep -Milliseconds 500
++    $targetVisible = -not $wasVisible
++
++    for ($attempt = 0; $attempt -lt 2; $attempt++) {
++        Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
++        $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
++        try {
++            $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
++                [System.Windows.Automation.ExpandCollapsePattern]::Pattern
++            )
++            $expand.Expand()
++        }
++        catch {
++            $columnsMenu.SetFocus()
++            [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
++        }
++        Start-Sleep -Milliseconds 250
++
++        $item = Find-ToggleByAutomationId $Root "Column$Column"
++        Invoke-Element $item
++        Start-Sleep -Milliseconds 500
++        if (-not $headerId) {
++            return
++        }
++        try {
++            [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
++            return
++        }
++        catch {
++        }
++    }
 +}
 +
 +function Wait-ColumnVisibility {
