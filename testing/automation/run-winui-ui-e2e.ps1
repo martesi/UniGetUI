@@ -106,12 +106,12 @@ function Toggle-Column {
         [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
     }
 
-    $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
+    $item = Find-ToggleByAutomationId $columnsMenu "Column$Column" -TimeoutSeconds $TimeoutSeconds
     $toggle = [System.Windows.Automation.TogglePattern]$item.GetCurrentPattern(
         [System.Windows.Automation.TogglePattern]::Pattern
     )
     $before = $toggle.Current.ToggleState
-    $toggle.Toggle()
+    Invoke-Element $item
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
