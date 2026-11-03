@@ -102,9 +102,14 @@ function Toggle-Column {
         $expand.Expand()
     }
     catch {
+    }
+    try {
         $columnsMenu.SetFocus()
         [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
     }
+    catch {
+    }
+    Start-Sleep -Milliseconds 250
 
     $headerId = switch ($Column) {
         'ReleaseDate' { 'ReleaseDateHeader' }
@@ -122,14 +127,14 @@ function Toggle-Column {
     }
 
     $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
+    $targetVisible = -not $wasVisible
     Invoke-Element $item
     Start-Sleep -Milliseconds 500
     if (-not $headerId) {
         return
     }
-
     try {
-        [void](Wait-ColumnVisibility $Root $headerId (-not $wasVisible) -TimeoutSeconds 5)
+        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
         return
     }
     catch {
@@ -137,6 +142,38 @@ function Toggle-Column {
 
     $item.SetFocus()
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    Start-Sleep -Milliseconds 500
+    try {
+        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
+        return
+    }
+    catch {
+    }
+
+    try {
+        $pattern = $item.GetCurrentPattern(
+            [System.Windows.Automation.LegacyIAccessiblePattern]::Pattern
+        )
+        ([System.Windows.Automation.LegacyIAccessiblePattern] $pattern).DoDefaultAction()
+    }
+    catch {
+    }
+    Start-Sleep -Milliseconds 500
+    try {
+        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
+        return
+    }
+    catch {
+    }
+
+    try {
+        $pattern = $item.GetCurrentPattern(
+            [System.Windows.Automation.SelectionItemPattern]::Pattern
+        )
+        ([System.Windows.Automation.SelectionItemPattern] $pattern).Select()
+    }
+    catch {
+    }
     Start-Sleep -Milliseconds 500
 }
 
