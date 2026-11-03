@@ -1,18 +1,18 @@
-From b8defa582e3c21f40b3f9305d6eaa97b4bc8418e Mon Sep 17 00:00:00 2001
+From 0b3e57d0886e7b5243dc4d76d614627fc7d75e84 Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 13:41:00 +0900
-Subject: [PATCH] test: retry column activation through keyboard when needed
+Date: Tue, 3 Nov 2026 13:49:00 +0900
+Subject: [PATCH] test: inspect all matching WinUI column headers
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: b8defa582e3c21f40b3f9305d6eaa97b4bc8418e
+Classic-Source-Commit: 0b3e57d0886e7b5243dc4d76d614627fc7d75e84
 ---
- testing/automation/run-winui-ui-e2e.ps1 | 852 ++++++++++++++++++++++++++++++++
- 1 file changed, 431 insertions(+), 421 deletions(-)
+ testing/automation/run-winui-ui-e2e.ps1 | 866 ++++++++++++++++++++++++++++++++
+ 1 file changed, 445 insertions(+), 421 deletions(-)
 
 diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
 --- a/testing/automation/run-winui-ui-e2e.ps1
 +++ b/testing/automation/run-winui-ui-e2e.ps1
-@@ -1,421 +1,431 @@
+@@ -1,421 +1,445 @@
 -param(
 -    [string] $ExecutablePath
 -)
@@ -590,34 +590,48 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +    )
 +    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 +    do {
-+        $header = $null
++        $headers = @()
 +        try {
-+            $header = $Root.FindFirst(
++            $headers = @($Root.FindAll(
 +                [System.Windows.Automation.TreeScope]::Descendants,
 +                $condition
-+            )
++            ))
 +        }
 +        catch {
 +        }
 +
-+        $isVisible = $false
-+        if ($header) {
++        $visibleHeader = $null
++        foreach ($header in $headers) {
 +            try {
-+                $isVisible = (
-+                    -not $header.Current.IsOffscreen -and
-+                    $header.Current.BoundingRectangle.Width -gt 1
-+                )
-+                if (($Visible -and $isVisible) -or (-not $Visible -and -not $isVisible)) {
-+                    return $header
++                if ((-not $header.Current.IsOffscreen) -and
++                    ($header.Current.BoundingRectangle.Width -gt 1)) {
++                    $visibleHeader = $header
++                    break
 +                }
 +            }
 +            catch {
 +            }
 +        }
++
++        if ($Visible -and $visibleHeader) {
++            return $visibleHeader
++        }
++        if (-not $Visible -and $headers.Count -gt 0 -and -not $visibleHeader) {
++            return $headers[-1]
++        }
 +        Start-Sleep -Milliseconds 250
 +    } while ((Get-Date) -lt $deadline)
 +
 +    $expected = if ($Visible) { 'visible' } else { 'hidden' }
++    $states = foreach ($header in $headers) {
++        try {
++            "$($header.Current.IsOffscreen)/$($header.Current.BoundingRectangle.Width)"
++        }
++        catch {
++            'stale'
++        }
++    }
++    Write-Host "UI column '$AutomationId' timeout; candidates=$($headers.Count); states=$($states -join ',')"
 +    throw "UI column '$AutomationId' did not become $expected."
 +}
 +

@@ -154,34 +154,48 @@ function Wait-ColumnVisibility {
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        $header = $null
+        $headers = @()
         try {
-            $header = $Root.FindFirst(
+            $headers = @($Root.FindAll(
                 [System.Windows.Automation.TreeScope]::Descendants,
                 $condition
-            )
+            ))
         }
         catch {
         }
 
-        $isVisible = $false
-        if ($header) {
+        $visibleHeader = $null
+        foreach ($header in $headers) {
             try {
-                $isVisible = (
-                    -not $header.Current.IsOffscreen -and
-                    $header.Current.BoundingRectangle.Width -gt 1
-                )
-                if (($Visible -and $isVisible) -or (-not $Visible -and -not $isVisible)) {
-                    return $header
+                if ((-not $header.Current.IsOffscreen) -and
+                    ($header.Current.BoundingRectangle.Width -gt 1)) {
+                    $visibleHeader = $header
+                    break
                 }
             }
             catch {
             }
         }
+
+        if ($Visible -and $visibleHeader) {
+            return $visibleHeader
+        }
+        if (-not $Visible -and $headers.Count -gt 0 -and -not $visibleHeader) {
+            return $headers[-1]
+        }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
 
     $expected = if ($Visible) { 'visible' } else { 'hidden' }
+    $states = foreach ($header in $headers) {
+        try {
+            "$($header.Current.IsOffscreen)/$($header.Current.BoundingRectangle.Width)"
+        }
+        catch {
+            'stale'
+        }
+    }
+    Write-Host "UI column '$AutomationId' timeout; candidates=$($headers.Count); states=$($states -join ',')"
     throw "UI column '$AutomationId' did not become $expected."
 }
 
