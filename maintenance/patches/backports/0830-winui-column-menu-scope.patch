@@ -1,18 +1,18 @@
-From f1a46b704a38915bd354e120807889acc95ea5f2 Mon Sep 17 00:00:00 2001
+From 0673ec389780fb241f2751835065772954827f44 Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 13:24:00 +0900
-Subject: [PATCH] test: use the unique column item automation id
+Date: Tue, 3 Nov 2026 13:31:00 +0900
+Subject: [PATCH] test: trust rendered column visibility after menu clicks
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: f1a46b704a38915bd354e120807889acc95ea5f2
+Classic-Source-Commit: 0673ec389780fb241f2751835065772954827f44
 ---
- testing/automation/run-winui-ui-e2e.ps1 | 842 ++++++++++++++++++++++++++++++++
- 1 file changed, 421 insertions(+), 421 deletions(-)
+ testing/automation/run-winui-ui-e2e.ps1 | 823 ++++++++++++++++++++++++++++++++
+ 1 file changed, 402 insertions(+), 421 deletions(-)
 
 diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
 --- a/testing/automation/run-winui-ui-e2e.ps1
 +++ b/testing/automation/run-winui-ui-e2e.ps1
-@@ -1,421 +1,421 @@
+@@ -1,421 +1,402 @@
 -param(
 -    [string] $ExecutablePath
 -)
@@ -543,27 +543,8 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +    }
 +
 +    $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
-+    $toggle = [System.Windows.Automation.TogglePattern]$item.GetCurrentPattern(
-+        [System.Windows.Automation.TogglePattern]::Pattern
-+    )
-+    $before = $toggle.Current.ToggleState
 +    Invoke-Element $item
-+
-+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-+    do {
-+        Start-Sleep -Milliseconds 250
-+        try {
-+            $after = $toggle.Current.ToggleState
-+        }
-+        catch {
-+            $after = $null
-+        }
-+        if ($null -ne $after -and $after -ne $before) {
-+            return
-+        }
-+    } while ((Get-Date) -lt $deadline)
-+
-+    throw "Column '$Column' did not change state."
++    Start-Sleep -Milliseconds 500
 +}
 +
 +function Wait-ColumnVisibility {
