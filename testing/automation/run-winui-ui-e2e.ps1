@@ -145,7 +145,10 @@ function Wait-ColumnVisibility {
         if ($Visible -and $visibleHeader) {
             return $visibleHeader
         }
-        if (-not $Visible -and $headers.Count -gt 0 -and -not $visibleHeader) {
+        if (-not $Visible -and ($headers.Count -eq 0 -or -not $visibleHeader)) {
+            if ($headers.Count -eq 0) {
+                return $null
+            }
             return $headers[-1]
         }
         Start-Sleep -Milliseconds 250
