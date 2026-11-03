@@ -89,20 +89,50 @@ function Invoke-Element {
 function Toggle-Column {
     param([System.Windows.Automation.AutomationElement] $Root, [string] $Column)
 
-    Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
-    $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
-    try {
-        $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
-            [System.Windows.Automation.ExpandCollapsePattern]::Pattern
-        )
-        $expand.Expand()
+    $headerId = switch ($Column) {
+        'ReleaseDate' { 'ReleaseDateHeader' }
+        'NewVersion' { 'NewVersionHeader' }
+        default { $null }
     }
-    catch {
-        $columnsMenu.SetFocus()
-        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
+    $wasVisible = $false
+    if ($headerId) {
+        try {
+            [void](Wait-ColumnVisibility $Root $headerId $true -TimeoutSeconds 1)
+            $wasVisible = $true
+        }
+        catch {
+        }
     }
-    Invoke-Element (Find-ElementByAutomationId $Root "Column$Column")
-    Start-Sleep -Milliseconds 500
+    $targetVisible = -not $wasVisible
+
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
+        $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
+        try {
+            $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
+                [System.Windows.Automation.ExpandCollapsePattern]::Pattern
+            )
+            $expand.Expand()
+        }
+        catch {
+            $columnsMenu.SetFocus()
+            [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
+        }
+        Start-Sleep -Milliseconds 250
+
+        $item = Find-ToggleByAutomationId $Root "Column$Column"
+        Invoke-Element $item
+        Start-Sleep -Milliseconds 500
+        if (-not $headerId) {
+            return
+        }
+        try {
+            [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
+            return
+        }
+        catch {
+        }
+    }
 }
 
 function Wait-ColumnVisibility {
