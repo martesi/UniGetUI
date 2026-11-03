@@ -1,18 +1,18 @@
-From 3598521906f24a5d261eaedb9a6db882d54ad795 Mon Sep 17 00:00:00 2001
+From 15be8b3058605ba3814a739ae7d3393ece3255da Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 14:08:00 +0900
-Subject: [PATCH] test: stabilize the original WinUI column menu path
+Date: Tue, 3 Nov 2026 14:17:00 +0900
+Subject: [PATCH] test: treat removed headers as hidden columns
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: 3598521906f24a5d261eaedb9a6db882d54ad795
+Classic-Source-Commit: 15be8b3058605ba3814a739ae7d3393ece3255da
 ---
- testing/automation/run-winui-ui-e2e.ps1 | 831 ++++++++++++++++++++++++++++++++
- 1 file changed, 410 insertions(+), 421 deletions(-)
+ testing/automation/run-winui-ui-e2e.ps1 | 834 ++++++++++++++++++++++++++++++++
+ 1 file changed, 413 insertions(+), 421 deletions(-)
 
 diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
 --- a/testing/automation/run-winui-ui-e2e.ps1
 +++ b/testing/automation/run-winui-ui-e2e.ps1
-@@ -1,421 +1,410 @@
+@@ -1,421 +1,413 @@
 -param(
 -    [string] $ExecutablePath
 -)
@@ -581,7 +581,10 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +        if ($Visible -and $visibleHeader) {
 +            return $visibleHeader
 +        }
-+        if (-not $Visible -and $headers.Count -gt 0 -and -not $visibleHeader) {
++        if (-not $Visible -and ($headers.Count -eq 0 -or -not $visibleHeader)) {
++            if ($headers.Count -eq 0) {
++                return $null
++            }
 +            return $headers[-1]
 +        }
 +        Start-Sleep -Milliseconds 250
