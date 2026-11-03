@@ -1,39 +1,41 @@
-From 5e56eca89881741fccf0a388906f9e636a3f66b7 Mon Sep 17 00:00:00 2001
+From 7dffbb8ca65a339e17313865eaa37412bdf18eea Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 13:02:38 +0900
+Date: Tue, 3 Nov 2026 12:59:10 +0900
 Subject: [PATCH] fix: keep column automation identifiers unique
 
+Upstream-PR: Devolutions/UniGetUI#5632
 Classic-Source-Commit: 7dffbb8ca65a339e17313865eaa37412bdf18eea
 ---
- .../Pages/SoftwarePages/AbstractPackagesPage.xaml.cs        | 6 +++---
- 1 file changed, 3 insertions(+), 3 deletions(-)
+ .../Pages/SoftwarePages/AbstractPackagesPage.xaml.cs  | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
 
 diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
-index 5ca9f0e..f97b1c0 100644
 --- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
 +++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
-@@ -273,7 +273,7 @@ namespace UniGetUI.Interface
+@@ -272,8 +272,8 @@ private void SetupColumnMenus()
+             ColumnsMenu.Text = CoreTools.Translate("Columns");
              foreach ((string key, string label) in ListColumns.Where(item => ColumnIsAvailable(item.Key)))
              {
-                 AddColumnItem(headerMenu.Items, key, label);
+-                AddColumnItem(headerMenu.Items, key, label);
 -                AddColumnItem(ColumnsMenu.Items, key, label);
-+                AddColumnItem(ColumnsMenu.Items, key, label, true);
++                AddColumnItem(headerMenu.Items, key, label, automationId: false);
++                AddColumnItem(ColumnsMenu.Items, key, label, automationId: true);
              }
              Loaded += (_, _) =>
              {
-@@ -285,10 +285,10 @@ namespace UniGetUI.Interface
+@@ -285,10 +285,11 @@ private void SetupColumnMenus()
              RefreshColumnVisibility();
          }
- 
+
 -        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label)
-+        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label, bool automationId = false)
++        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label, bool automationId)
          {
              ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
 -            AutomationProperties.SetAutomationId(item, "Column" + key);
-+            if (automationId) AutomationProperties.SetAutomationId(item, "Column" + key);
++            if (automationId)
++                AutomationProperties.SetAutomationId(item, "Column" + key);
              item.Click += (_, _) => SetColumnVisible(key, !ColumnSettingVisible(key));
              items.Add(item);
              _columnMenuItems.Add((key, item));
 -- 
 2.51.1
-
