@@ -1,0 +1,27 @@
+From 277b39af35cafaa01b34a4e92d0ccef5cb3a8075 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:51:03 +0900
+Subject: [PATCH] fix: toggle WinUI package columns from their saved state
+
+Upstream-PR: Devolutions/UniGetUI#5632
+Classic-Source-Commit: 4fce5471a8b46b3f647ad9b7ede3d5626e4169f9
+---
+ src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+index 870b4ea..5ca9f0e 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+@@ -289,7 +289,7 @@ namespace UniGetUI.Interface
+         {
+             ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
+             AutomationProperties.SetAutomationId(item, "Column" + key);
+-            item.Click += (_, _) => SetColumnVisible(key, item.IsChecked);
++            item.Click += (_, _) => SetColumnVisible(key, !ColumnSettingVisible(key));
+             items.Add(item);
+             _columnMenuItems.Add((key, item));
+         }
+-- 
+2.51.1
+
