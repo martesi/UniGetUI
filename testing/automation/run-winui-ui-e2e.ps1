@@ -106,8 +106,37 @@ function Toggle-Column {
         [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
     }
 
+    $headerId = switch ($Column) {
+        'ReleaseDate' { 'ReleaseDateHeader' }
+        'NewVersion' { 'NewVersionHeader' }
+        default { $null }
+    }
+    $wasVisible = $false
+    if ($headerId) {
+        try {
+            [void](Wait-ColumnVisibility $Root $headerId $true -TimeoutSeconds 1)
+            $wasVisible = $true
+        }
+        catch {
+        }
+    }
+
     $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
     Invoke-Element $item
+    Start-Sleep -Milliseconds 500
+    if (-not $headerId) {
+        return
+    }
+
+    try {
+        [void](Wait-ColumnVisibility $Root $headerId (-not $wasVisible) -TimeoutSeconds 5)
+        return
+    }
+    catch {
+    }
+
+    $item.SetFocus()
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
     Start-Sleep -Milliseconds 500
 }
 

@@ -1,18 +1,18 @@
-From 0673ec389780fb241f2751835065772954827f44 Mon Sep 17 00:00:00 2001
+From b8defa582e3c21f40b3f9305d6eaa97b4bc8418e Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 13:31:00 +0900
-Subject: [PATCH] test: trust rendered column visibility after menu clicks
+Date: Tue, 3 Nov 2026 13:41:00 +0900
+Subject: [PATCH] test: retry column activation through keyboard when needed
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: 0673ec389780fb241f2751835065772954827f44
+Classic-Source-Commit: b8defa582e3c21f40b3f9305d6eaa97b4bc8418e
 ---
- testing/automation/run-winui-ui-e2e.ps1 | 823 ++++++++++++++++++++++++++++++++
- 1 file changed, 402 insertions(+), 421 deletions(-)
+ testing/automation/run-winui-ui-e2e.ps1 | 852 ++++++++++++++++++++++++++++++++
+ 1 file changed, 431 insertions(+), 421 deletions(-)
 
 diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
 --- a/testing/automation/run-winui-ui-e2e.ps1
 +++ b/testing/automation/run-winui-ui-e2e.ps1
-@@ -1,421 +1,402 @@
+@@ -1,421 +1,431 @@
 -param(
 -    [string] $ExecutablePath
 -)
@@ -542,8 +542,37 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
 +    }
 +
++    $headerId = switch ($Column) {
++        'ReleaseDate' { 'ReleaseDateHeader' }
++        'NewVersion' { 'NewVersionHeader' }
++        default { $null }
++    }
++    $wasVisible = $false
++    if ($headerId) {
++        try {
++            [void](Wait-ColumnVisibility $Root $headerId $true -TimeoutSeconds 1)
++            $wasVisible = $true
++        }
++        catch {
++        }
++    }
++
 +    $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
 +    Invoke-Element $item
++    Start-Sleep -Milliseconds 500
++    if (-not $headerId) {
++        return
++    }
++
++    try {
++        [void](Wait-ColumnVisibility $Root $headerId (-not $wasVisible) -TimeoutSeconds 5)
++        return
++    }
++    catch {
++    }
++
++    $item.SetFocus()
++    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
 +    Start-Sleep -Milliseconds 500
 +}
 +
