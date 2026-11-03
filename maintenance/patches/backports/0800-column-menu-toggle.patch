@@ -1,10 +1,10 @@
-From 277b39af35cafaa01b34a4e92d0ccef5cb3a8075 Mon Sep 17 00:00:00 2001
+From e7c6d174e004aaadac5488c58b93a8b73beb67e7 Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
 Date: Tue, 3 Nov 2026 12:51:03 +0900
 Subject: [PATCH] fix: toggle WinUI package columns from their saved state
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: 4fce5471a8b46b3f647ad9b7ede3d5626e4169f9
+Classic-Source-Commit: fd1d4804fd7f47c4f144d24e3be33b581fbabebf
 ---
  src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
