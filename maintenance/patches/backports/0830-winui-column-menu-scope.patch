@@ -1,18 +1,18 @@
-From 0b3e57d0886e7b5243dc4d76d614627fc7d75e84 Mon Sep 17 00:00:00 2001
+From 2c2530e0c234872ee65dcbfa4e192ffe00644eb2 Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 13:49:00 +0900
-Subject: [PATCH] test: inspect all matching WinUI column headers
+Date: Tue, 3 Nov 2026 13:58:00 +0900
+Subject: [PATCH] test: focus the WinUI columns submenu before activation
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: 0b3e57d0886e7b5243dc4d76d614627fc7d75e84
+Classic-Source-Commit: 2c2530e0c234872ee65dcbfa4e192ffe00644eb2
 ---
- testing/automation/run-winui-ui-e2e.ps1 | 866 ++++++++++++++++++++++++++++++++
- 1 file changed, 445 insertions(+), 421 deletions(-)
+ testing/automation/run-winui-ui-e2e.ps1 | 903 ++++++++++++++++++++++++++++++++
+ 1 file changed, 482 insertions(+), 421 deletions(-)
 
 diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
 --- a/testing/automation/run-winui-ui-e2e.ps1
 +++ b/testing/automation/run-winui-ui-e2e.ps1
-@@ -1,421 +1,445 @@
+@@ -1,421 +1,482 @@
 -param(
 -    [string] $ExecutablePath
 -)
@@ -538,9 +538,14 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +        $expand.Expand()
 +    }
 +    catch {
++    }
++    try {
 +        $columnsMenu.SetFocus()
 +        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
 +    }
++    catch {
++    }
++    Start-Sleep -Milliseconds 250
 +
 +    $headerId = switch ($Column) {
 +        'ReleaseDate' { 'ReleaseDateHeader' }
@@ -558,14 +563,14 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +    }
 +
 +    $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
++    $targetVisible = -not $wasVisible
 +    Invoke-Element $item
 +    Start-Sleep -Milliseconds 500
 +    if (-not $headerId) {
 +        return
 +    }
-+
 +    try {
-+        [void](Wait-ColumnVisibility $Root $headerId (-not $wasVisible) -TimeoutSeconds 5)
++        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
 +        return
 +    }
 +    catch {
@@ -573,6 +578,38 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +
 +    $item.SetFocus()
 +    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
++    Start-Sleep -Milliseconds 500
++    try {
++        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
++        return
++    }
++    catch {
++    }
++
++    try {
++        $pattern = $item.GetCurrentPattern(
++            [System.Windows.Automation.LegacyIAccessiblePattern]::Pattern
++        )
++        ([System.Windows.Automation.LegacyIAccessiblePattern] $pattern).DoDefaultAction()
++    }
++    catch {
++    }
++    Start-Sleep -Milliseconds 500
++    try {
++        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
++        return
++    }
++    catch {
++    }
++
++    try {
++        $pattern = $item.GetCurrentPattern(
++            [System.Windows.Automation.SelectionItemPattern]::Pattern
++        )
++        ([System.Windows.Automation.SelectionItemPattern] $pattern).Select()
++    }
++    catch {
++    }
 +    Start-Sleep -Milliseconds 500
 +}
 +
