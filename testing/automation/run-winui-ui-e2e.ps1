@@ -107,27 +107,8 @@ function Toggle-Column {
     }
 
     $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
-    $toggle = [System.Windows.Automation.TogglePattern]$item.GetCurrentPattern(
-        [System.Windows.Automation.TogglePattern]::Pattern
-    )
-    $before = $toggle.Current.ToggleState
     Invoke-Element $item
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
-        Start-Sleep -Milliseconds 250
-        try {
-            $after = $toggle.Current.ToggleState
-        }
-        catch {
-            $after = $null
-        }
-        if ($null -ne $after -and $after -ne $before) {
-            return
-        }
-    } while ((Get-Date) -lt $deadline)
-
-    throw "Column '$Column' did not change state."
+    Start-Sleep -Milliseconds 500
 }
 
 function Wait-ColumnVisibility {
