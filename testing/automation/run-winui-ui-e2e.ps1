@@ -87,7 +87,11 @@ function Invoke-Element {
 }
 
 function Toggle-Column {
-    param([System.Windows.Automation.AutomationElement] $Root, [string] $Column)
+    param(
+        [System.Windows.Automation.AutomationElement] $Root,
+        [string] $Column,
+        [int] $TimeoutSeconds = 30
+    )
 
     Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
     $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
@@ -101,7 +105,74 @@ function Toggle-Column {
         $columnsMenu.SetFocus()
         [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
     }
-    Invoke-Element (Find-ElementByAutomationId $Root "Column$Column")
+
+    $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
+    $toggle = [System.Windows.Automation.TogglePattern]$item.GetCurrentPattern(
+        [System.Windows.Automation.TogglePattern]::Pattern
+    )
+    $before = $toggle.Current.ToggleState
+    $toggle.Toggle()
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 250
+        try {
+            $after = $toggle.Current.ToggleState
+        }
+        catch {
+            $after = $null
+        }
+        if ($null -ne $after -and $after -ne $before) {
+            return
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Column '$Column' did not change state."
+}
+
+function Wait-ColumnVisibility {
+    param(
+        [System.Windows.Automation.AutomationElement] $Root,
+        [string] $AutomationId,
+        [bool] $Visible,
+        [int] $TimeoutSeconds = 30
+    )
+
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        $AutomationId
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $header = $null
+        try {
+            $header = $Root.FindFirst(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                $condition
+            )
+        }
+        catch {
+        }
+
+        $isVisible = $false
+        if ($header) {
+            try {
+                $isVisible = (
+                    -not $header.Current.IsOffscreen -and
+                    $header.Current.BoundingRectangle.Width -gt 1
+                )
+                if (($Visible -and $isVisible) -or (-not $Visible -and -not $isVisible)) {
+                    return $header
+                }
+            }
+            catch {
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    $expected = if ($Visible) { 'visible' } else { 'hidden' }
+    throw "UI column '$AutomationId' did not become $expected."
 }
 
 function Find-ToggleByAutomationId {
@@ -255,12 +326,18 @@ try {
     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
 
     Write-Host 'Enabling the release date column on Discover'
-    $null = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+    $redirect = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
         -ArgumentList 'unigetui://showDiscoverPage' -PassThru
+    try {
+        Wait-Process -Id $redirect.Id -Timeout 10 -ErrorAction SilentlyContinue
+    }
+    catch {
+    }
+    Start-Sleep -Milliseconds 1000
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     $query = Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120
     Toggle-Column $root 'ReleaseDate'
-    [void](Find-ElementByAutomationId $root 'ReleaseDateHeader')
+    [void](Wait-ColumnVisibility $root 'ReleaseDateHeader' $true -TimeoutSeconds 60)
     $value = [System.Windows.Automation.ValuePattern]$query.GetCurrentPattern(
         [System.Windows.Automation.ValuePattern]::Pattern
     )
@@ -282,41 +359,29 @@ try {
         if (-not $dateFound) { Start-Sleep -Milliseconds 500 }
     } while (-not $dateFound -and (Get-Date) -lt $deadline)
     if (-not $dateFound) { throw 'A package release date was not displayed.' }
-    Invoke-Element (Find-ElementByAutomationId $root 'ReleaseDateHeader')
+    Invoke-Element (Wait-ColumnVisibility $root 'ReleaseDateHeader' $true -TimeoutSeconds 60)
 
     Write-Host 'Checking the New version column on Updates'
-    $null = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+    $redirect = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
         -ArgumentList 'unigetui://showUpdatesPage' -PassThru
-    [void](Find-ElementByAutomationId $root 'NewVersionHeader' -TimeoutSeconds 120)
-    Toggle-Column $root 'NewVersion'
-    $headerCondition = [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NewVersionHeader'
-    )
-    $deadline = (Get-Date).AddSeconds(15)
-    do {
-        $header = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $headerCondition)
-        if (-not $header -or $header.Current.IsOffscreen -or $header.Current.BoundingRectangle.Width -le 1) { break }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    if ($header -and -not $header.Current.IsOffscreen -and $header.Current.BoundingRectangle.Width -gt 1) {
-        throw 'The New version column did not hide.'
+    try {
+        Wait-Process -Id $redirect.Id -Timeout 10 -ErrorAction SilentlyContinue
     }
-    Toggle-Column $root 'NewVersion'
-    $deadline = (Get-Date).AddSeconds(15)
-    do {
-        $header = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $headerCondition)
-        if ($header -and -not $header.Current.IsOffscreen -and $header.Current.BoundingRectangle.Width -gt 1) { break }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    if (-not $header -or $header.Current.IsOffscreen -or $header.Current.BoundingRectangle.Width -le 1) {
-        throw 'The New version column did not appear again.'
+    catch {
     }
+    Start-Sleep -Milliseconds 1000
+    [void](Wait-ColumnVisibility $root 'NewVersionHeader' $true -TimeoutSeconds 120)
+    Toggle-Column $root 'NewVersion'
+    [void](Wait-ColumnVisibility $root 'NewVersionHeader' $false -TimeoutSeconds 30)
+    Toggle-Column $root 'NewVersion'
+    [void](Wait-ColumnVisibility $root 'NewVersionHeader' $true -TimeoutSeconds 30)
 
     Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
     Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
     $appProcess = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
         -ArgumentList 'unigetui://showDiscoverPage' -PassThru
-    $dateHeader = Find-ElementByAutomationId $root 'ReleaseDateHeader' -TimeoutSeconds 120
+    [void](Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120)
+    $dateHeader = Wait-ColumnVisibility $root 'ReleaseDateHeader' $true -TimeoutSeconds 120
     if ($dateHeader.Current.ProcessId -ne $appProcess.Id) {
         throw 'The release date column did not remain enabled after restart.'
     }
