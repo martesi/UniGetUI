@@ -1,0 +1,45 @@
+From c8039ba906e52281ddc7a8b6a815572273a8bfe6 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:51:03 +0900
+Subject: [PATCH] fix: keep column automation identifiers unique
+
+Upstream-PR: Devolutions/UniGetUI#5632
+Classic-Source-Commit: 7dffbb8ca65a339e17313865eaa37412bdf18eea
+---
+ .../Pages/SoftwarePages/AbstractPackagesPage.xaml.cs  | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+index 870b4ea..0289e86 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+@@ -272,8 +272,8 @@ namespace UniGetUI.Interface
+             ColumnsMenu.Text = CoreTools.Translate("Columns");
+             foreach ((string key, string label) in ListColumns.Where(item => ColumnIsAvailable(item.Key)))
+             {
+-                AddColumnItem(headerMenu.Items, key, label);
+-                AddColumnItem(ColumnsMenu.Items, key, label);
++                AddColumnItem(headerMenu.Items, key, label, automationId: false);
++                AddColumnItem(ColumnsMenu.Items, key, label, automationId: true);
+             }
+             Loaded += (_, _) =>
+             {
+@@ -285,11 +285,12 @@ namespace UniGetUI.Interface
+             RefreshColumnVisibility();
+         }
+ 
+-        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label)
++        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label, bool automationId)
+         {
+             ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
+-            AutomationProperties.SetAutomationId(item, "Column" + key);
+-            item.Click += (_, _) => SetColumnVisible(key, item.IsChecked);
++            if (automationId)
++                AutomationProperties.SetAutomationId(item, "Column" + key);
++            item.Click += (_, _) => SetColumnVisible(key, !ColumnSettingVisible(key));
+             items.Add(item);
+             _columnMenuItems.Add((key, item));
+         }
+-- 
+2.51.1
+
