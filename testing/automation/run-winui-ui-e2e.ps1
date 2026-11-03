@@ -87,11 +87,7 @@ function Invoke-Element {
 }
 
 function Toggle-Column {
-    param(
-        [System.Windows.Automation.AutomationElement] $Root,
-        [string] $Column,
-        [int] $TimeoutSeconds = 30
-    )
+    param([System.Windows.Automation.AutomationElement] $Root, [string] $Column)
 
     Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
     $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
@@ -102,78 +98,10 @@ function Toggle-Column {
         $expand.Expand()
     }
     catch {
-    }
-    try {
         $columnsMenu.SetFocus()
         [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
     }
-    catch {
-    }
-    Start-Sleep -Milliseconds 250
-
-    $headerId = switch ($Column) {
-        'ReleaseDate' { 'ReleaseDateHeader' }
-        'NewVersion' { 'NewVersionHeader' }
-        default { $null }
-    }
-    $wasVisible = $false
-    if ($headerId) {
-        try {
-            [void](Wait-ColumnVisibility $Root $headerId $true -TimeoutSeconds 1)
-            $wasVisible = $true
-        }
-        catch {
-        }
-    }
-
-    $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
-    $targetVisible = -not $wasVisible
-    Invoke-Element $item
-    Start-Sleep -Milliseconds 500
-    if (-not $headerId) {
-        return
-    }
-    try {
-        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
-        return
-    }
-    catch {
-    }
-
-    $item.SetFocus()
-    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-    Start-Sleep -Milliseconds 500
-    try {
-        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
-        return
-    }
-    catch {
-    }
-
-    try {
-        $pattern = $item.GetCurrentPattern(
-            [System.Windows.Automation.LegacyIAccessiblePattern]::Pattern
-        )
-        ([System.Windows.Automation.LegacyIAccessiblePattern] $pattern).DoDefaultAction()
-    }
-    catch {
-    }
-    Start-Sleep -Milliseconds 500
-    try {
-        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
-        return
-    }
-    catch {
-    }
-
-    try {
-        $pattern = $item.GetCurrentPattern(
-            [System.Windows.Automation.SelectionItemPattern]::Pattern
-        )
-        ([System.Windows.Automation.SelectionItemPattern] $pattern).Select()
-    }
-    catch {
-    }
+    Invoke-Element (Find-ElementByAutomationId $Root "Column$Column")
     Start-Sleep -Milliseconds 500
 }
 

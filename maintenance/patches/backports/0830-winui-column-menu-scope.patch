@@ -1,18 +1,18 @@
-From 2c2530e0c234872ee65dcbfa4e192ffe00644eb2 Mon Sep 17 00:00:00 2001
+From 3598521906f24a5d261eaedb9a6db882d54ad795 Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 13:58:00 +0900
-Subject: [PATCH] test: focus the WinUI columns submenu before activation
+Date: Tue, 3 Nov 2026 14:08:00 +0900
+Subject: [PATCH] test: stabilize the original WinUI column menu path
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: 2c2530e0c234872ee65dcbfa4e192ffe00644eb2
+Classic-Source-Commit: 3598521906f24a5d261eaedb9a6db882d54ad795
 ---
- testing/automation/run-winui-ui-e2e.ps1 | 903 ++++++++++++++++++++++++++++++++
- 1 file changed, 482 insertions(+), 421 deletions(-)
+ testing/automation/run-winui-ui-e2e.ps1 | 831 ++++++++++++++++++++++++++++++++
+ 1 file changed, 410 insertions(+), 421 deletions(-)
 
 diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
 --- a/testing/automation/run-winui-ui-e2e.ps1
 +++ b/testing/automation/run-winui-ui-e2e.ps1
-@@ -1,421 +1,482 @@
+@@ -1,421 +1,410 @@
 -param(
 -    [string] $ExecutablePath
 -)
@@ -523,11 +523,7 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +}
 +
 +function Toggle-Column {
-+    param(
-+        [System.Windows.Automation.AutomationElement] $Root,
-+        [string] $Column,
-+        [int] $TimeoutSeconds = 30
-+    )
++    param([System.Windows.Automation.AutomationElement] $Root, [string] $Column)
 +
 +    Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
 +    $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
@@ -538,78 +534,10 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +        $expand.Expand()
 +    }
 +    catch {
-+    }
-+    try {
 +        $columnsMenu.SetFocus()
 +        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
 +    }
-+    catch {
-+    }
-+    Start-Sleep -Milliseconds 250
-+
-+    $headerId = switch ($Column) {
-+        'ReleaseDate' { 'ReleaseDateHeader' }
-+        'NewVersion' { 'NewVersionHeader' }
-+        default { $null }
-+    }
-+    $wasVisible = $false
-+    if ($headerId) {
-+        try {
-+            [void](Wait-ColumnVisibility $Root $headerId $true -TimeoutSeconds 1)
-+            $wasVisible = $true
-+        }
-+        catch {
-+        }
-+    }
-+
-+    $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
-+    $targetVisible = -not $wasVisible
-+    Invoke-Element $item
-+    Start-Sleep -Milliseconds 500
-+    if (-not $headerId) {
-+        return
-+    }
-+    try {
-+        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
-+        return
-+    }
-+    catch {
-+    }
-+
-+    $item.SetFocus()
-+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-+    Start-Sleep -Milliseconds 500
-+    try {
-+        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
-+        return
-+    }
-+    catch {
-+    }
-+
-+    try {
-+        $pattern = $item.GetCurrentPattern(
-+            [System.Windows.Automation.LegacyIAccessiblePattern]::Pattern
-+        )
-+        ([System.Windows.Automation.LegacyIAccessiblePattern] $pattern).DoDefaultAction()
-+    }
-+    catch {
-+    }
-+    Start-Sleep -Milliseconds 500
-+    try {
-+        [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
-+        return
-+    }
-+    catch {
-+    }
-+
-+    try {
-+        $pattern = $item.GetCurrentPattern(
-+            [System.Windows.Automation.SelectionItemPattern]::Pattern
-+        )
-+        ([System.Windows.Automation.SelectionItemPattern] $pattern).Select()
-+    }
-+    catch {
-+    }
++    Invoke-Element (Find-ElementByAutomationId $Root "Column$Column")
 +    Start-Sleep -Milliseconds 500
 +}
 +
