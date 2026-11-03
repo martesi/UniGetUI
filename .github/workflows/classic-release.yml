@@ -1,6 +1,9 @@
 name: Classic Release
 
 on:
+  push:
+    tags:
+      - 'v*.*.*.*'
   workflow_dispatch:
     inputs:
       version:
@@ -28,6 +31,10 @@ jobs:
         run: |
           set -euo pipefail
           version='${{ inputs.version }}'
+          if [[ -z "$version" && '${{ github.ref_type }}' == 'tag' ]]; then
+            version='${{ github.ref_name }}'
+            version="${version#v}"
+          fi
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo 'Classic release versions must be numeric four-part versions such as 2026.2.7.1.' >&2
             exit 1
