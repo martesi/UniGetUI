@@ -295,20 +295,20 @@ try {
     $deadline = (Get-Date).AddSeconds(15)
     do {
         $header = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $headerCondition)
-        if (-not $header -or $header.Current.IsOffscreen) { break }
+        if (-not $header -or $header.Current.IsOffscreen -or $header.Current.BoundingRectangle.Width -le 1) { break }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
-    if ($header -and -not $header.Current.IsOffscreen) {
+    if ($header -and -not $header.Current.IsOffscreen -and $header.Current.BoundingRectangle.Width -gt 1) {
         throw 'The New version column did not hide.'
     }
     Toggle-Column $root 'NewVersion'
     $deadline = (Get-Date).AddSeconds(15)
     do {
         $header = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $headerCondition)
-        if ($header -and -not $header.Current.IsOffscreen) { break }
+        if ($header -and -not $header.Current.IsOffscreen -and $header.Current.BoundingRectangle.Width -gt 1) { break }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
-    if (-not $header -or $header.Current.IsOffscreen) {
+    if (-not $header -or $header.Current.IsOffscreen -or $header.Current.BoundingRectangle.Width -le 1) {
         throw 'The New version column did not appear again.'
     }
 
