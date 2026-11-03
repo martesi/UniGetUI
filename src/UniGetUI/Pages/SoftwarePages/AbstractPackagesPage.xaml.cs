@@ -289,7 +289,7 @@ namespace UniGetUI.Interface
         {
             ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
             AutomationProperties.SetAutomationId(item, "Column" + key);
-            item.Click += (_, _) => SetColumnVisible(key, item.IsChecked);
+            item.Click += (_, _) => SetColumnVisible(key, !ColumnSettingVisible(key));
             items.Add(item);
             _columnMenuItems.Add((key, item));
         }
