@@ -272,8 +272,8 @@ namespace UniGetUI.Interface
             ColumnsMenu.Text = CoreTools.Translate("Columns");
             foreach ((string key, string label) in ListColumns.Where(item => ColumnIsAvailable(item.Key)))
             {
-                AddColumnItem(headerMenu.Items, key, label);
-                AddColumnItem(ColumnsMenu.Items, key, label);
+                AddColumnItem(headerMenu.Items, key, label, automationId: false);
+                AddColumnItem(ColumnsMenu.Items, key, label, automationId: true);
             }
             Loaded += (_, _) =>
             {
@@ -285,10 +285,11 @@ namespace UniGetUI.Interface
             RefreshColumnVisibility();
         }
 
-        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label)
+        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label, bool automationId)
         {
             ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
-            AutomationProperties.SetAutomationId(item, "Column" + key);
+            if (automationId)
+                AutomationProperties.SetAutomationId(item, "Column" + key);
             item.Click += (_, _) => SetColumnVisible(key, !ColumnSettingVisible(key));
             items.Add(item);
             _columnMenuItems.Add((key, item));
