@@ -1,0 +1,753 @@
+From c5ced8fa5b4b79e042dbdf28bca5f611a305480d Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:35:02 +0800
+Subject: [PATCH] backport: Stop PowerShell from truncating Scoop listing
+ output  (#5434)
+
+Upstream-Commit: 9f55ba5f86e070bd74ce933b6c16e2c759fa545c
+Upstream-PR: Devolutions/UniGetUI#5434
+Classic-Source-Commit: c5ced8fa5b4b79e042dbdf28bca5f611a305480d
+
+---
+ .../Helpers/ScoopSourceHelper.cs              | 130 ++++++-------
+ .../Helpers/ScoopTable.cs                     |  51 ++++++
+ .../Scoop.cs                                  | 116 +++++-------
+ .../Scoop/bucket-list-output-spaced-path.txt  |   4 +
+ .../Fixtures/Scoop/list-output-edge-cases.txt |   7 +
+ .../Scoop/list-output-not-outdated.txt        |   7 +
+ .../Fixtures/Scoop/list-output.txt            |  10 +-
+ .../Fixtures/Scoop/status-output-ansi.txt     |   7 +
+ .../Scoop/status-output-not-outdated.txt      |   7 +
+ .../ScoopManagerTests.cs                      | 172 ++++++++++++++++--
+ 10 files changed, 356 insertions(+), 155 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopTable.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/bucket-list-output-spaced-path.txt
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output-edge-cases.txt
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output-not-outdated.txt
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/status-output-ansi.txt
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/status-output-not-outdated.txt
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopSourceHelper.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopSourceHelper.cs
+index 6652267779f6d42de7bd497c097868a8b831e2b1..9f3dafcef81168b167ca342d9f86089c0b1380e9 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopSourceHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopSourceHelper.cs
+@@ -49,7 +49,10 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                 StartInfo = new ProcessStartInfo
+                 {
+                     FileName = Manager.Status.ExecutablePath,
+-                    Arguments = Manager.Status.ExecutableCallArgs + " bucket list",
++                    Arguments =
++                        Manager.Status.ExecutableCallArgs
++                        + " bucket list"
++                        + Scoop.UntruncatedTableOutput,
+                     RedirectStandardOutput = true,
+                     RedirectStandardError = true,
+                     RedirectStandardInput = true,
+@@ -74,81 +77,48 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+         internal IReadOnlyList<IManagerSource> ParseSources(IEnumerable<string> lines)
+         {
+             List<ManagerSource> sources = [];
+-            bool dashesPassed = false;
++            IReadOnlyList<int>? columns = null;
+ 
+-            foreach (string line in lines)
++            foreach (string rawLine in lines)
+             {
++                string line = ScoopTable.StripAnsiSequences(rawLine);
++
++                if (columns is null)
++                {
++                    columns = ScoopTable.ReadColumnStarts(line);
++                    continue;
++                }
++
++                if (columns.Count < 4 || string.IsNullOrWhiteSpace(line))
++                {
++                    continue;
++                }
++
++                string name = ScoopTable.ReadColumn(line, columns, 0);
++                string source = ScoopTable.ReadColumn(line, columns, 1);
++                string updated = ScoopTable.ReadColumn(line, columns, 2);
++                string manifests = ScoopTable.ReadColumn(line, columns, 3);
++
++                if (name.Length is 0 || source.Length is 0 || manifests.Length is 0)
++                {
++                    continue;
++                }
++
+                 try
+                 {
+-                    if (!dashesPassed)
+-                    {
+-                        if (line.Contains("---"))
+-                        {
+-                            dashesPassed = true;
+-                        }
+-
+-                        continue;
+-                    }
+-
+-                    if (string.IsNullOrWhiteSpace(line))
+-                    {
+-                        continue;
+-                    }
+-
+-                    string[] elements = Regex
+-                        .Replace(
+-                            Regex.Replace(line, "[1234567890 :.-][AaPp][Mm][\\W]", "").Trim(),
+-                            " {2,}",
+-                            " "
+-                        )
+-                        .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+-                    if (elements.Length < 5)
+-                    {
+-                        continue;
+-                    }
+-
+-                    if (
+-                        !elements[1].Contains("https://")
+-                        && !elements[1].Contains("http://")
+-                    )
+-                    {
+-                        elements[1] = Path.Join(
+-                            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+-                            "scoop",
+-                            "buckets",
+-                            elements[0].Trim()
+-                        );
+-                    }
+-                    else
+-                    {
+-                        elements[1] = Regex.Replace(elements[1], @"^(.*)\.git$", "$1");
+-                    }
+-
+-                    try
+-                    {
+-                        sources.Add(
+-                            new ManagerSource(
+-                                Manager,
+-                                elements[0].Trim(),
+-                                new Uri(elements[1]),
+-                                int.Parse(elements[4].Trim()),
+-                                elements[2].Trim() + " " + elements[3].Trim()
+-                            )
+-                        );
+-                    }
+-                    catch (Exception ex)
+-                    {
+-                        Logger.Warn(ex);
+-                        sources.Add(
+-                            new ManagerSource(
++                    Uri url = BuildSourceUrl(name, source);
++
++                    sources.Add(
++                        int.TryParse(manifests, out int packageCount)
++                            ? new ManagerSource(
+                                 Manager,
+-                                elements[0].Trim(),
+-                                new Uri(elements[1]),
+-                                -1,
+-                                "1/1/1970"
++                                name,
++                                url,
++                                packageCount,
++                                Regex.Replace(updated, @"\s+[AaPp][Mm]$", "")
+                             )
+-                        );
+-                    }
++                            : new ManagerSource(Manager, name, url, -1, "1/1/1970")
++                    );
+                 }
+                 catch (Exception e)
+                 {
+@@ -158,5 +128,25 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+ 
+             return sources;
+         }
++
++        private static Uri BuildSourceUrl(string name, string source)
++        {
++            if (source.Contains("https://") || source.Contains("http://"))
++            {
++                return new Uri(Regex.Replace(source, @"^(.*)\.git$", "$1"));
++            }
++
++            string userProfile = Environment.GetFolderPath(
++                Environment.SpecialFolder.UserProfile
++            );
++            string path =
++                source.StartsWith("~/") || source.StartsWith(@"~\")
++                    ? Path.Join(userProfile, source[2..])
++                    : source;
++
++            return Path.IsPathFullyQualified(path)
++                ? new Uri(path)
++                : new Uri(Path.Join(userProfile, "scoop", "buckets", name));
++        }
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopTable.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopTable.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4d3c33b62e29e15fa097200dfcffa09bb43b1bba
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Helpers/ScoopTable.cs
+@@ -0,0 +1,51 @@
++using System.Text.RegularExpressions;
++
++namespace UniGetUI.PackageEngine.Managers.ScoopManager
++{
++    internal static partial class ScoopTable
++    {
++        [GeneratedRegex(@"\x1b\[[0-9;]*m")]
++        private static partial Regex AnsiSequence();
++
++        public static string StripAnsiSequences(string line) =>
++            line.Contains('\x1b') ? AnsiSequence().Replace(line, "") : line;
++
++        public static IReadOnlyList<int>? ReadColumnStarts(string line)
++        {
++            if (!line.Contains("---"))
++            {
++                return null;
++            }
++
++            List<int> starts = [];
++            for (int i = 0; i < line.Length; i++)
++            {
++                if (line[i] is not '-')
++                {
++                    continue;
++                }
++
++                starts.Add(i);
++                while (i < line.Length && line[i] is '-')
++                {
++                    i++;
++                }
++            }
++
++            return starts;
++        }
++
++        public static string ReadColumn(string line, IReadOnlyList<int> starts, int index)
++        {
++            int start = starts[index];
++            if (start >= line.Length)
++            {
++                return "";
++            }
++
++            int end =
++                index + 1 < starts.Count ? Math.Min(starts[index + 1], line.Length) : line.Length;
++            return line[start..end].Trim();
++        }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+index c819d246108d40f9cc3c6fdbc6ab9f557c3a0b1e..71510f2532da0c51a19b7ef68ba57605d7f0f7a2 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+@@ -1,5 +1,4 @@
+ using System.Diagnostics;
+-using System.Text.RegularExpressions;
+ using UniGetUI.Core.Classes;
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.Logging;
+@@ -50,6 +49,9 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+             "removed,",
+         ];
+ 
++        internal const string UntruncatedTableOutput =
++            " | Format-Table -AutoSize | Out-String -Width 4096";
++
+         private const int VersionProbeTimeout = 20_000;
+         private const int StreamDrainTimeout = 5_000;
+ 
+@@ -249,42 +251,35 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+             }
+ 
+             List<Package> packages = [];
+-            bool dashesPassed = false;
+-            foreach (string line in lines)
++            IReadOnlyList<int>? columns = null;
++            foreach (string rawLine in lines)
+             {
+-                if (!dashesPassed)
+-                {
+-                    if (line.Contains("---"))
+-                    {
+-                        dashesPassed = true;
+-                    }
++                string line = ScoopTable.StripAnsiSequences(rawLine);
+ 
+-                    continue;
+-                }
+-
+-                if (string.IsNullOrWhiteSpace(line))
++                if (columns is null)
+                 {
++                    columns = ScoopTable.ReadColumnStarts(line);
+                     continue;
+                 }
+ 
+-                string[] elements = Regex
+-                    .Replace(line, " {2,}", " ")
+-                    .Trim()
+-                    .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+-                if (elements.Length < 3)
++                if (columns.Count < 3 || string.IsNullOrWhiteSpace(line))
+                 {
+                     continue;
+                 }
+ 
+-                for (int i = 0; i < elements.Length; i++)
++                string id = ScoopTable.ReadColumn(line, columns, 0);
++                string version = ScoopTable.ReadColumn(line, columns, 1);
++                string newVersion = ScoopTable.ReadColumn(line, columns, 2);
++
++                if (id.Length is 0 || version.Length is 0 || newVersion.Length is 0)
+                 {
+-                    elements[i] = elements[i].Trim();
++                    continue;
+                 }
+ 
+                 if (
+-                    FALSE_PACKAGE_IDS.Contains(elements[0])
+-                    || FALSE_PACKAGE_VERSIONS.Contains(elements[1])
+-                    || FALSE_PACKAGE_VERSIONS.Contains(elements[2])
++                    FALSE_PACKAGE_IDS.Contains(id)
++                    || FALSE_PACKAGE_VERSIONS.Contains(version)
++                    || FALSE_PACKAGE_VERSIONS.Contains(newVersion)
+                 )
+                 {
+                     continue;
+@@ -292,7 +287,7 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+ 
+                 if (
+                     installedPackageMap.TryGetValue(
+-                        elements[0] + "." + elements[1],
++                        id + "." + version,
+                         out IPackage? installedPackage
+                     )
+                 )
+@@ -300,10 +295,10 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                     OverridenInstallationOptions options = new(installedPackage.OverridenOptions.Scope);
+                     packages.Add(
+                         new Package(
+-                            CoreTools.FormatAsName(elements[0]),
+-                            elements[0],
+-                            elements[1],
+-                            elements[2],
++                            CoreTools.FormatAsName(id),
++                            id,
++                            version,
++                            newVersion,
+                             installedPackage.Source,
+                             this,
+                             options
+@@ -318,68 +313,49 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+         internal IReadOnlyList<Package> ParseInstalledPackages(IEnumerable<string> lines)
+         {
+             List<Package> packages = [];
+-            bool dashesPassed = false;
+-            foreach (string line in lines)
++            IReadOnlyList<int>? columns = null;
++            foreach (string rawLine in lines)
+             {
+-                if (!dashesPassed)
+-                {
+-                    if (line.Contains("---"))
+-                    {
+-                        dashesPassed = true;
+-                    }
++                string line = ScoopTable.StripAnsiSequences(rawLine);
+ 
+-                    continue;
+-                }
+-
+-                if (string.IsNullOrWhiteSpace(line))
++                if (columns is null)
+                 {
++                    columns = ScoopTable.ReadColumnStarts(line);
+                     continue;
+                 }
+ 
+-                string[] elements = Regex
+-                    .Replace(line, " {2,}", " ")
+-                    .Trim()
+-                    .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+-                if (elements.Length < 3)
++                if (columns.Count < 3 || string.IsNullOrWhiteSpace(line))
+                 {
+                     continue;
+                 }
+ 
+-                if (elements[2].Contains(":\\"))
+-                {
+-                    var path = Regex.Match(
+-                        line,
+-                        "[A-Za-z]:(?:[\\\\\\/][^\\\\\\/\\n]+)+(?:.json|…)"
+-                    );
+-                    if (!string.IsNullOrEmpty(path.Value))
+-                    {
+-                        elements[2] = path.Value;
+-                    }
+-                }
++                string id = ScoopTable.ReadColumn(line, columns, 0);
++                string version = ScoopTable.ReadColumn(line, columns, 1);
++                string source = ScoopTable.ReadColumn(line, columns, 2);
++                string info = columns.Count > 4 ? ScoopTable.ReadColumn(line, columns, 4) : "";
+ 
+-                for (int i = 0; i < elements.Length; i++)
++                if (id.Length is 0 || version.Length is 0)
+                 {
+-                    elements[i] = elements[i].Trim();
++                    continue;
+                 }
+ 
+-                if (
+-                    FALSE_PACKAGE_IDS.Contains(elements[0])
+-                    || FALSE_PACKAGE_VERSIONS.Contains(elements[1])
+-                )
++                if (FALSE_PACKAGE_IDS.Contains(id) || FALSE_PACKAGE_VERSIONS.Contains(version))
+                 {
+                     continue;
+                 }
+ 
+                 OverridenInstallationOptions options = new(
+-                    line.Contains("Global install") ? PackageScope.Global : PackageScope.User
++                    info.Contains("Global install") ? PackageScope.Global : PackageScope.User
+                 );
+ 
+                 packages.Add(
+                     new Package(
+-                        CoreTools.FormatAsName(elements[0]),
+-                        elements[0],
+-                        elements[1],
+-                        SourcesHelper.Factory.GetSourceOrDefault(elements[2]),
++                        CoreTools.FormatAsName(id),
++                        id,
++                        version,
++                        source.Length is 0
++                            ? Properties.DefaultSource
++                            : SourcesHelper.Factory.GetSourceOrDefault(source),
+                         this,
+                         options
+                     )
+@@ -446,7 +422,8 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                 StartInfo = new ProcessStartInfo
+                 {
+                     FileName = Status.ExecutablePath,
+-                    Arguments = Status.ExecutableCallArgs + " status -l",
++                    Arguments =
++                        Status.ExecutableCallArgs + " status -l" + UntruncatedTableOutput,
+                     RedirectStandardOutput = true,
+                     RedirectStandardError = true,
+                     UseShellExecute = false,
+@@ -472,7 +449,8 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+                 StartInfo = new ProcessStartInfo
+                 {
+                     FileName = Status.ExecutablePath,
+-                    Arguments = Status.ExecutableCallArgs + " list",
++                    Arguments =
++                        Status.ExecutableCallArgs + " list" + UntruncatedTableOutput,
+                     RedirectStandardOutput = true,
+                     RedirectStandardError = true,
+                     UseShellExecute = false,
+diff --git a/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/bucket-list-output-spaced-path.txt b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/bucket-list-output-spaced-path.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..e5183d570a01541e1ab83e1b74f677a67966b75e
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/bucket-list-output-spaced-path.txt
+@@ -0,0 +1,4 @@
++Name   Source                                       Updated               Manifests
++----   ------                                       -------               ---------
++main   ~\AppData\Local\Temp\My Scoop\buckets\main   2026-09-22 3:46:27 PM         2
++extras ~\AppData\Local\Temp\My Scoop\buckets\extras 2026-09-22 3:46:27 PM         3
+diff --git a/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output-edge-cases.txt b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output-edge-cases.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c023ad96a16669b034ac414c9493086e70c7d6d
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output-edge-cases.txt
+@@ -0,0 +1,7 @@
++Installed apps:
++WARN  error: Could not find a part of the path 'C:\Users\Jane Doe\git\Extras\bucket\spaced-app.json'.
++Name       Version Source                                              Updated             Info
++----       ------- ------                                              -------             ----
++normal-app 3.0.0   main                                                2026-09-22 16:26:39
++orphan-app 1.0.0                                                       2026-09-22 16:26:39
++spaced-app 2.0.0   C:\Users\Jane Doe\git\Extras\bucket\spaced-app.json 2026-09-22 16:26:39
+diff --git a/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output-not-outdated.txt b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output-not-outdated.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..277c5ad45e400f77e040dd4c50daedadae2b505f
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output-not-outdated.txt
+@@ -0,0 +1,7 @@
++Name            Version Source Updated             Info
++----            ------- ------ -------             ----
++outdated-app    1.0.0   main   2026-09-22 14:00:00
++missingdeps-app 1.2.3   main   2026-09-22 14:00:00
++deprecated-app  4.5.6   main   2026-09-22 14:00:00
++held-app        7.8.9   main   2026-09-22 14:00:00 Global install
++failed-app      1.1.1   main   2026-09-22 14:00:00
+diff --git a/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output.txt b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output.txt
+index 90cec9e5f37ac16dee964fac88726afb77fd7196..999c8ff56ad0efaf629e0ac6e32aefac89a92ba7 100644
+--- a/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output.txt
++++ b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/list-output.txt
+@@ -1,5 +1,5 @@
+-Name      Version  Source
+-----      -------  ------
+-git       2.47.1   main
+-pwsh      7.4.6    versions Global install
+-No        packages installed
++Installed apps:
++Name Version Source   Updated             Info
++---- ------- ------   -------             ----
++git  2.47.1  main     2026-09-22 16:26:39
++pwsh 7.4.6   versions 2026-09-22 16:26:39 Global install
+diff --git a/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/status-output-ansi.txt b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/status-output-ansi.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c6514c50dacff9413948eaceef0c22f31a2b7f0
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/status-output-ansi.txt
+@@ -0,0 +1,7 @@
++[32;1mName           [0m[32;1m Installed Version[0m[32;1m Latest Version[0m[32;1m Missing Dependencies[0m[32;1m Info[0m
++[32;1m----           [0m [32;1m-----------------[0m [32;1m--------------[0m [32;1m--------------------[0m [32;1m----[0m
++outdated-app    1.0.0             2.0.0
++missingdeps-app 1.2.3                            somedep | otherdep
++deprecated-app  4.5.6                                                 Dep.
++held-app        7.8.9                                                 Hel.
++failed-app      1.1.1                                                 Ins.
+diff --git a/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/status-output-not-outdated.txt b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/status-output-not-outdated.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..419529a87f203dfa474a2a22b148a454c232361a
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/Fixtures/Scoop/status-output-not-outdated.txt
+@@ -0,0 +1,7 @@
++Name            Installed Version Latest Version Missing Dependencies Info
++----            ----------------- -------------- -------------------- ----
++outdated-app    1.0.0             2.0.0
++missingdeps-app 1.2.3                            somedep | otherdep
++deprecated-app  4.5.6                                                 Deprecated
++held-app        7.8.9                                                 Held package
++failed-app      1.1.1                                                 Install failed
+diff --git a/src/UniGetUI.PackageEngine.Tests/ScoopManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/ScoopManagerTests.cs
+index 028dd28213f4ecb04d77422a2f91932d367ed22c..857cbc27c9e9907f93ff3f97b638f5df6cbd869c 100644
+--- a/src/UniGetUI.PackageEngine.Tests/ScoopManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/ScoopManagerTests.cs
+@@ -1,4 +1,5 @@
+ #if WINDOWS
++using System.Diagnostics;
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.PackageEngine.Enums;
+@@ -8,6 +9,7 @@ using UniGetUI.PackageEngine.Serializable;
+ using UniGetUI.PackageEngine.Structs;
+ using UniGetUI.PackageEngine.Tests.Infrastructure.Assertions;
+ using UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Fakes;
+ using UniGetUI.PackageEngine.Tests.Infrastructure.Helpers;
+ using Architecture = UniGetUI.PackageEngine.Enums.Architecture;
+ 
+@@ -22,6 +24,11 @@ public sealed class ScoopManagerTestCollection
+ [Collection(ScoopManagerTestCollection.Name)]
+ public sealed class ScoopManagerTests : IDisposable
+ {
++    private const string LongId =
++        "a-scoop-package-whose-manifest-name-is-long-enough-to-overflow-the-default-console-width-by-far";
++    private const string LongVersion = "20260727133500-nightly";
++    private const string LongNewVersion = "20260820144900-nightly";
++
+     private readonly string _testRoot = Path.Combine(
+         AppContext.BaseDirectory,
+         nameof(ScoopManagerTests),
+@@ -132,6 +139,33 @@ public sealed class ScoopManagerTests : IDisposable
+         );
+     }
+ 
++    [Fact]
++    public void ParseSourcesKeepsLocalBucketsWhosePathContainsSpaces()
++    {
++        var manager = new Scoop();
++        var helper = Assert.IsType<ScoopSourceHelper>(manager.SourcesHelper);
++
++        var sources = helper.ParseSources(ReadFixtureLines(@"Scoop\bucket-list-output-spaced-path.txt"));
++
++        Assert.Collection(
++            sources,
++            source =>
++            {
++                Assert.Equal("main", source.Name);
++                Assert.Equal(SpacedBucketUrl("main"), source.Url);
++                Assert.Equal(2, source.PackageCount);
++                Assert.Equal("2026-09-22 3:46:27", source.UpdateDate);
++            },
++            source =>
++            {
++                Assert.Equal("extras", source.Name);
++                Assert.Equal(SpacedBucketUrl("extras"), source.Url);
++                Assert.Equal(3, source.PackageCount);
++                Assert.Equal("2026-09-22 3:46:27", source.UpdateDate);
++            }
++        );
++    }
++
+     [Fact]
+     public void ParseSourcesNormalizesGitUrlsAndLocalBuckets()
+     {
+@@ -152,17 +186,7 @@ public sealed class ScoopManagerTests : IDisposable
+             source =>
+             {
+                 Assert.Equal("extras", source.Name);
+-                Assert.Equal(
+-                    new Uri(
+-                        Path.Join(
+-                            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+-                            "scoop",
+-                            "buckets",
+-                            "extras"
+-                        )
+-                    ),
+-                    source.Url
+-                );
++                Assert.Equal(new Uri(@"C:\Users\fixture\scoop\buckets\extras"), source.Url);
+                 Assert.Equal(321, source.PackageCount);
+                 Assert.Equal("2024-02-02 09:08:07", source.UpdateDate);
+             }
+@@ -367,6 +391,132 @@ public sealed class ScoopManagerTests : IDisposable
+         Assert.False(package.OverridenOptions.RunAsAdministrator);
+     }
+ 
++    [Fact]
++    public void ParseInstalledPackagesReadsSourcesThatAreEmptyOrContainSpaces()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++
++        var packages = manager.ParseInstalledPackages(
++            ReadFixtureLines(@"Scoop\list-output-edge-cases.txt")
++        );
++
++        Assert.Collection(
++            packages,
++            package =>
++            {
++                PackageAssert.Matches(package, "Normal App", "normal-app", "3.0.0");
++                Assert.Equal("main", package.Source.Name);
++            },
++            package =>
++            {
++                PackageAssert.Matches(package, "Orphan App", "orphan-app", "1.0.0");
++                Assert.Same(manager.DefaultSource, package.Source);
++            },
++            package =>
++            {
++                PackageAssert.Matches(package, "Spaced App", "spaced-app", "2.0.0");
++                Assert.Equal(
++                    @"C:\Users\Jane Doe\git\Extras\bucket\spaced-app.json",
++                    package.Source.Name
++                );
++            }
++        );
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesReadsColumnsThroughAnsiColourCodes()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++        var installedPackages = manager.ParseInstalledPackages(
++            ReadFixtureLines(@"Scoop\list-output-not-outdated.txt")
++        );
++
++        var packages = manager.ParseAvailableUpdates(
++            ReadFixtureLines(@"Scoop\status-output-ansi.txt"),
++            installedPackages
++        );
++
++        var package = Assert.Single(packages);
++        PackageAssert.Matches(package, "Outdated App", "outdated-app", "1.0.0", "2.0.0");
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesSkipsRowsListedWithoutANewerVersion()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++        var installedPackages = manager.ParseInstalledPackages(
++            ReadFixtureLines(@"Scoop\list-output-not-outdated.txt")
++        );
++
++        var packages = manager.ParseAvailableUpdates(
++            ReadFixtureLines(@"Scoop\status-output-not-outdated.txt"),
++            installedPackages
++        );
++
++        var package = Assert.Single(packages);
++        PackageAssert.Matches(package, "Outdated App", "outdated-app", "1.0.0", "2.0.0");
++    }
++
++    [Fact]
++    public void ParseAvailableUpdatesKeepsRowsThatOverflowTheDefaultConsoleWidth()
++    {
++        var manager = CreateManagerWithKnownSources("main");
++
++        var installedPackages = manager.ParseInstalledPackages(
++            RunPowerShellTable(
++                $"@(@('{LongId}','{LongVersion}'),@('7zip','26.03')) "
++                    + "| ForEach-Object { [PSCustomObject][ordered]@{ Name = $_[0]; "
++                    + "Version = $_[1]; Source = 'main' } }"
++            )
++        );
++
++        var packages = manager.ParseAvailableUpdates(
++            RunPowerShellTable(
++                $"@(@('{LongId}','{LongVersion}','{LongNewVersion}'),@('7zip','26.03','26.04')) "
++                    + "| ForEach-Object { [PSCustomObject][ordered]@{ Name = $_[0]; "
++                    + "'Installed Version' = $_[1]; 'Latest Version' = $_[2] } }"
++            ),
++            installedPackages
++        );
++
++        var package = Assert.Single(packages, package => package.Id == LongId);
++        Assert.Equal(LongVersion, package.VersionString);
++        Assert.Equal(LongNewVersion, package.NewVersionString);
++    }
++
++    private static string[] RunPowerShellTable(string script)
++    {
++        using Process p = new()
++        {
++            StartInfo = new ProcessStartInfo
++            {
++                FileName = "powershell.exe",
++                Arguments =
++                    "-NoProfile -ExecutionPolicy Bypass -Command \""
++                    + script
++                    + Scoop.UntruncatedTableOutput
++                    + "\"",
++                RedirectStandardOutput = true,
++                RedirectStandardError = true,
++                UseShellExecute = false,
++                CreateNoWindow = true,
++                StandardOutputEncoding = System.Text.Encoding.UTF8,
++            },
++        };
++
++        p.Start();
++        return [.. ScoopProcess.ReadLines(p, new TestProcessTaskLogger())];
++    }
++
++    private static Uri SpacedBucketUrl(string bucket) =>
++        new(
++            Path.Join(
++                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
++                @"AppData\Local\Temp\My Scoop\buckets",
++                bucket
++            )
++        );
++
+     private static Scoop CreateManagerWithKnownSources(params string[] sourceNames)
+     {
+         var manager = new Scoop();
+-- 
+2.56.0
+

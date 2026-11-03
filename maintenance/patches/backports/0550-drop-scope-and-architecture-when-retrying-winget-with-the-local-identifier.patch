@@ -1,0 +1,127 @@
+From 5b28e63d620433d720bc42dd59df24b2dbf0265e Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:47:42 +0800
+Subject: [PATCH] backport: Drop scope and architecture when retrying WinGet
+ with the local identifier (#5579)
+
+Upstream-Commit: 2f1659fbdf15558b048301fcf14dbcd588fd8e2d
+Upstream-PR: Devolutions/UniGetUI#5579
+Classic-Source-Commit: 5b28e63d620433d720bc42dd59df24b2dbf0265e
+
+---
+ .../Helpers/WinGetPkgOperationHelper.cs       | 16 +++---
+ .../WinGetManagerTests.cs                     | 52 +++++++++++++++++++
+ 2 files changed, 62 insertions(+), 6 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index 86f94ac49e80cdaa1573dc17e66e089c1dc66b0f..c7c523c584370e86ead104df3bb22e8f864ee683 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -29,15 +29,19 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+ 
+     private static string GetSelectorPiece(IPackage package)
+     {
+-        if (
+-            package.OverridenOptions.WinGet_UseLocalIdentifier
+-            && GetFallbackIdentifier(package) is { } localIdentifier
+-        )
++        if (GetSelectedLocalIdentifier(package) is { } localIdentifier)
+             return $"--id {Selector(localIdentifier, "local identifier")} --exact";
+ 
+         return GetIdNamePiece(package);
+     }
+ 
++    private static string? GetSelectedLocalIdentifier(IPackage package) =>
++        package.OverridenOptions.WinGet_UseLocalIdentifier ? GetFallbackIdentifier(package) : null;
++
++    private static bool DropsArchAndScope(IPackage package) =>
++        package.OverridenOptions.WinGet_DropArchAndScope
++        || GetSelectedLocalIdentifier(package) is not null;
++
+     private static bool OperationIsBrokered(IPackage package) =>
+         Settings.Get(Settings.K.UseAgentBroker) && !package.Source.IsVirtualManager;
+ 
+@@ -67,7 +71,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+ 
+     internal static string? GetEffectiveScope(IPackage package, InstallOptions options)
+     {
+-        if (package.OverridenOptions.WinGet_DropArchAndScope)
++        if (DropsArchAndScope(package))
+             return null;
+ 
+         return (package.OverridenOptions.Scope ?? options.InstallationScope) switch
+@@ -95,7 +99,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+         bool forUpdate = false
+     )
+     {
+-        if (package.OverridenOptions.WinGet_DropArchAndScope)
++        if (DropsArchAndScope(package))
+             return null;
+ 
+         string architecture =
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index 5fefa9ea11d67bf4b355ba321607e5e400d0f479..61b952f211e36408d52596744cd5f59bc0cecedb 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -1875,6 +1875,58 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.Contains("--exact", retryAttempt);
+     }
+ 
++    [Fact]
++    public void WinGetLocalIdentifierRetryDropsTheScopeAndArchitectureThatHidTheInstalledEntry()
++    {
++        const string fanControlLocalIdentifier =
++            @"ARP\Machine\X86\{141A88F8-31AC-49EA-B428-2BE8C19DED83}_is1";
++        var manager = new WinGet();
++        SetCliToolKind(manager, WinGetCliToolKind.SystemWinGet);
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Rem0o.FanControl")
++            .WithVersion("251")
++            .WithNewVersion("268")
++            .Build();
++        NativePackageHandler.AddLocalIdentifier(package, fanControlLocalIdentifier);
++        static InstallOptions UserScopeX64() =>
++            new() { InstallationScope = PackageScope.User, Architecture = Architecture.x64 };
++
++        var firstAttempt = manager.OperationHelper.GetParameters(
++            package,
++            UserScopeX64(),
++            OperationType.Update
++        );
++        Assert.Contains("--scope", firstAttempt);
++        Assert.Contains("--architecture", firstAttempt);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Update,
++            [],
++            unchecked((int)0x8A150014)
++        );
++        OperationAssert.HasVeredict(veredict, OperationVeredict.AutoRetry);
++
++        var retryAttempt = manager.OperationHelper.GetParameters(
++            package,
++            UserScopeX64(),
++            OperationType.Update
++        );
++        Assert.Contains($"\"{fanControlLocalIdentifier}\"", retryAttempt);
++        Assert.DoesNotContain("--scope", retryAttempt);
++        Assert.DoesNotContain("--architecture", retryAttempt);
++
++        var manualCommand = manager.OperationHelper.GetStandaloneParameters(
++            package,
++            UserScopeX64(),
++            OperationType.Update
++        );
++        Assert.Contains($"\"{fanControlLocalIdentifier}\"", manualCommand);
++        Assert.DoesNotContain("--scope", manualCommand);
++        Assert.DoesNotContain("--architecture", manualCommand);
++    }
++
+     [Fact]
+     public void WinGetUninstallRetriesWithTheLocalIdentifierWhenNoInstalledPackageMatches()
+     {
+-- 
+2.56.0
+

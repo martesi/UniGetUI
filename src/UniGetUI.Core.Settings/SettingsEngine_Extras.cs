@@ -12,6 +12,9 @@ public partial class Settings
      *
      */
 
+    public static bool IsSystemTrayIconVisible() =>
+        !Get(K.DisableSystemTray) && !Get(K.HideSystemTrayIcon);
+
     public static bool AreNotificationsDisabled() =>
         Get(K.DisableSystemTray) || Get(K.DisableNotifications);
 

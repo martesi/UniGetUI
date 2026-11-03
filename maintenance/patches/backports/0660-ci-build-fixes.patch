@@ -1,0 +1,73 @@
+From 6a7fd3e530cad3d4d4bacf988e619850614ce917 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 17:20:13 +0200
+Subject: [PATCH] classic: restore bulk update import and WinGet test fixtures
+
+Classic-Source-Commit: 2911740f624d5548f20b80f159bbe5b1fdd98c9e
+---
+ .../IpcPackageApi.cs                          |  1 +
+ .../WinGetManagerTests.cs                     | 20 ++++++++++++++++---
+ 2 files changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs b/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
+index a6bffa6..b5b5510 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
+@@ -1,5 +1,6 @@
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.Tools;
++using UniGetUI.Interface.Enums;
+ using UniGetUI.PackageEngine;
+ using UniGetUI.PackageEngine.Classes.Packages.Classes;
+ using UniGetUI.PackageEngine.Enums;
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index ebe555a..b1d06a4 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -2489,9 +2489,20 @@ public sealed class WinGetManagerTests : IDisposable
+             .Invoke(null, [value]);
+     }
+ 
++    private static IPackage CreatePingetQueryPackage()
++    {
++        return new PackageBuilder()
++            .WithManager(new WinGet())
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.2.3")
++            .Build();
++    }
++
+     private static ShowResult CreatePingetShowResult(
+         string? description = "Contoso description",
+-        string? shortDescription = null
++        string? shortDescription = null,
++        IReadOnlyList<string>? installerUrls = null
+     )
+     {
+         var package = new SearchMatch
+@@ -2511,6 +2522,9 @@ public sealed class WinGetManagerTests : IDisposable
+             ReleaseDate = "2026-04-27",
+             PackageDependencies = ["Contoso.Dependency [2.0]"],
+         };
++        List<Installer> installers = installerUrls is null
++            ? [installer]
++            : [.. installerUrls.Select(url => installer with { Url = url })];
+ 
+         return new ShowResult
+         {
+@@ -2529,9 +2543,9 @@ public sealed class WinGetManagerTests : IDisposable
+                 ReleaseNotes = "Release notes",
+                 Tags = ["utility"],
+                 PackageDependencies = ["Contoso.Runtime"],
+-                Installers = [installer],
++                Installers = installers,
+             },
+-            SelectedInstaller = installer,
++            SelectedInstaller = installers.FirstOrDefault(),
+             StructuredDocument = new Dictionary<string, object?>(),
+         };
+     }
+-- 
+2.51.1
+

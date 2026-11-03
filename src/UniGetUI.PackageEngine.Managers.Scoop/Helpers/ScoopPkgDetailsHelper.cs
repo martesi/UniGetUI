@@ -41,37 +41,28 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                 }
             }
 
-            string packageId;
-            // If source is ellipsed, a local path, or a URL manifest, omit source argument
-            if (
-                details.Package.Source.Name.Contains("...")
-                || details.Package.Source.Name.Contains(":\\")
-                || details.Package.Source.Name.StartsWith("http")
-            )
-                packageId = $"{details.Package.Id}";
-            else
-                packageId = $"{details.Package.Source.Name}/{details.Package.Id}";
+            string packageId = Scoop.GetPackageSpec(details.Package);
 
-            using Process p = new()
+            var startInfo = new ProcessStartInfo
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = Manager.Status.ExecutablePath,
-                    Arguments = Manager.Status.ExecutableCallArgs + " cat " + packageId,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    StandardOutputEncoding = System.Text.Encoding.UTF8,
-                },
+                FileName = Manager.Status.ExecutablePath,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
             };
+            Manager.Status.ApplyArguments(startInfo, "cat", packageId);
+
+            using Process p = new() { StartInfo = startInfo };
 
             IProcessTaskLogger logger = Manager.TaskLogger.CreateNew(
                 Enums.LoggableTaskType.LoadPackageDetails,
                 p
             );
 
-            p.Start();
+            CoreTools.StartAndCloseStandardInput(p);
             Task<string> stdErr = ScoopProcess.ReadStdErrAsync(p);
             string JsonString = p.StandardOutput.ReadToEnd();
             logger.AddToStdOut(JsonString);
@@ -95,6 +86,8 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
             {
                 details.Description = contents["description"]?.ToString();
             }
+
+            details.Version = contents["version"]?.ToString();
 
             // Load installer type
             if (contents["innsetup"]?.ToString() == "true")
@@ -299,9 +292,6 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
             );
         }
 
-        protected override IReadOnlyList<string> GetInstallableVersions_UnSafe(IPackage package)
-        {
-            throw new InvalidOperationException("Scoop does not support custom package versions");
-        }
+        protected override IReadOnlyList<string> GetInstallableVersions_UnSafe(IPackage package) => [];
     }
 }

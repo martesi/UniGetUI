@@ -34,6 +34,8 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         public bool CanUninstallPreviousVersionsAfterUpdate = false;
         public bool CanListDependencies = false;
         public bool SupportsCustomVersions = false;
+        public bool CanListVersions = true;
+        public bool SupportsCustomVersionsOnUpdate = true;
         public bool SupportsCustomArchitectures = false;
         public string[] SupportedCustomArchitectures = [];
         public bool SupportsCustomScopes = false;
@@ -42,6 +44,8 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         public bool SupportsCustomScopesOnUpdate = true;
         public bool SupportsCustomScopesOnUninstall = true;
         public bool SupportsPreRelease = false;
+        public bool SupportsEmptySearchQuery = false;
+        public bool SerializesOperations = false;
         public bool SupportsCustomLocations = false;
         public bool SupportsCustomSources = false;
         public bool SupportsCustomPackageIcons = false;

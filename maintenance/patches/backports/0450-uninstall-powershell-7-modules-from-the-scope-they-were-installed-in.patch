@@ -1,0 +1,568 @@
+From be4affb52d473a91c4d2be32ce373640b0a585dc Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:40:51 +0800
+Subject: [PATCH] backport: Uninstall PowerShell 7 modules from the scope they
+ were installed in (#5494)
+
+Upstream-Commit: 846ad111279e000a48009cb311a605a885bbe0a9
+Upstream-PR: Devolutions/UniGetUI#5494
+Classic-Source-Commit: be4affb52d473a91c4d2be32ce373640b0a585dc
+
+---
+ .../Helpers/PowerShell7PkgOperationHelper.cs  |  81 +++++--
+ .../PowerShell7.cs                            |   2 +-
+ .../PackageOperations.cs                      |  16 +-
+ .../PackageOperationsTests.cs                 | 131 +++++++++++
+ .../PowerShell7ManagerTests.cs                | 221 +++++++++++++++++-
+ 5 files changed, 425 insertions(+), 26 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7PkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7PkgOperationHelper.cs
+index c7ef057d0819abcce6ddb0f7aec8e7053df9bebc..1c2c22fdec10eb9b8bb7726c03f1770a2d7f78dc 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7PkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell7/Helpers/PowerShell7PkgOperationHelper.cs
+@@ -1,3 +1,4 @@
++using System.Text.RegularExpressions;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
+ using UniGetUI.PackageEngine.Enums;
+@@ -6,7 +7,7 @@ using UniGetUI.PackageEngine.Serializable;
+ 
+ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager;
+ 
+-internal sealed class PowerShell7PkgOperationHelper : BasePkgOperationHelper
++internal sealed partial class PowerShell7PkgOperationHelper : BasePkgOperationHelper
+ {
+     public PowerShell7PkgOperationHelper(PowerShell7 manager)
+         : base(manager) { }
+@@ -54,26 +55,40 @@ internal sealed class PowerShell7PkgOperationHelper : BasePkgOperationHelper
+ 
+             if (options.PreRelease)
+                 parameters.Add("-Prerelease");
++        }
++
++        List<string> customParameters = operation switch
++        {
++            OperationType.Update => options.CustomParameters_Update,
++            OperationType.Uninstall => options.CustomParameters_Uninstall,
++            _ => options.CustomParameters_Install,
++        };
+ 
+-            // The scope chosen in the options dialog wins; fall back to the auto-detected install scope
+-            string scope = options.InstallationScope.Length > 0
++        // Uninstall targets the scope the copy was detected in; otherwise the scope chosen in the
++        // options dialog wins, falling back to the auto-detected install scope
++        string? scope = operation is OperationType.Uninstall
++            ? package.OverridenOptions.Scope
++            : options.InstallationScope.Length > 0
+                 ? options.InstallationScope
+-                : package.OverridenOptions.Scope ?? "";
++                : package.OverridenOptions.Scope;
++
++        if (!customParameters.Any(IsScopeParameter))
+             parameters.AddRange(["-Scope", scope == PackageScope.Global ? "AllUsers" : "CurrentUser"]);
+-        }
+ 
+-        parameters.AddRange(
+-            operation switch
+-            {
+-                OperationType.Update => options.CustomParameters_Update,
+-                OperationType.Uninstall => options.CustomParameters_Uninstall,
+-                _ => options.CustomParameters_Install,
+-            }
+-        );
++        parameters.AddRange(customParameters);
+ 
+         return parameters;
+     }
+ 
++    private static bool IsScopeParameter(string argument)
++    {
++        if (!argument.StartsWith('-'))
++            return false;
++
++        string name = argument[1..].Split(':', 2)[0];
++        return name.Length >= 2 && "Scope".StartsWith(name, StringComparison.OrdinalIgnoreCase);
++    }
++
+     protected override OperationVeredict _getOperationResult(
+         IPackage package,
+         OperationType operation,
+@@ -83,13 +98,25 @@ internal sealed class PowerShell7PkgOperationHelper : BasePkgOperationHelper
+     {
+         string output_string = string.Join("\n", processOutput);
+ 
+-        if (
+-            package.OverridenOptions.RunAsAdministrator is not true
+-            && (
+-                output_string.Contains("AdminPrivilegesAreRequired")
+-                || output_string.Contains("AdminPrivilegeRequired")
+-            )
+-        )
++        bool needsElevation =
++            output_string.Contains("AdminPrivilegesAreRequired")
++            || output_string.Contains("AdminPrivilegeRequired");
++
++        if (operation is OperationType.Uninstall && returnCode != 0)
++        {
++            var failures = NotDeletedRegex()
++                .Matches(output_string)
++                .Select(match => IsLeftoverOnly(match, package.Id))
++                .ToArray();
++
++            if (failures.Length > 0 && failures.All(leftoverOnly => leftoverOnly))
++                return OperationVeredict.Success;
++
++            needsElevation |=
++                failures.Length > 0 && package.OverridenOptions.Scope == PackageScope.Global;
++        }
++
++        if (package.OverridenOptions.RunAsAdministrator is not true && needsElevation)
+         {
+             package.OverridenOptions.RunAsAdministrator = true;
+             return OperationVeredict.AutoRetry;
+@@ -97,4 +124,18 @@ internal sealed class PowerShell7PkgOperationHelper : BasePkgOperationHelper
+ 
+         return returnCode == 0 ? OperationVeredict.Success : OperationVeredict.Failure;
+     }
++
++    private static bool IsLeftoverOnly(Match match, string packageId) =>
++        match.Groups["kind"].Value switch
++        {
++            "Script metadata file" => true,
++            "Parent directory" => Path.GetFileName(
++                    match.Groups["path"].Value.TrimEnd('\\', '/')
++                )
++                .Equals(packageId, StringComparison.OrdinalIgnoreCase),
++            _ => false,
++        };
++
++    [GeneratedRegex(@"(?<kind>Parent directory|Script metadata file|Script) '(?<path>[^']+)' could not be deleted")]
++    private static partial Regex NotDeletedRegex();
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
+index d00e5a3cf5c2482cc77d2aa0060488a743b34ce1..e4bdaf1c3d484ffb6c1efcca05fdb5fffba04009 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
+@@ -27,7 +27,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
+                 CanRunAsAdmin = true,
+                 SupportsCustomVersions = true,
+                 SupportsCustomScopes = true,
+-                // Uninstall-PSResource is invoked without a scope, so the selector is a no-op there
++                // Uninstall-PSResource targets the scope the package was detected in, so the selector is a no-op there
+                 SupportsCustomScopesOnUninstall = false,
+                 SupportsCustomSources = true,
+                 SupportsPreRelease = true,
+diff --git a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+index 5b783e4e9afb770ddbcab5a43b67e72933d11b25..a69084881bfcb3b8857c4bd017128c6a9fa682bf 100644
+--- a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
++++ b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+@@ -403,8 +403,22 @@ namespace UniGetUI.PackageEngine.Operations
+ 
+             if (role is OperationType.Update && opts.UninstallPreviousVersionsOnUpdate)
+             {
++                var capabilities = package.Manager.Capabilities;
++                string? updatedScope =
++                    capabilities.SupportsCustomScopes
++                    && capabilities.SupportsCustomScopesOnUpdate
++                    && opts.InstallationScope.Length > 0
++                        ? opts.InstallationScope
++                        : package.OverridenOptions.Scope;
++
+                 var matches = InstalledPackagesLoader.Instance.Packages.Where(p =>
+-                    p.IsEquivalentTo(package) && IsSupersededBy(p, package)
++                    p.IsEquivalentTo(package)
++                    && (
++                        string.IsNullOrEmpty(p.OverridenOptions.Scope)
++                        || string.IsNullOrEmpty(updatedScope)
++                        || p.OverridenOptions.Scope == updatedScope
++                    )
++                    && IsSupersededBy(p, package)
+                 );
+                 foreach (var match in matches)
+                 {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+index c4022c237011a73c2fbce6067732e71fb1964216..91b3015c2ad814ea9b7736b61a48df96849c574a 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+@@ -232,6 +232,137 @@ public sealed class PackageOperationsTests
+         Assert.Equal("10c8e557", uninstall.Package.VersionString);
+     }
+ 
++    [Fact]
++    public async Task UpdateOperationOnlyQueuesPreviousVersionsFromTheSameScope()
++    {
++        var manager = CreateManager();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Tool")
++            .WithVersion("2.0.0")
++            .WithNewVersion("3.0.0")
++            .WithOptions(new OverridenInstallationOptions(PackageScope.User))
++            .Build();
++        InitializeLoaders();
++        await InstalledPackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithId("Contoso.Tool")
++                .WithVersion("1.0.0")
++                .WithOptions(new OverridenInstallationOptions(PackageScope.Machine))
++                .Build()
++        );
++        await InstalledPackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithId("Contoso.Tool")
++                .WithVersion("1.5.0")
++                .WithOptions(new OverridenInstallationOptions(PackageScope.User))
++                .Build()
++        );
++        await InstalledPackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithId("Contoso.Tool")
++                .WithVersion("1.7.0")
++                .Build()
++        );
++
++        using var operation = new UpdatePackageOperation(
++            package,
++            new InstallOptions { UninstallPreviousVersionsOnUpdate = true }
++        );
++
++        var uninstalled = GetInnerOperations(operation, "PostOperations")
++            .Select(inner => Assert.IsType<UninstallPackageOperation>(inner.Operation).Package.VersionString)
++            .Order()
++            .ToArray();
++        Assert.Equal(["1.5.0", "1.7.0"], uninstalled);
++    }
++
++    [Fact]
++    public async Task UpdateOperationQueuesPreviousVersionsFromTheScopeChosenForTheUpdate()
++    {
++        var manager = CreateManager();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Tool")
++            .WithVersion("2.0.0")
++            .WithNewVersion("3.0.0")
++            .WithOptions(new OverridenInstallationOptions(PackageScope.User))
++            .Build();
++        InitializeLoaders();
++        await InstalledPackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithId("Contoso.Tool")
++                .WithVersion("1.0.0")
++                .WithOptions(new OverridenInstallationOptions(PackageScope.Machine))
++                .Build()
++        );
++        await InstalledPackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithId("Contoso.Tool")
++                .WithVersion("1.5.0")
++                .WithOptions(new OverridenInstallationOptions(PackageScope.User))
++                .Build()
++        );
++
++        using var operation = new UpdatePackageOperation(
++            package,
++            new InstallOptions
++            {
++                UninstallPreviousVersionsOnUpdate = true,
++                InstallationScope = PackageScope.Machine,
++            }
++        );
++
++        var inner = Assert.Single(GetInnerOperations(operation, "PostOperations"));
++        var uninstall = Assert.IsType<UninstallPackageOperation>(inner.Operation);
++        Assert.Equal("1.0.0", uninstall.Package.VersionString);
++    }
++
++    [Fact]
++    public async Task UpdateOperationWithoutAScopeQueuesPreviousVersionsFromEveryScope()
++    {
++        var manager = CreateManager();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Tool")
++            .WithVersion("2.0.0")
++            .WithNewVersion("3.0.0")
++            .Build();
++        InitializeLoaders();
++        await InstalledPackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithId("Contoso.Tool")
++                .WithVersion("1.0.0")
++                .WithOptions(new OverridenInstallationOptions(PackageScope.Machine))
++                .Build()
++        );
++        await InstalledPackagesLoader.Instance.AddForeign(
++            new PackageBuilder()
++                .WithManager(manager)
++                .WithId("Contoso.Tool")
++                .WithVersion("1.5.0")
++                .WithOptions(new OverridenInstallationOptions(PackageScope.User))
++                .Build()
++        );
++
++        using var operation = new UpdatePackageOperation(
++            package,
++            new InstallOptions { UninstallPreviousVersionsOnUpdate = true }
++        );
++
++        var uninstalled = GetInnerOperations(operation, "PostOperations")
++            .Select(inner => Assert.IsType<UninstallPackageOperation>(inner.Operation).Package.VersionString)
++            .Order()
++            .ToArray();
++        Assert.Equal(["1.0.0", "1.5.0"], uninstalled);
++    }
++
+     [Fact]
+     public void UninstallOperationBuildsPreAndPostCommandsForUninstallPath()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+index 6dd2e17e86371962bf6b668ce0b74bb09a3f673d..ef5ac82972eac9ac34562e876f8ba9e985b5332c 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShell7ManagerTests.cs
+@@ -1,7 +1,10 @@
+ #if WINDOWS
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Managers.PowerShell7Manager;
++using UniGetUI.PackageEngine.Managers.PowerShellManager;
++using UniGetUI.PackageEngine.PackageClasses;
+ using UniGetUI.PackageEngine.Serializable;
++using UniGetUI.PackageEngine.Structs;
+ 
+ namespace UniGetUI.PackageEngine.Tests;
+ 
+@@ -164,11 +167,221 @@ public sealed class PowerShell7ManagerTests
+         );
+ 
+         var options = new InstallOptions();
+-        var parameters = manager.OperationHelper.GetParameters(
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.Contains("AllUsers", parameters);
++        Assert.DoesNotContain("CurrentUser", parameters);
++    }
++
++    [Theory]
++    [InlineData("AllUsers", PackageScope.User, "AllUsers", "CurrentUser")]
++    [InlineData("CurrentUser", PackageScope.Machine, "CurrentUser", "AllUsers")]
++    [InlineData("AllUsers", "", "AllUsers", "CurrentUser")]
++    public void GetParameters_UninstallTargetsDetectedScope(
++        string listedScope,
++        string optionsScope,
++        string expected,
++        string unexpected)
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            [$"##SCOPE:{listedScope}##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++
++        var options = new InstallOptions { InstallationScope = optionsScope };
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Uninstall);
++
++        int scopeIndex = parameters.ToList().IndexOf("-Scope");
++        Assert.True(scopeIndex >= 0);
++        Assert.Equal(expected, parameters[scopeIndex + 1]);
++        Assert.DoesNotContain(unexpected, parameters);
++        Assert.Contains("2026.2.4", parameters);
++    }
++
++    [Theory]
++    [InlineData(null)]
++    [InlineData("")]
++    public void GetParameters_UninstallWithoutDetectedScopeIgnoresOptionsScope(string? detectedScope)
++    {
++        var manager = new PowerShell7();
++        var package = new Package(
++            "Devolutions.PowerShell",
++            "Devolutions.PowerShell",
++            "2026.2.4",
++            manager.DefaultSource,
++            manager,
++            new OverridenInstallationOptions(detectedScope));
++
++        var options = new InstallOptions { InstallationScope = PackageScope.Machine };
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Uninstall);
++
++        Assert.Contains("CurrentUser", parameters);
++        Assert.DoesNotContain("AllUsers", parameters);
++    }
++
++    [Theory]
++    [InlineData(OperationType.Install)]
++    [InlineData(OperationType.Update)]
++    [InlineData(OperationType.Uninstall)]
++    public void GetParameters_CustomScopeArgumentIsNotDuplicated(OperationType operation)
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:CurrentUser##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++
++        var options = new InstallOptions
++        {
++            CustomParameters_Install = ["-Scope", "AllUsers"],
++            CustomParameters_Update = ["-Scope", "AllUsers"],
++            CustomParameters_Uninstall = ["-Scope", "AllUsers"],
++        };
++        var parameters = manager.OperationHelper.GetParameters(package, options, operation);
++
++        Assert.Single(parameters, p => p == "-Scope");
++        Assert.Equal("AllUsers", parameters[parameters.ToList().IndexOf("-Scope") + 1]);
++        Assert.DoesNotContain("CurrentUser", parameters);
++    }
++
++    [Fact]
++    public void GetResult_AccessDeniedUninstallRetriesAsAdministrator()
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++
++        var result = manager.OperationHelper.GetResult(
+             package,
+-            options,
+-            OperationType.Update
+-        );
++            OperationType.Uninstall,
++            [
++                "Uninstall-PSResource: Parent directory 'C:\\Program Files\\PowerShell\\Modules\\Devolutions.PowerShell\\2026.2.4' could not be deleted: Access to the path 'Devolutions.PowerShell.psd1' is denied.",
++            ],
++            1);
++
++        Assert.Equal(OperationVeredict.AutoRetry, result);
++        Assert.True(package.OverridenOptions.RunAsAdministrator);
++    }
++
++    [Fact]
++    public void GetResult_LocalizedDeleteFailureStillRetriesAsAdministrator()
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++
++        var result = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Uninstall,
++            [
++                "Uninstall-PSResource: Parent directory 'C:\\Program Files\\PowerShell\\Modules\\Devolutions.PowerShell\\2026.2.4' could not be deleted: Der Zugriff auf den Pfad wurde verweigert.",
++            ],
++            1);
++
++        Assert.Equal(OperationVeredict.AutoRetry, result);
++    }
++
++    [Fact]
++    public void GetResult_CurrentUserDeleteFailureDoesNotElevate()
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:CurrentUser##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++
++        var result = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Uninstall,
++            [
++                "Uninstall-PSResource: Parent directory 'C:\\Users\\me\\Documents\\PowerShell\\Modules\\Devolutions.PowerShell\\2026.2.4' could not be deleted: The process cannot access the file because it is being used by another process.",
++            ],
++            1);
++
++        Assert.Equal(OperationVeredict.Failure, result);
++        Assert.NotEqual(true, package.OverridenOptions.RunAsAdministrator);
++    }
++
++    [Theory]
++    [InlineData("Uninstall-PSResource: Parent directory 'C:\\Program Files\\PowerShell\\Modules\\Devolutions.PowerShell' could not be deleted: Access to the path 'C:\\Program Files\\PowerShell\\Modules\\Devolutions.PowerShell' is denied.")]
++    [InlineData("Uninstall-PSResource: Script metadata file 'C:\\Program Files\\PowerShell\\Scripts\\InstalledScriptInfos\\Devolutions.PowerShell_InstalledScriptInfo.xml' could not be deleted: Access to the path is denied.")]
++    public void GetResult_LeftoverOnlyAfterRemovingTheVersionIsSuccess(string output)
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++
++        var result = manager.OperationHelper.GetResult(package, OperationType.Uninstall, [output], 1);
++
++        Assert.Equal(OperationVeredict.Success, result);
++        Assert.NotEqual(true, package.OverridenOptions.RunAsAdministrator);
++    }
++
++    [Theory]
++    [InlineData("-Scop")]
++    [InlineData("-sc")]
++    [InlineData("-SCOPE")]
++    public void GetParameters_AbbreviatedCustomScopeArgumentIsNotDuplicated(string scopeArgument)
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:CurrentUser##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++
++        var options = new InstallOptions { CustomParameters_Update = [scopeArgument, "AllUsers"] };
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Update);
++
++        Assert.DoesNotContain("-Scope", parameters);
++        Assert.DoesNotContain("CurrentUser", parameters);
++        Assert.Contains(scopeArgument, parameters);
++    }
++
++    [Fact]
++    public void GetParameters_SkipDependencyCheckIsNotTakenForScope()
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++
++        var options = new InstallOptions { CustomParameters_Uninstall = ["-SkipDependencyCheck"] };
++        var parameters = manager.OperationHelper.GetParameters(package, options, OperationType.Uninstall);
++
++        Assert.Contains("-Scope", parameters);
++        Assert.Contains("AllUsers", parameters);
++    }
++
++    [Fact]
++    public void GetResult_AccessDeniedUninstallAlreadyElevatedFails()
++    {
++        var manager = new PowerShell7();
++        var package = Assert.Single(PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2026.2.4\tPSGallery"], manager));
++        package.OverridenOptions.RunAsAdministrator = true;
++
++        var result = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Uninstall,
++            ["Parent directory 'x' could not be deleted: Access to the path 'x' is denied."],
++            1);
++
++        Assert.Equal(OperationVeredict.Failure, result);
++    }
++
++    // Regression for https://github.com/Devolutions/UniGetUI/issues/5163:
++    // the update-list package produced from the GetUpdates() response must carry the
++    // installed scope, otherwise Update-PSResource silently defaults to CurrentUser and
++    // the AllUsers copy never updates.
++    [Fact]
++    public void ParseUpdatesResponse_CarriesAllUsersScopeOntoUpdate()
++    {
++        var manager = new PowerShell7();
++        var installed = PowerShell7.ParseInstalledPackages(
++            ["##SCOPE:AllUsers##", "Devolutions.PowerShell\t2025.1.0\tPSGallery"], manager);
++        var source = installed[0].Source;
++        var idVersion = new Dictionary<string, string> { ["devolutions.powershell"] = "2025.1.0" };
++        var idScope = BaseNuGet.BuildInstalledScopeMap(installed);
++
++        var xml = "<entry><d:Id>Devolutions.PowerShell</d:Id><d:Version>2025.2.0</d:Version></entry>";
++        var update = Assert.Single(
++            BaseNuGet.ParseUpdatesResponse(xml, idVersion, idScope, source, manager));
++
++        Assert.Equal("2025.1.0", update.VersionString);
++        Assert.Equal("2025.2.0", update.NewVersionString);
++        Assert.Equal(PackageScope.Machine, update.OverridenOptions.Scope);
+ 
+         Assert.Contains("AllUsers", parameters);
+         Assert.DoesNotContain("CurrentUser", parameters);
+-- 
+2.56.0
+

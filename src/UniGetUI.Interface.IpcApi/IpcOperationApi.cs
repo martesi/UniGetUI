@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Enums;
+using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.Operations;
 using UniGetUI.PackageOperations;
 
@@ -117,6 +118,13 @@ public static class IpcOperationApi
 
     private static readonly ConcurrentDictionary<string, TrackedOperation> Operations = new();
     private const int MaxTrackedOperations = 200;
+
+    internal static bool HasPendingPackageOperation(IPackage package) =>
+        Operations.Values.Any(tracked =>
+            tracked.Operation is PackageOperation operation
+            && (operation.Status is OperationStatus.InQueue or OperationStatus.Running)
+            && operation.Package.GetHash() == package.GetHash()
+        );
 
     public static string Track(AbstractOperation operation)
     {

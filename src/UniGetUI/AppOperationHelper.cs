@@ -331,7 +331,8 @@ public partial class MainApp
             bool? interactive = null,
             bool? no_integrity = null,
             bool ignoreParallel = false,
-            AbstractOperation? req = null
+            AbstractOperation? req = null,
+            bool keepUpdatesPaused = false
         )
         {
             if (package is null)
@@ -356,7 +357,12 @@ public partial class MainApp
                 interactive,
                 no_integrity
             );
-            var operation = new UpdatePackageOperation(package, options, ignoreParallel, req);
+            if (keepUpdatesPaused && AlreadyBeingUpdated(package))
+                return null;
+            var operation = new UpdatePackageOperation(package, options, ignoreParallel, req)
+            {
+                KeepUpdatesPaused = keepUpdatesPaused,
+            };
             operation.OperationSucceeded += (_, _) =>
                 TelemetryHandler.UpdatePackage(package, TEL_OP_RESULT.SUCCESS);
             operation.OperationFailed += (_, _) =>
@@ -389,35 +395,30 @@ public partial class MainApp
             );
         }
 
-        public static async Task UpdateAll()
-        {
-            foreach (IPackage package in UpgradablePackagesLoader.Instance.Packages)
-            { // First check will only work if the package has not been reloaded, deeper check is needed, hence AlreadyBeingUpdated
-                if (
-                    package.Tag is PackageTag.BeingProcessed or PackageTag.OnQueue
-                    || AlreadyBeingUpdated(package)
-                )
-                {
-                    Logger.Warn(
-                        $"Update operation for package {package.Id} is already queued or running. Skipping duplicate in UpdateAll."
-                    );
-                    continue;
-                }
+        public static Task<IReadOnlyList<AbstractOperation>> UpdateAll() => UpdateAllForManagerCore(null);
 
-                await Update(package);
-            }
-        }
+        public static Task<IReadOnlyList<AbstractOperation>> UpdateAllForManager(string managerName) =>
+            UpdateAllForManagerCore(managerName);
 
-        public static async Task UpdateAllForManager(string managerName)
+        private static async Task<IReadOnlyList<AbstractOperation>> UpdateAllForManagerCore(
+            string? managerName
+        )
         {
-            foreach (IPackage package in UpgradablePackagesLoader.Instance.Packages)
+            var loader = UpgradablePackagesLoader.Instance;
+            if (loader.IsLoading)
+                await loader.WaitForCurrentLoadAsync();
+            else if (!loader.IsLoaded)
+                await loader.ReloadPackages();
+
+            List<AbstractOperation> started = [];
+            foreach (IPackage package in loader.Packages.ToList())
             {
                 if (
-                    package.Manager.Id != managerName
+                    managerName is not null
+                    && !package.Manager.Id.Equals(managerName, StringComparison.OrdinalIgnoreCase)
                 )
-                    continue; // Package not from the desired package manager
+                    continue;
 
-                // First check will only work if the package has not been reloaded, deeper check is needed, hence AlreadyBeingUpdated
                 if (
                     package.Tag is PackageTag.BeingProcessed or PackageTag.OnQueue
                     || AlreadyBeingUpdated(package)
@@ -429,8 +430,10 @@ public partial class MainApp
                     continue;
                 }
 
-                await Update(package);
+                if (await Update(package) is { } operation)
+                    started.Add(operation);
             }
+            return started;
         }
 
         public static async Task UpdateForId(string packageId)

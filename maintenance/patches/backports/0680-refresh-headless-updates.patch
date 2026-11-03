@@ -1,0 +1,48 @@
+From d013f3fa51185bef985f2e2fb777d57c8686f008 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 17:26:52 +0200
+Subject: [PATCH] fix: refresh headless update candidates before bulk
+ operations
+
+Classic-Source-Commit: 89486e86330ac94096425a9ced667da739b40012
+---
+ .../IpcPackageApi.cs                          | 20 +++++++++++++------
+ 1 file changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs b/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
+index b5b5510..5faed55 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
+@@ -272,15 +272,23 @@ public static class IpcPackageApi
+                 "The current UniGetUI session has not loaded its package updates."
+             );
+ 
+-        if (loader.IsLoading)
++        // Headless sessions have no visible page to refresh stale package lists. Refresh installed
++        // packages first so the update loader validates candidates against the current versions.
++        if (InstalledPackagesLoader.Instance is { } installedLoader)
+         {
+-            await loader.WaitForCurrentLoadAsync();
+-        }
+-        else if (!loader.IsLoaded)
+-        {
+-            await loader.ReloadPackages();
++            if (installedLoader.IsLoading)
++                await installedLoader.WaitForCurrentLoadAsync();
++            await installedLoader.ReloadPackages();
++            if (installedLoader.IsLoading)
++                await installedLoader.WaitForCurrentLoadAsync();
+         }
+ 
++        if (loader.IsLoading)
++            await loader.WaitForCurrentLoadAsync();
++        await loader.ReloadPackages();
++        if (loader.IsLoading)
++            await loader.WaitForCurrentLoadAsync();
++
+         return loader.Packages
+             .Where(package => MatchesManager(package.Manager, managerName))
+             .ToArray();
+-- 
+2.51.1
+

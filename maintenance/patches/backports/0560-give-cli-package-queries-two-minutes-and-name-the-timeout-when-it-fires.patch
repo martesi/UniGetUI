@@ -1,0 +1,80 @@
+From f5c95f4604416035e4978573de34ad4ecf52a80c Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:47:47 +0800
+Subject: [PATCH] backport: Give CLI package queries two minutes and name the
+ timeout when it fires (#5583)
+
+Upstream-Commit: ea19cf29009c5d9921cb3e2d3ac7782ba3e31702
+Upstream-PR: Devolutions/UniGetUI#5583
+Classic-Source-Commit: f5c95f4604416035e4978573de34ad4ecf52a80c
+
+---
+ src/UniGetUI.Interface.IpcApi/IpcClient.cs | 32 +++++++++++++++-------
+ 1 file changed, 22 insertions(+), 10 deletions(-)
+
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcClient.cs b/src/UniGetUI.Interface.IpcApi/IpcClient.cs
+index 5d8d1fa4145d1db9c7efa72cbbbbcb731303eaac..ee40c07ca460c4292327721a65405562418bb337 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcClient.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcClient.cs
+@@ -1068,20 +1068,31 @@ public sealed class IpcClient : IDisposable
+         HttpContent? requestContent = null
+     )
+     {
+-        using var timeout = new CancellationTokenSource(GetRequestTimeout(method, relativePath));
++        TimeSpan requestTimeout = GetRequestTimeout(method, relativePath);
++        using var timeout = new CancellationTokenSource(requestTimeout);
+         using var request = new HttpRequestMessage(method, BuildRelativeUri(relativePath, queryParameters));
+         request.Content = requestContent;
+-        using var response = await _httpClient.SendAsync(request, timeout.Token);
+-        string content = await response.Content.ReadAsStringAsync();
++        try
++        {
++            using var response = await _httpClient.SendAsync(request, timeout.Token);
++            string content = await response.Content.ReadAsStringAsync(timeout.Token);
+ 
+-        if (!response.IsSuccessStatusCode)
++            if (!response.IsSuccessStatusCode)
++            {
++                throw new InvalidOperationException(
++                    string.IsNullOrWhiteSpace(content) ? response.ReasonPhrase : content
++                );
++            }
++
++            return content;
++        }
++        catch (OperationCanceledException ex) when (timeout.IsCancellationRequested)
+         {
+-            throw new InvalidOperationException(
+-                string.IsNullOrWhiteSpace(content) ? response.ReasonPhrase : content
++            throw new TimeoutException(
++                $"UniGetUI did not answer {method.Method} {relativePath} within {requestTimeout.TotalSeconds:0} seconds.",
++                ex
+             );
+         }
+-
+-        return content;
+     }
+ 
+     private async Task<T?> ReadAuthenticatedJsonAsync<T>(
+@@ -1361,7 +1372,7 @@ public sealed class IpcClient : IDisposable
+         {
+             return method == HttpMethod.Post
+                 ? TimeSpan.FromMinutes(5)
+-                : TimeSpan.FromSeconds(30);
++                : TimeSpan.FromMinutes(2);
+         }
+ 
+         if (IpcHttpRoutes.StartsWith(relativePath, "/bundles/install"))
+@@ -1423,7 +1434,8 @@ public sealed class IpcClient : IDisposable
+         return exception is HttpRequestException
+             or IOException
+             or TaskCanceledException
+-            or OperationCanceledException;
++            or OperationCanceledException
++            or TimeoutException;
+     }
+ 
+     private static IpcEndpointRegistration? SelectLiveRegistration(
+-- 
+2.56.0
+

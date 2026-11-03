@@ -1,0 +1,299 @@
+From 1fe4c91a8f8d60cb330c964ad6c5ae9ea6d8a774 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:33:37 +0800
+Subject: [PATCH] backport: Settle the loader state before announcing that a
+ load finished (#5387)
+
+Upstream-Commit: 575856525680a858c3abd96efa762e43dbc0e1ed
+Upstream-PR: Devolutions/UniGetUI#5387
+Classic-Source-Commit: 1fe4c91a8f8d60cb330c964ad6c5ae9ea6d8a774
+
+---
+ .../AbstractPackageLoader.cs                  |  52 +++++++-
+ .../InstalledPackagesLoader.cs                |   2 +-
+ .../PackageLoaderPipelineTests.cs             |  20 +++
+ .../PackageLoaderWaitTests.cs                 | 115 ++++++++++++++++++
+ 4 files changed, 185 insertions(+), 4 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/PackageLoaderWaitTests.cs
+
+diff --git a/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs b/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
+index be5139222b3cf49b929ed4d12579000ee64e8de7..6bfdfb5c6e563bdc5e64f46876974af4c6115fe6 100644
+--- a/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
++++ b/src/UniGetUI.PackageEngine.PackageLoader/AbstractPackageLoader.cs
+@@ -35,6 +35,12 @@ namespace UniGetUI.PackageEngine.PackageLoader
+         /// </summary>
+         public bool IsLoading { get; protected set; }
+ 
++        public bool LastLoadReportedFailures { get; private set; }
++
++        public DateTime? LastLoadFinishedUtc { get; private set; }
++
++        private TaskCompletionSource? _loadCompletion;
++
+         public bool Any()
+         {
+             return !PackageReference.IsEmpty;
+@@ -97,11 +103,29 @@ namespace UniGetUI.PackageEngine.PackageLoader
+         /// <summary>
+         /// Stops the current loading process
+         /// </summary>
++        public Task WaitForCurrentLoadAsync()
++        {
++            var completion = Volatile.Read(ref _loadCompletion);
++            return IsLoading && completion is not null ? completion.Task : Task.CompletedTask;
++        }
++
++        private void CompleteCurrentLoad()
++            => Interlocked.Exchange(ref _loadCompletion, null)?.TrySetResult();
++
++        private void CompleteLoad(TaskCompletionSource completion)
++        {
++            Interlocked.CompareExchange(ref _loadCompletion, null, completion);
++            completion.TrySetResult();
++        }
++
++        protected virtual bool DidManagerReportFailure(IPackageManager manager) => false;
++
+         public void StopLoading(bool emitFinishSignal = true)
+         {
+             LoadOperationIdentifier = -1;
+             IsLoaded = false;
+             IsLoading = false;
++            CompleteCurrentLoad();
+             if (emitFinishSignal)
+                 InvokeFinishedLoadingEvent();
+         }
+@@ -130,6 +154,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
+         /// </summary>
+         public virtual async Task ReloadPackages()
+         {
++            TaskCompletionSource? completion = null;
+             try
+             {
+                 if (DISABLE_RELOAD)
+@@ -146,7 +171,12 @@ namespace UniGetUI.PackageEngine.PackageLoader
+ 
+                 LoadOperationIdentifier = new Random().Next();
+                 int current_identifier = LoadOperationIdentifier;
++                completion = new TaskCompletionSource(
++                    TaskCreationOptions.RunContinuationsAsynchronously
++                );
++                Volatile.Write(ref _loadCompletion, completion);
+                 IsLoading = true;
++                LastLoadReportedFailures = false;
+                 StartedLoading?.Invoke(this, EventArgs.Empty);
+ 
+                 // Clear packages only after signaling the load started, so the UI shows the
+@@ -184,6 +214,9 @@ namespace UniGetUI.PackageEngine.PackageLoader
+ 
+                         if (task.IsCompleted)
+                         {
++                            if (task.IsFaulted || task.IsCanceled)
++                                LastLoadReportedFailures = true;
++
+                             if (
+                                 LoadOperationIdentifier == current_identifier
+                                 && task.IsCompletedSuccessfully
+@@ -209,19 +242,32 @@ namespace UniGetUI.PackageEngine.PackageLoader
+                     }
+                 }
+ 
+-                if (LoadOperationIdentifier == current_identifier)
++                foreach (IPackageManager manager in Managers)
+                 {
+-                    InvokeFinishedLoadingEvent();
+-                    IsLoaded = true;
++                    if (manager.IsReady() && DidManagerReportFailure(manager))
++                        LastLoadReportedFailures = true;
+                 }
+ 
+                 IsLoading = false;
++
++                if (LoadOperationIdentifier == current_identifier)
++                {
++                    LastLoadFinishedUtc = DateTime.UtcNow;
++                    IsLoaded = true;
++                    InvokeFinishedLoadingEvent();
++                }
+             }
+             catch (Exception ex)
+             {
+                 Logger.Error(ex);
++                LastLoadReportedFailures = true;
+                 IsLoading = false;
+             }
++            finally
++            {
++                if (completion is not null)
++                    CompleteLoad(completion);
++            }
+         }
+ 
+         /// <summary>
+diff --git a/src/UniGetUI.PackageEngine.PackageLoader/InstalledPackagesLoader.cs b/src/UniGetUI.PackageEngine.PackageLoader/InstalledPackagesLoader.cs
+index abba4cbff96288f3e5a70d66982fb999a900098c..861dc1a7a3c8845d8a1a6e81a5fd011b8ac9002c 100644
+--- a/src/UniGetUI.PackageEngine.PackageLoader/InstalledPackagesLoader.cs
++++ b/src/UniGetUI.PackageEngine.PackageLoader/InstalledPackagesLoader.cs
+@@ -107,8 +107,8 @@ namespace UniGetUI.PackageEngine.PackageLoader
+                     }
+                 }
+ 
+-                InvokeFinishedLoadingEvent();
+                 IsLoading = false;
++                InvokeFinishedLoadingEvent();
+             }
+             catch (Exception ex)
+             {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageLoaderPipelineTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageLoaderPipelineTests.cs
+index 658ad8a0be5ec3b8fc499ada2648f1e26a1252a9..94d13c2412d6af30c0ccaa9dfdf82b6aa5aa5f63 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageLoaderPipelineTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageLoaderPipelineTests.cs
+@@ -188,4 +188,24 @@ public sealed class PackageLoaderPipelineTests
+         Assert.True(changeEvents[1].ProceduralChange);
+         Assert.Equal(["Contoso.Accepted"], changeEvents[1].AddedPackages.Select(package => package.Id).Distinct());
+     }
++
++    [Fact]
++    public async Task ReloadPackages_ReportsSettledLoadState_WhenFinishedLoadingIsRaised()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        var loader = new TestPackageLoader([manager], loadPackages: _ => []);
++
++        bool? isLoadingWhenFinished = null;
++        bool? isLoadedWhenFinished = null;
++        loader.FinishedLoading += (_, _) =>
++        {
++            isLoadingWhenFinished = loader.IsLoading;
++            isLoadedWhenFinished = loader.IsLoaded;
++        };
++
++        await loader.ReloadPackages();
++
++        Assert.False(isLoadingWhenFinished);
++        Assert.True(isLoadedWhenFinished);
++    }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageLoaderWaitTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageLoaderWaitTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6c23df7144d7c77dcca5d83cc9f55029bd31abc
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/PackageLoaderWaitTests.cs
+@@ -0,0 +1,115 @@
++using UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Fakes;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++public sealed class PackageLoaderWaitTests
++{
++    private static readonly TimeSpan WaitBudget = TimeSpan.FromSeconds(10);
++
++    [Fact]
++    public async Task WaitForCurrentLoadAsync_CompletesWhenNoLoadIsRunning()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        var loader = new TestPackageLoader([manager], allowMultiplePackageVersions: false);
++
++        await AssertCompletesAsync(loader.WaitForCurrentLoadAsync());
++    }
++
++    [Fact]
++    public async Task WaitForCurrentLoadAsync_CompletesForAWaiterThatSubscribedFromFinishedLoading()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        var loader = new TestPackageLoader([manager], allowMultiplePackageVersions: false);
++
++        Task? waitStartedInsideTheEvent = null;
++        loader.FinishedLoading += (_, _) => waitStartedInsideTheEvent ??= loader.WaitForCurrentLoadAsync();
++
++        await loader.ReloadPackages();
++
++        Assert.NotNull(waitStartedInsideTheEvent);
++        await AssertCompletesAsync(waitStartedInsideTheEvent);
++    }
++
++    [Fact]
++    public async Task WaitForCurrentLoadAsync_CompletesWhenLoadingIsStoppedWithoutASignal()
++    {
++        var manager = new PackageManagerBuilder().Build();
++        var loader = new TestPackageLoader([manager], allowMultiplePackageVersions: false);
++
++        Task? waitStartedInsideTheEvent = null;
++        loader.FinishedLoading += (_, _) => waitStartedInsideTheEvent ??= loader.WaitForCurrentLoadAsync();
++
++        await loader.ReloadPackages();
++        loader.StopLoading(emitFinishSignal: false);
++
++        Assert.NotNull(waitStartedInsideTheEvent);
++        await AssertCompletesAsync(waitStartedInsideTheEvent);
++    }
++
++    [Fact]
++    public async Task WaitForCurrentLoadAsync_KeepsWaiting_WhenARedundantReloadIsRequested()
++    {
++        using var release = new ManualResetEventSlim(false);
++        var manager = new PackageManagerBuilder().Build();
++        var loader = new TestPackageLoader(
++            [manager],
++            loadPackages: _ =>
++            {
++                release.Wait();
++                return [];
++            }
++        );
++
++        Task load = loader.ReloadPackages();
++        Assert.True(loader.IsLoading);
++
++        Task wait = loader.WaitForCurrentLoadAsync();
++        await loader.ReloadPackages();
++
++        Assert.False(wait.IsCompleted);
++
++        release.Set();
++        await load;
++        await AssertCompletesAsync(wait);
++    }
++
++    [Fact]
++    public async Task WaitForCurrentLoadAsync_TracksTheNextLoad_WhenAReloadStartsFromFinishedLoading()
++    {
++        using var release = new ManualResetEventSlim(true);
++        var manager = new PackageManagerBuilder().Build();
++        var loader = new TestPackageLoader(
++            [manager],
++            loadPackages: _ =>
++            {
++                release.Wait();
++                return [];
++            }
++        );
++
++        Task? queued = null;
++        loader.FinishedLoading += (_, _) =>
++        {
++            if (queued is not null) return;
++            release.Reset();
++            queued = loader.ReloadPackages();
++        };
++
++        await loader.ReloadPackages();
++
++        Assert.NotNull(queued);
++        Assert.False(queued.IsCompleted);
++        Assert.False(loader.WaitForCurrentLoadAsync().IsCompleted);
++
++        release.Set();
++        await queued;
++    }
++
++    private static async Task AssertCompletesAsync(Task wait)
++    {
++        Task finished = await Task.WhenAny(wait, Task.Delay(WaitBudget));
++        Assert.True(ReferenceEquals(finished, wait), "WaitForCurrentLoadAsync never completed");
++        await wait;
++    }
++}
+-- 
+2.56.0
+

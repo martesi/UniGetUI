@@ -232,6 +232,29 @@ namespace UniGetUI.Core.Data
             }
         }
 
+        private static string[]? _sanitizedProcessArguments;
+
+        /// <summary>
+        /// Records the process arguments after startup has removed anything that could only
+        /// have been injected, so later consumers do not have to re-read the raw OS command
+        /// line. The executable path is preserved so the shape matches
+        /// Environment.GetCommandLineArgs().
+        /// </summary>
+        public static void SetSanitizedProcessArguments(string[] args)
+        {
+            string[] raw = Environment.GetCommandLineArgs();
+            _sanitizedProcessArguments = raw.Length > 0 ? [raw[0], .. args] : [.. args];
+        }
+
+        /// <summary>
+        /// The sanitized process arguments when startup has published them, and the raw OS
+        /// command line otherwise.
+        /// </summary>
+        public static string[] GetProcessArguments()
+        {
+            return _sanitizedProcessArguments ?? Environment.GetCommandLineArgs();
+        }
+
         /// <summary>
         /// The directory where the installation options are stored. The directory is automatically created if it does not exist.
         /// </summary>
@@ -580,6 +603,20 @@ namespace UniGetUI.Core.Data
         public static readonly string PowerShell5 = OperatingSystem.IsWindows()
             ? Path.Join(Environment.SystemDirectory, "windowspowershell\\v1.0\\powershell.exe")
             : "pwsh";
+
+        /// <summary>
+        /// The controlled launcher script that runs PowerShell package operations. It lives next to
+        /// the application binary so it carries the same integrity as the executable itself, and it
+        /// is invoked with -File so the operation parameters bind as data instead of being
+        /// reassembled into a script body the way -Command does.
+        /// </summary>
+        public static string PowerShellOperationLauncher =>
+            Path.Join(
+                UniGetUIExecutableDirectory,
+                "Assets",
+                "Utilities",
+                "unigetui_ps_operation.ps1"
+            );
 
         private static string GetLocalDataRoot()
         {

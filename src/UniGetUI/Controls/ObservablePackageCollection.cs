@@ -16,6 +16,8 @@ namespace UniGetUI.PackageEngine.PackageClasses
             Version,
             NewVersion,
             Source,
+            DownloadSize,
+            ReleaseDate,
         }
 
         public Sorter CurrentSorter { get; private set; }
@@ -73,6 +75,16 @@ namespace UniGetUI.PackageEngine.PackageClasses
 
                 case Sorter.Source:
                     SortingSelector = x => x.Package.Source.AsString_DisplayName;
+                    break;
+
+                case Sorter.DownloadSize:
+                    SortingSelector = x => x.DownloadSizeBytes > 0
+                        ? x.DownloadSizeBytes : Descending ? long.MinValue : long.MaxValue;
+                    break;
+
+                case Sorter.ReleaseDate:
+                    SortingSelector = x => x.ReleaseDate != default
+                        ? x.ReleaseDate : Descending ? DateTime.MinValue : DateTime.MaxValue;
                     break;
             }
         }

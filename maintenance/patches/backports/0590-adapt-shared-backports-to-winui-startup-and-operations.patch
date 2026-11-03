@@ -1,0 +1,1481 @@
+From 94ed4b8f89a6536c4c0395564f51d88e60718eb1 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:54:22 +0800
+Subject: [PATCH] classic: adapt shared backports to WinUI startup and
+ operations
+
+Upstream-Commit: 566ea0c2d92120fbe63038c43ea80d75f297e3e7
+Upstream-PR: Devolutions/UniGetUI#5346
+
+Upstream-Commit: 4f8a8209a7dfee97b89144cda8fae8c301a4d688
+Upstream-PR: Devolutions/UniGetUI#5348
+
+Upstream-Commit: 6097e72bb98aff8f900a9e4724a0312e68935034
+Upstream-PR: Devolutions/UniGetUI#5446
+
+Upstream-Commit: 28fb3cbb430ab17f1c764f6aa4437f759adbfa9f
+Upstream-PR: Devolutions/UniGetUI#5483
+
+Upstream-Commit: dc614a7fadf4a4179b82cd57996765bea410f301
+Upstream-PR: Devolutions/UniGetUI#5545
+
+Upstream-Commit: ffe4be0d6af2c97113838ffffb75914455cc6d2b
+Upstream-PR: Devolutions/UniGetUI#5459
+
+Upstream-Commit: c4ee2f1dd76697501581ce084d6addaf91f0caff
+Upstream-PR: Devolutions/UniGetUI#5489
+
+Upstream-Commit: 83efec6156d01bd67cab4213c79dd7150d92bc08
+Upstream-PR: Devolutions/UniGetUI#5569
+
+Upstream-Commit: 288ef55d71b24c9aa83f3621f16547d0e7cd2cc2
+Upstream-PR: Devolutions/UniGetUI#5521
+Classic-Source-Commit: 94ed4b8f89a6536c4c0395564f51d88e60718eb1
+
+---
+ maintenance/PATCH_STACK.md                    |  26 +-
+ src/Shared/SharedPreUiCommandDispatcher.cs    |  23 ++
+ .../SettingsEngine_Names.cs                   |   1 +
+ src/UniGetUI.Core.Tools/InternalsVisibleTo.cs |   3 +
+ src/UniGetUI.Core.Tools/Tools.cs              | 377 ++++++++++++++++--
+ src/UniGetUI.PackageEngine.Enums/Enums.cs     |   2 +-
+ .../Helpers/WinGetPkgOperationHelper.cs       |  14 -
+ .../PackageOperations.cs                      |  14 +-
+ .../WinGetManagerTests.cs                     | 316 +++++++++++++++
+ src/UniGetUI.Tests/ProtocolLaunchTests.cs     |  24 ++
+ src/UniGetUI/App.xaml.cs                      |   2 +-
+ src/UniGetUI/CLIHandler.cs                    |  20 +-
+ src/UniGetUI/CrashHandler.cs                  |   2 +-
+ src/UniGetUI/EntryPoint.cs                    |   5 +-
+ src/UniGetUI/MainWindow.xaml.cs               |   2 +-
+ .../InstallOptions_Package.xaml.cs            |   2 +-
+ .../SoftwarePages/DiscoverSoftwarePage.cs     |  14 +-
+ .../Pages/SoftwarePages/PackageBundlesPage.cs | 161 +-------
+ .../SoftwarePages/SoftwareUpdatesPage.cs      |   2 +-
+ src/UniGetUI/UniGetUI.csproj                  |   4 +
+ 20 files changed, 785 insertions(+), 229 deletions(-)
+ create mode 100644 src/UniGetUI.Core.Tools/InternalsVisibleTo.cs
+ create mode 100644 src/UniGetUI.Tests/ProtocolLaunchTests.cs
+
+diff --git a/maintenance/PATCH_STACK.md b/maintenance/PATCH_STACK.md
+index 10a3a1a320d35bb0b092514aa4f4f46f25e66ca3..779a859d38d78aa7640693bb3c3c7bb5bece7ff1 100644
+--- a/maintenance/PATCH_STACK.md
++++ b/maintenance/PATCH_STACK.md
+@@ -43,7 +43,7 @@ worktree; run replay commands in the maintenance checkout.
+ 5. Run `pwsh ./scripts/verify-patch-stack.ps1` and the checks required for the
+    changed source.
+ 
+-The final `classic/1110-classic-maintenance-docs.patch` consolidates maintenance
++The `classic/1110-classic-maintenance-docs.patch` consolidates maintenance
+ rules, preserves the decisions below, and removes the unused ledger and its
+ existence checks. Earlier patches are retained for provenance.
+ 
+@@ -76,3 +76,27 @@ feature checklist. Add a note only when a patch does not explain an exception.
+ | #5077, reinstall orchestration | Skip: Classic already chains one install operation after the uninstall prerequisite and does not launch uninstall separately. Neither reported defect applies. |
+ | #4959, frontend retirement | Remove the obsolete frontend selector while preserving WinUI and legacy helpers for compatibility. |
+ | Classic issue #5, SQLite | Pin SQLitePCLRaw to 2.1.13 for GHSA-2m69-gcr7-jv3q. Remove the override when upstream or Pinget stops resolving vulnerable 2.1.11. |
++
++### October 2026 review
++
++Reviewed shared-code changes through upstream `5d8e9bc6d2cbe0a6850cac403dfc3e9e6cbf02fe`
++(2026-10-23), including the earlier settings/path and command-injection fixes
++in #5346 and #5348 and the elevated temporary-directory fix in #5526.
++The appended patches retain the individual upstream references.
++
++- #5346 and #5348: wire protocol sanitization, bundle filtering, standalone-command
++  validation, and PowerShell launcher deployment into WinUI's existing entry points.
++- #5446, #5483, and #5545: share the elevation-cache and executable-search fixes;
++  preserve Classic's existing headless host and installed product identity.
++- #5459 and #5536: retain the shared per-manager search selection API and result
++  limits; an explicit empty WinUI search lists supported sources. The Avalonia
++  filter-pane controls are not imported.
++- #5489 and #5569: keep local manager serialization and managed Cargo execution.
++  Classic has no Agent broker backend, so broker routing, policy-editor changes,
++  and broker-only tests are excluded.
++- The shared operation foundation includes cancellation, safe queue scheduling,
++  and structured download progress. Avalonia operation-card presentation and
++  persistent pending-reboot UI are outside this backport.
++- Avalonia Software Catalog/editor, TUI, macOS presentation, sidebar reordering,
++  upstream release-channel identity, and agent automation workflows remain outside
++  Classic's WinUI maintenance boundary.
+diff --git a/src/Shared/SharedPreUiCommandDispatcher.cs b/src/Shared/SharedPreUiCommandDispatcher.cs
+index 99178b1f4cbf9996f7d4ddf0e94affdcd7b9f8c7..4e7e9c543dcdaa3034367b50e06d0ed4a93e180d 100644
+--- a/src/Shared/SharedPreUiCommandDispatcher.cs
++++ b/src/Shared/SharedPreUiCommandDispatcher.cs
+@@ -1,3 +1,4 @@
++using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.SettingsEngine.SecureSettings;
+ using UniGetUI.Core.Tools;
+@@ -42,6 +43,28 @@ internal static class SharedPreUiCommandDispatcher
+     private const string EnableSecureSettingForUserArgument = SecureSettings.Args.ENABLE_FOR_USER;
+     private const string DisableSecureSettingForUserArgument = SecureSettings.Args.DISABLE_FOR_USER;
+ 
++    internal const string ProtocolLaunchScheme = "unigetui:";
++
++    public static string[] IgnoreArgumentsInjectedIntoProtocolLaunch(string[] args)
++    {
++        if (args.Length < 2)
++        {
++            return args;
++        }
++
++        if (!args[0].StartsWith(ProtocolLaunchScheme, StringComparison.OrdinalIgnoreCase))
++        {
++            return args;
++        }
++
++        Logger.Warn(
++            $"A {ProtocolLaunchScheme} launch carried {args.Length - 1} extra argument(s). "
++                + "They can only come from an injected quote in the URI, so they are ignored."
++        );
++
++        return [args[0]];
++    }
++
+     public static int? TryHandle(IReadOnlyList<string> args, SharedPreUiCommandExitCodes exitCodes)
+     {
+         if (args.Contains(HelpArgument))
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+index de29d544caed09b7da93246db092a2d96fd4321d..3b56798f6fbeead2526171e73c44a5ca379c657c 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+@@ -230,6 +230,7 @@ public static partial class Settings
+             K.Test5 => "ª",
+             K.Test6 => "VeryVeryLongTestSettingEntrySoTheClassCanReallyBeStressedOut",
+             K.Test7_Legacy => "LegacyBoolSetting",
++            K.ExcludedSearchManagers => "ExcludedSearchManagers",
+             K.Unset => throw new InvalidDataException("Setting key was unset!"),
+             _ => throw new KeyNotFoundException(
+                 $"The settings key {key} was not found on the ResolveKey map"
+diff --git a/src/UniGetUI.Core.Tools/InternalsVisibleTo.cs b/src/UniGetUI.Core.Tools/InternalsVisibleTo.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..55ff8a4021e1382fc3a12798d2d533cd4cda70db
+--- /dev/null
++++ b/src/UniGetUI.Core.Tools/InternalsVisibleTo.cs
+@@ -0,0 +1,3 @@
++using System.Runtime.CompilerServices;
++
++[assembly: InternalsVisibleTo("UniGetUI.Core.Tools.Tests")]
+diff --git a/src/UniGetUI.Core.Tools/Tools.cs b/src/UniGetUI.Core.Tools/Tools.cs
+index 0779fce6830fb9b45f4d98296ee8ff7446013324..c6afa640962465b5fd8b07b53e837b6abf02207a 100644
+--- a/src/UniGetUI.Core.Tools/Tools.cs
++++ b/src/UniGetUI.Core.Tools/Tools.cs
+@@ -755,10 +755,40 @@ namespace UniGetUI.Core.Tools
+             return new Uri(url);
+         }
+ 
++        // Grants every process the right to set the foreground window, bypassing the
++        // foreground lock so a UAC consent prompt can surface in front. ASFW_ANY = -1.
++        private const int ASFW_ANY = -1;
++
++        [DllImport("user32.dll", SetLastError = true)]
++        [return: MarshalAs(UnmanagedType.Bool)]
++        private static extern bool AllowSetForegroundWindow(int dwProcessId);
++
++        /// <summary>
++        /// Windows: hand our foreground rights to the imminent UAC consent prompt so it surfaces
++        /// in front instead of only flashing the taskbar (#5146). Windows decides whether we
++        /// still hold that privilege and grants nothing once another app owns the foreground.
++        /// Either way this only ever lets the consent UI come forward; it never activates our
++        /// own window, so a minimized UniGetUI stays minimized (#5102). No-op elsewhere.
++        /// Must be called immediately before launching the elevator.
++        /// </summary>
++        public static void PrepareForegroundForElevation()
++        {
++            if (!OperatingSystem.IsWindows())
++                return;
++
++            AllowSetForegroundWindow(ASFW_ANY);
++        }
++
+         /// <summary>
+         /// Enables GSudo cache for the current process
+         /// </summary>
+-        private static bool _isCaching;
++        private static readonly SemaphoreSlim _uacCacheLock = new(1, 1);
++
++        private static bool _uacCacheHeld;
++
++        private static long _uacCacheGeneration;
++
++        public static long UACCacheGeneration => Interlocked.Read(ref _uacCacheGeneration);
+ 
+         public static async Task CacheUACForCurrentProcess()
+         {
+@@ -770,23 +800,32 @@ namespace UniGetUI.Core.Tools
+                 return;
+             }
+ 
+-            while (_isCaching)
+-                await Task.Delay(100);
++            var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
+ 
+-            try
+-            {
+-                _isCaching = true;
+-                Logger.Info("Caching admin rights for process id " + Environment.ProcessId);
++            // pkexec prompts on every invocation and has no caching protocol.
++            if (elevatorName == "pkexec")
++                return;
+ 
+-                var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
++            bool isSessionCache = elevatorName != "sudo";
+ 
+-                // pkexec prompts on every invocation and has no caching protocol.
+-                if (elevatorName == "pkexec")
++            await _uacCacheLock.WaitAsync();
++            try
++            {
++                if (isSessionCache && _uacCacheHeld)
+                 {
+-                    _isCaching = false;
+-                    return;
++                    if (await ProbeElevationCacheAsync() is not ElevationCacheState.Unavailable)
++                        return;
++
++                    Logger.Warn(
++                        "The administrator rights cache is no longer reachable, it will be requested again"
++                    );
++                    _uacCacheHeld = false;
++                    _elevationCacheWaitTimedOut = false;
++                    Interlocked.Increment(ref _uacCacheGeneration);
+                 }
+ 
++                Logger.Info("Caching admin rights for process id " + Environment.ProcessId);
++
+                 // sudo: -v validates/extends the cached timestamp.
+                 // Prepend -A only when the SUDO_ASKPASS helper is configured.
+                 // gsudo / UniGetUI Elevator.exe: use the gsudo cache protocol.
+@@ -806,42 +845,249 @@ namespace UniGetUI.Core.Tools
+                         RedirectStandardInput = true,
+                         CreateNoWindow = true,
+                         StandardOutputEncoding = Encoding.UTF8,
++                        StandardErrorEncoding = Encoding.UTF8,
+                     },
+                 };
++
++                // When admin-rights caching is enabled, the UAC consent prompt is raised here.
++                // Surface it in front instead of letting it flash unnoticed in the taskbar (#5146).
++                PrepareForegroundForElevation();
++
+                 p.Start();
++
++                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
++                Task<string> stderr = p.StandardError.ReadToEndAsync();
++                await Task.WhenAll(stdout, stderr);
+                 await p.WaitForExitAsync();
+-                _isCaching = false;
++
++                string output = string
++                    .Join(
++                        Environment.NewLine,
++                        new[] { stdout.Result, stderr.Result }.Where(line =>
++                            !string.IsNullOrWhiteSpace(line)
++                        )
++                    )
++                    .Trim();
++
++                if (p.ExitCode != 0)
++                {
++                    _uacCacheHeld = false;
++                    Logger.Error(
++                        $"The elevator could not cache administrator rights (exit code {p.ExitCode}). "
++                            + "Every operation that requires elevation will ask for consent separately."
++                    );
++                    if (output.Length > 0)
++                        Logger.Error(output);
++                }
++                else if (
++                    isSessionCache
++                    && await WaitForElevationCacheAsync() is ElevationCacheState.Unavailable
++                )
++                {
++                    _uacCacheHeld = false;
++                    Logger.Error(
++                        "The elevator reported success but no administrator rights cache became "
++                            + $"reachable for process id {Environment.ProcessId}. Every operation "
++                            + "that requires elevation will ask for consent separately."
++                    );
++                    if (output.Length > 0)
++                        Logger.Error(output);
++                }
++                else
++                {
++                    _uacCacheHeld = true;
++                    Interlocked.Increment(ref _uacCacheGeneration);
++
++                    Logger.Info(
++                        $"The elevator cached administrator rights for process id {Environment.ProcessId}"
++                    );
++                    if (output.Length > 0)
++                        Logger.Info(output);
++                }
+             }
+             catch (Exception ex)
+             {
++                Logger.Error("Failed to cache administrator rights for the current process");
+                 Logger.Error(ex);
+-                _isCaching = false;
++            }
++            finally
++            {
++                _uacCacheLock.Release();
++            }
++        }
++
++        private enum ElevationCacheState
++        {
++            Available,
++            Unavailable,
++            Unknown,
++        }
++
++        private static bool _elevationCacheProbeUnsupported;
++
++        private static bool _elevationCacheProbeFailureLogged;
++
++        private static bool _elevationCacheWaitTimedOut;
++
++        private static async Task<ElevationCacheState> WaitForElevationCacheAsync()
++        {
++            ElevationCacheState state = await ProbeElevationCacheAsync();
++
++            if (_elevationCacheWaitTimedOut)
++                return state;
++
++            int[] retryDelays = [250, 500, 1000, 2000, 4000];
++
++            foreach (int delay in retryDelays)
++            {
++                if (state is not ElevationCacheState.Unavailable)
++                    return state;
++
++                await Task.Delay(delay);
++                state = await ProbeElevationCacheAsync();
++            }
++
++            _elevationCacheWaitTimedOut = state is ElevationCacheState.Unavailable;
++            return state;
++        }
++
++        private static async Task<ElevationCacheState> ProbeElevationCacheAsync()
++        {
++            if (
++                !OperatingSystem.IsWindows()
++                || _elevationCacheProbeUnsupported
++                || CoreData.ElevatorPath.Length is 0
++            )
++                return ElevationCacheState.Unknown;
++
++            try
++            {
++                using Process p = new()
++                {
++                    StartInfo = new ProcessStartInfo
++                    {
++                        FileName = CoreData.ElevatorPath,
++                        Arguments = "status CacheAvailable",
++                        UseShellExecute = false,
++                        RedirectStandardOutput = true,
++                        RedirectStandardError = true,
++                        RedirectStandardInput = true,
++                        CreateNoWindow = true,
++                        StandardOutputEncoding = Encoding.UTF8,
++                        StandardErrorEncoding = Encoding.UTF8,
++                    },
++                };
++
++                p.Start();
++                p.StandardInput.Close();
++
++                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
++                Task<string> stderr = p.StandardError.ReadToEndAsync();
++                Task reads = Task.WhenAll(stdout, stderr);
++                _ = reads.ContinueWith(
++                    completed => _ = completed.Exception,
++                    CancellationToken.None,
++                    TaskContinuationOptions.OnlyOnFaulted,
++                    TaskScheduler.Default
++                );
++
++                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
++                try
++                {
++                    await p.WaitForExitAsync(cts.Token);
++                    await reads.WaitAsync(cts.Token);
++                }
++                catch (OperationCanceledException)
++                {
++                    try
++                    {
++                        p.Kill(entireProcessTree: true);
++                    }
++                    catch (Exception killEx)
++                        when (killEx is InvalidOperationException or NotSupportedException)
++                    {
++                        Logger.Debug(killEx);
++                    }
++
++                    Logger.Warn("The elevator did not report the administrator rights cache status");
++                    return ElevationCacheState.Unknown;
++                }
++
++                if (bool.TryParse(stdout.Result.Trim(), out bool available))
++                    return available
++                        ? ElevationCacheState.Available
++                        : ElevationCacheState.Unavailable;
++
++                string error = stderr.Result.Trim();
++
++                if (error.Contains("not a valid Status Key", StringComparison.OrdinalIgnoreCase))
++                    _elevationCacheProbeUnsupported = true;
++
++                if (!_elevationCacheProbeFailureLogged)
++                {
++                    _elevationCacheProbeFailureLogged = true;
++                    Logger.Warn(
++                        $"The elevator did not report the administrator rights cache status (exit code {p.ExitCode})"
++                    );
++                    if (error.Length > 0)
++                        Logger.Warn(error);
++                }
++
++                return ElevationCacheState.Unknown;
++            }
++            catch (Exception ex)
++            {
++                Logger.Warn("Failed to read the administrator rights cache status");
++                Logger.Warn(ex);
++                return ElevationCacheState.Unknown;
++            }
++        }
++
++        /// <summary>
++        /// Forgets that an elevation cache is held, without releasing it. The next operation
++        /// that needs elevation will ask the elevator again; that request is free and silent
++        /// when the session is still alive, and re-establishes it when it is not.
++        /// </summary>
++        public static async Task<bool> InvalidateUACCacheState(long? expectedGeneration = null)
++        {
++            await _uacCacheLock.WaitAsync();
++            try
++            {
++                _elevationCacheWaitTimedOut = false;
++
++                if (expectedGeneration is long expected
++                    && (expected != _uacCacheGeneration || !_uacCacheHeld))
++                    return false;
++
++                _uacCacheHeld = false;
++                Interlocked.Increment(ref _uacCacheGeneration);
++                return true;
++            }
++            finally
++            {
++                _uacCacheLock.Release();
+             }
+         }
+ 
+         /// <summary>
+         /// Reset UAC cache for the current process
+         /// </summary>
+-        public static async Task ResetUACForCurrentProcess()
++        public static async Task<bool> ResetUACForCurrentProcess(long? expectedGeneration = null)
+         {
+             if (Settings.Get(Settings.K.ProhibitElevation))
+             {
+                 Logger.Error(
+                     "Elevation is prohibited, ResetUACForCurrentProcess() call will be ignored"
+                 );
+-                return;
++                return false;
+             }
+ 
+-            Logger.Info(
+-                "Resetting administrator rights cache for process id " + Environment.ProcessId
+-            );
+-
+             var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
+ 
+             // pkexec prompts on every invocation and has no caching protocol.
+             if (elevatorName == "pkexec")
+             {
+-                return;
++                return false;
+             }
+ 
+             // sudo: -K removes all cached timestamps.
+@@ -850,22 +1096,74 @@ namespace UniGetUI.Core.Tools
+                 ? "-K"
+                 : "cache off --pid " + Environment.ProcessId;
+ 
+-            using Process p = new()
++            await _uacCacheLock.WaitAsync();
++            try
+             {
+-                StartInfo = new ProcessStartInfo
++                _elevationCacheWaitTimedOut = false;
++
++                if (expectedGeneration is long expected
++                    && (expected != _uacCacheGeneration || !_uacCacheHeld))
++                    return false;
++
++                _uacCacheHeld = false;
++                Interlocked.Increment(ref _uacCacheGeneration);
++
++                Logger.Info(
++                    "Resetting administrator rights cache for process id " + Environment.ProcessId
++                );
++
++                using Process p = new()
+                 {
+-                    FileName = CoreData.ElevatorPath,
+-                    Arguments = resetArgs,
+-                    UseShellExecute = false,
+-                    RedirectStandardOutput = true,
+-                    RedirectStandardError = true,
+-                    RedirectStandardInput = true,
+-                    CreateNoWindow = true,
+-                    StandardOutputEncoding = Encoding.UTF8,
+-                },
+-            };
+-            p.Start();
+-            await p.WaitForExitAsync();
++                    StartInfo = new ProcessStartInfo
++                    {
++                        FileName = CoreData.ElevatorPath,
++                        Arguments = resetArgs,
++                        UseShellExecute = false,
++                        RedirectStandardOutput = true,
++                        RedirectStandardError = true,
++                        RedirectStandardInput = true,
++                        CreateNoWindow = true,
++                        StandardOutputEncoding = Encoding.UTF8,
++                        StandardErrorEncoding = Encoding.UTF8,
++                    },
++                };
++
++                p.Start();
++
++                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
++                Task<string> stderr = p.StandardError.ReadToEndAsync();
++                await Task.WhenAll(stdout, stderr);
++                await p.WaitForExitAsync();
++
++                if (p.ExitCode != 0)
++                {
++                    Logger.Warn(
++                        $"The elevator could not release the administrator rights cache (exit code {p.ExitCode})"
++                    );
++                    string output = string
++                        .Join(
++                            Environment.NewLine,
++                            new[] { stdout.Result, stderr.Result }.Where(line =>
++                                !string.IsNullOrWhiteSpace(line)
++                            )
++                        )
++                        .Trim();
++                    if (output.Length > 0)
++                        Logger.Warn(output);
++                }
++
++                return true;
++            }
++            catch (Exception ex)
++            {
++                Logger.Error("Failed to release the administrator rights cache");
++                Logger.Error(ex);
++                return true;
++            }
++            finally
++            {
++                _uacCacheLock.Release();
++            }
+         }
+ 
+         /// <summary>
+@@ -1737,15 +2035,10 @@ namespace UniGetUI.Core.Tools
+ 
+         private static IEnumerable<string> EnumerateSearchDirectories(string pathValue)
+         {
+-            if (OperatingSystem.IsWindows())
+-            {
+-                yield return Environment.CurrentDirectory;
+-            }
+-
+             foreach (string pathEntry in pathValue.Split(Path.PathSeparator))
+             {
+                 string normalizedEntry = NormalizeSearchDirectory(pathEntry);
+-                if (normalizedEntry.Length is not 0)
++                if (Path.IsPathFullyQualified(normalizedEntry))
+                 {
+                     yield return normalizedEntry;
+                 }
+@@ -1756,7 +2049,7 @@ namespace UniGetUI.Core.Tools
+         {
+             if (string.IsNullOrWhiteSpace(pathEntry))
+             {
+-                return Environment.CurrentDirectory;
++                return string.Empty;
+             }
+ 
+             return pathEntry.Trim().Trim('"');
+diff --git a/src/UniGetUI.PackageEngine.Enums/Enums.cs b/src/UniGetUI.PackageEngine.Enums/Enums.cs
+index d82036e29ed7019c61e554ecefd9d5df34c7f618..1234d3e03be16521f9582a2a515afffee9c7d5e0 100644
+--- a/src/UniGetUI.PackageEngine.Enums/Enums.cs
++++ b/src/UniGetUI.PackageEngine.Enums/Enums.cs
+@@ -49,7 +49,7 @@ namespace UniGetUI.PackageEngine.Enums
+         Failure,
+         Canceled,
+ 
+-        // RestartRequired,
++        RestartRequired,
+         AutoRetry,
+     }
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+index c7c523c584370e86ead104df3bb22e8f864ee683..0ed75f4c45ba5cc1bf23b0edbd86ccf634edaa48 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/Helpers/WinGetPkgOperationHelper.cs
+@@ -343,20 +343,6 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
+             Logger.Error(ex);
+         }
+ 
+-        if (!usePinget)
+-        {
+-            parameters.Add(WinGet.GetProxyArgument());
+-        }
+-
+-        parameters.AddRange(
+-            operation switch
+-            {
+-                OperationType.Update => options.CustomParameters_Update,
+-                OperationType.Uninstall => options.CustomParameters_Uninstall,
+-                _ => options.CustomParameters_Install,
+-            }
+-        );
+-        return parameters;
+     }
+ 
+     protected override OperationVeredict _getOperationResult(
+diff --git a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+index 0103ac12633e524810eef6c848ffc0d336ee1cf5..ee70d41496216d93b9721cd5b46c6afabf70d460 100644
+--- a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
++++ b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+@@ -8,6 +8,7 @@ using UniGetUI.Interface.Enums;
+ using UniGetUI.PackageEngine.Classes.Packages.Classes;
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Interfaces;
++using UniGetUI.PackageEngine.Interfaces.ManagerProviders;
+ using UniGetUI.PackageEngine.PackageClasses;
+ using UniGetUI.PackageEngine.PackageLoader;
+ using UniGetUI.PackageEngine.Serializable;
+@@ -273,9 +274,16 @@ namespace UniGetUI.PackageEngine.Operations
+             List<string> Output
+         )
+         {
+-            return Task.FromResult(
+-                Package.Manager.OperationHelper.GetResult(Package, Role, Output, ReturnCode)
+-            );
++            var result = Package.Manager.OperationHelper.GetResult(Package, Role, Output, ReturnCode);
++            if (result is OperationVeredict.Failure
++                && Output.Any(line => line.Contains("[WinError 32]", StringComparison.Ordinal)))
++            {
++                Metadata.FailureMessage = CoreTools.Translate(
++                    "A file of {package} is in use by another program. Close any program that may be using it, then try again",
++                    new Dictionary<string, object?> { { "package", Package.Name } }
++                );
++            }
++            return Task.FromResult(result);
+         }
+ 
+         private static bool IsWinGetManager(IPackageManager manager)
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index 0fc786377419072bb1cca1ee0a82b9227a76e0b3..e0929f987c3136eeca7b6b46326a8e3da7e8f8de 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -2306,6 +2306,29 @@ public sealed class WinGetManagerTests : IDisposable
+         };
+     }
+ 
++    private static ShowResult CreateScopedPingetShowResult(
++        string? requestedScope,
++        IReadOnlyList<string>? scopes = null
++    )
++    {
++        ShowResult result = CreatePingetShowResult();
++        Installer template = result.Manifest.Installers[0];
++        List<Installer> installers =
++        [
++            .. (scopes ?? [PackageScope.User, PackageScope.Machine]).Select(scope =>
++                template with { Scope = scope, Url = $"https://example.test/{scope}.exe" }
++            ),
++        ];
++
++        return result with
++        {
++            Manifest = result.Manifest with { Installers = installers },
++            SelectedInstaller = installers.FirstOrDefault(installer =>
++                requestedScope is null || installer.Scope == requestedScope
++            ),
++        };
++    }
++
+     public enum LocalSourceKind
+     {
+         MicrosoftStore,
+@@ -2369,5 +2392,298 @@ public sealed class WinGetManagerTests : IDisposable
+ 
+         public void Log(string? line) => Lines.Add(line ?? "");
+     }
++    [Fact]
++    public void PingetPackageDetailsProviderSelectsTheInstallerOfTheConfiguredScope()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        List<PackageQuery> queries = [];
++        var provider = new PingetPackageDetailsProvider(
++            query =>
++            {
++                queries.Add(query);
++                return CreateScopedPingetShowResult(query.InstallScope);
++            },
++            installerSizeResolver: _ => 1234,
++            installerPreferenceResolver: _ => new(PackageScope.Machine, Architecture.x64)
++        );
++
++        provider.LoadPackageDetails(details, new TestNativeTaskLogger());
++
++        PackageQuery query = Assert.Single(queries);
++        Assert.Equal(PackageScope.Machine, query.InstallScope);
++        Assert.Equal(Architecture.x64, query.InstallerArchitecture);
++        Assert.Equal("https://example.test/machine.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetPackageDetailsProviderRetriesWithoutPreferenceWhenItExcludesEveryInstaller()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        List<PackageQuery> queries = [];
++        var provider = new PingetPackageDetailsProvider(
++            query =>
++            {
++                queries.Add(query);
++                ShowResult result = CreateScopedPingetShowResult(null, [PackageScope.User]);
++                return query.InstallScope is null
++                    ? result
++                    : result with { SelectedInstaller = null };
++            },
++            installerSizeResolver: _ => 1234,
++            installerPreferenceResolver: _ => new(PackageScope.Machine, Architecture.x64)
++        );
++
++        provider.LoadPackageDetails(details, new TestNativeTaskLogger());
++
++        Assert.Equal(2, queries.Count);
++        Assert.Null(queries[1].InstallScope);
++        Assert.Null(queries[1].InstallerArchitecture);
++        Assert.Equal("https://example.test/user.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetPackageDetailsProviderDoesNotRetryWhenThePreferenceExcludedNothing()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        int lookups = 0;
++        var provider = new PingetPackageDetailsProvider(
++            _ =>
++            {
++                lookups++;
++                return CreatePingetShowResult() with { SelectedInstaller = null };
++            },
++            installerSizeResolver: _ => 1234,
++            installerPreferenceResolver: _ => new(PackageScope.Machine, Architecture.x64)
++        );
++
++        provider.LoadPackageDetails(details, new TestNativeTaskLogger());
++
++        Assert.Equal(1, lookups);
++    }
++
++    [Theory]
++    [InlineData(PackageScope.Machine, Architecture.x64, "https://example.test/x64-machine.exe")]
++    [InlineData(PackageScope.User, Architecture.x64, "https://example.test/x64-user.exe")]
++    [InlineData(PackageScope.Machine, Architecture.arm64, "https://example.test/arm64-machine.exe")]
++    public void PingetCliPackageDetailsProviderSelectsTheInstallerOfTheConfiguredPreference(
++        string scope,
++        string architecture,
++        string expectedUrl
++    )
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x64", "Scope": "user", "InstallerUrl": "https://example.test/x64-user.exe" },
++                { "Architecture": "arm64", "Scope": "machine", "InstallerUrl": "https://example.test/arm64-machine.exe" },
++                { "Architecture": "x64", "Scope": "machine", "InstallerUrl": "https://example.test/x64-machine.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(scope, architecture),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal(expectedUrl, details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderTreatsAnInstallerWithoutScopeAsMatching()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x64", "InstallerUrl": "https://example.test/x64-any.exe" },
++                { "Architecture": "arm64", "Scope": "machine", "InstallerUrl": "https://example.test/arm64-machine.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(PackageScope.Machine, Architecture.x64),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/x64-any.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderFallsBackWhenThePreferenceExcludesEveryInstaller()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x64", "Scope": "user", "InstallerUrl": "https://example.test/x64-user.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(PackageScope.Machine, Architecture.x86),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/x64-user.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderResolvesTheManifestRootScope()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Scope": "user",
++              "Installers": [
++                { "Architecture": "x64", "InstallerUrl": "https://example.test/x64-inherited-user.exe" },
++                { "Architecture": "x64", "Scope": "machine", "InstallerUrl": "https://example.test/x64-machine.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(PackageScope.Machine, Architecture.x64),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/x64-machine.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderSkipsInstallersThatNeedANewerWindows()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x86", "InstallerUrl": "https://example.test/x86.exe" },
++                { "Architecture": "x64", "MinimumOSVersion": "99.0.0.0", "InstallerUrl": "https://example.test/x64-future.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/x86.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Fact]
++    public void PingetCliPackageDetailsProviderSkipsInstallersForAnotherPlatform()
++    {
++        var details = new PackageDetails(CreateContosoToolPackage());
++        const string manifestJson = """
++            {
++              "PackageIdentifier": "Contoso.Tool",
++              "Installers": [
++                { "Architecture": "x64", "Platform": ["Windows.Universal"], "InstallerUrl": "https://example.test/universal.exe" },
++                { "Architecture": "x64", "Platform": ["Windows.Desktop"], "InstallerUrl": "https://example.test/desktop.exe" }
++              ]
++            }
++            """;
++
++        PingetCliPackageDetailsProvider.ApplyManifestJson(
++            details,
++            manifestJson,
++            new InstallerPreference(null, Architecture.x64),
++            installerSizeResolver: _ => 0
++        );
++
++        Assert.Equal("https://example.test/desktop.exe", details.InstallerUrl?.ToString());
++    }
++
++    [Theory]
++    [InlineData("10.0.19045.0", "10.0.22000.0", false)]
++    [InlineData("10.0.22631.0", "10.0.22000.0", true)]
++    [InlineData("10.0.19045.0", null, true)]
++    [InlineData("10.0.19045.0", "10.0.19045", true)]
++    public void MatchesCurrentOsVersionComparesNumerically(
++        string currentOsVersion,
++        string? minimumOsVersion,
++        bool expected
++    )
++    {
++        Assert.Equal(
++            expected,
++            PingetPackageDetailsProvider.MatchesCurrentOsVersion(minimumOsVersion, currentOsVersion)
++        );
++    }
++
++    [Theory]
++    [InlineData("Contoso Tool 32-bit", "Contoso.Tool", false, Architecture.x64)]
++    [InlineData("Contoso Tool 32-bit", "Contoso.Tool", true, Architecture.x86)]
++    [InlineData("Contoso Tool", "Contoso.Tool.x64", true, Architecture.x64)]
++    [InlineData("Contoso Tool", "Contoso.Tool", true, Architecture.x64)]
++    public void GetEffectiveArchitectureAppliesTheUpdateOverrideOnlyForUpdates(
++        string name,
++        string id,
++        bool forUpdate,
++        string expected
++    )
++    {
++        var package = new PackageBuilder()
++            .WithManager(new WinGet())
++            .WithName(name)
++            .WithId(id)
++            .WithVersion("1.0.0")
++            .Build();
++        var options = new InstallOptions { Architecture = Architecture.x64 };
++
++        Assert.Equal(
++            expected,
++            WinGetPkgOperationHelper.GetEffectiveArchitecture(package, options, forUpdate)
++        );
++    }
++
++    [Theory]
++    [InlineData(OperationType.Update, Architecture.x86)]
++    [InlineData(OperationType.Install, Architecture.x64)]
++    public void ApplyOperationOverridesForcesThePackageArchitectureOnlyOnUpdate(
++        OperationType operation,
++        string expected
++    )
++    {
++        var manager = new WinGet();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithName("Contoso Tool 32-bit")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++        var options = new InstallOptions { Architecture = Architecture.x64 };
++
++        manager.OperationHelper.ApplyOperationOverrides(package, options, operation);
++
++        Assert.Equal(expected, options.Architecture);
++    }
++
++    private static Package CreateContosoToolPackage() =>
++        new PackageBuilder()
++            .WithManager(new WinGet())
++            .WithName("Contoso Tool")
++            .WithId("Contoso.Tool")
++            .WithVersion("1.0.0")
++            .Build();
++
+ }
+ #endif
+diff --git a/src/UniGetUI.Tests/ProtocolLaunchTests.cs b/src/UniGetUI.Tests/ProtocolLaunchTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..46b4602b44335892b5b52e74f3e840830e329043
+--- /dev/null
++++ b/src/UniGetUI.Tests/ProtocolLaunchTests.cs
+@@ -0,0 +1,24 @@
++using UniGetUI.Shared;
++
++namespace UniGetUI.Tests;
++
++public class ProtocolLaunchTests
++{
++    [Theory]
++    [InlineData("unigetui://showDiscover")]
++    [InlineData("UNIGETUI://showDiscover")]
++    public void ProtocolLaunchDropsInjectedCommandLineSwitches(string uri)
++    {
++        string[] arguments = [uri, "--set-setting-value", "ParallelOperationCount", "100"];
++
++        Assert.Equal([uri], SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(arguments));
++    }
++
++    [Fact]
++    public void OrdinaryCommandLineKeepsItsArguments()
++    {
++        string[] arguments = ["--export-settings", "settings.json"];
++
++        Assert.Same(arguments, SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(arguments));
++    }
++}
+diff --git a/src/UniGetUI/App.xaml.cs b/src/UniGetUI/App.xaml.cs
+index 1791460763d33247d622a804db4f38a8af6fa52e..ba9ff9db27ebec0e76f5163449fe051743701376 100644
+--- a/src/UniGetUI/App.xaml.cs
++++ b/src/UniGetUI/App.xaml.cs
+@@ -177,7 +177,7 @@ namespace UniGetUI
+                     Logger.Error(" -");
+                     Logger.Error(" -");
+                     if (
+-                        Environment.GetCommandLineArgs().Contains("--report-all-errors")
++                        UniGetUI.Core.Data.CoreData.GetProcessArguments().Contains("--report-all-errors")
+                         || RaiseExceptionAsFatal
+                         || MainWindow is null
+                     )
+diff --git a/src/UniGetUI/CLIHandler.cs b/src/UniGetUI/CLIHandler.cs
+index 59702e26fa81d18d6a9173b61b1081a58a709911..e37ed8ddc85edcdd534955fdaf6ba352c129413e 100644
+--- a/src/UniGetUI/CLIHandler.cs
++++ b/src/UniGetUI/CLIHandler.cs
+@@ -49,7 +49,7 @@ public static class CLIHandler
+ 
+     public static int ImportSettings()
+     {
+-        return ImportSettings(Environment.GetCommandLineArgs());
++        return ImportSettings(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int ImportSettings(IReadOnlyList<string> args)
+@@ -62,7 +62,7 @@ public static class CLIHandler
+ 
+     public static int ExportSettings()
+     {
+-        return ExportSettings(Environment.GetCommandLineArgs());
++        return ExportSettings(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int ExportSettings(IReadOnlyList<string> args)
+@@ -75,7 +75,7 @@ public static class CLIHandler
+ 
+     public static int EnableSetting()
+     {
+-        return EnableSetting(Environment.GetCommandLineArgs());
++        return EnableSetting(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int EnableSetting(IReadOnlyList<string> args)
+@@ -88,7 +88,7 @@ public static class CLIHandler
+ 
+     public static int DisableSetting()
+     {
+-        return DisableSetting(Environment.GetCommandLineArgs());
++        return DisableSetting(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int DisableSetting(IReadOnlyList<string> args)
+@@ -101,7 +101,7 @@ public static class CLIHandler
+ 
+     public static int SetSettingsValue()
+     {
+-        return SetSettingsValue(Environment.GetCommandLineArgs());
++        return SetSettingsValue(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int SetSettingsValue(IReadOnlyList<string> args)
+@@ -191,7 +191,7 @@ public static class CLIHandler
+ 
+     public static int EnableSecureSetting()
+     {
+-        return EnableSecureSetting(Environment.GetCommandLineArgs());
++        return EnableSecureSetting(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int EnableSecureSetting(IReadOnlyList<string> args)
+@@ -204,7 +204,7 @@ public static class CLIHandler
+ 
+     public static int DisableSecureSetting()
+     {
+-        return DisableSecureSetting(Environment.GetCommandLineArgs());
++        return DisableSecureSetting(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int DisableSecureSetting(IReadOnlyList<string> args)
+@@ -217,7 +217,7 @@ public static class CLIHandler
+ 
+     public static int EnableSecureSettingForUser()
+     {
+-        return EnableSecureSettingForUser(Environment.GetCommandLineArgs());
++        return EnableSecureSettingForUser(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int EnableSecureSettingForUser(IReadOnlyList<string> args)
+@@ -230,7 +230,7 @@ public static class CLIHandler
+ 
+     public static int DisableSecureSettingForUser()
+     {
+-        return DisableSecureSettingForUser(Environment.GetCommandLineArgs());
++        return DisableSecureSettingForUser(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int DisableSecureSettingForUser(IReadOnlyList<string> args)
+@@ -243,7 +243,7 @@ public static class CLIHandler
+ 
+     public static int Automation()
+     {
+-        return Automation(Environment.GetCommandLineArgs());
++        return Automation(UniGetUI.Core.Data.CoreData.GetProcessArguments());
+     }
+ 
+     internal static int Automation(IReadOnlyList<string> args)
+diff --git a/src/UniGetUI/CrashHandler.cs b/src/UniGetUI/CrashHandler.cs
+index b62a304428e1b4d1b55bc6fb38633e2c99e7aae5..21d960027ff1a5291ec3e7821361b9767c4bd3ae 100644
+--- a/src/UniGetUI/CrashHandler.cs
++++ b/src/UniGetUI/CrashHandler.cs
+@@ -90,7 +90,7 @@ public static class CrashHandler
+     {
+         Debugger.Break();
+ 
+-        if (!Environment.GetCommandLineArgs().Contains(CLIHandler.NO_CORRUPT_DIALOG))
++        if (!UniGetUI.Core.Data.CoreData.GetProcessArguments().Contains(CLIHandler.NO_CORRUPT_DIALOG))
+         {
+             Exception? fileEx = e;
+             while (fileEx is not null)
+diff --git a/src/UniGetUI/EntryPoint.cs b/src/UniGetUI/EntryPoint.cs
+index baf0f4f54b81df0989aa45522cd4d8e69d7691a1..e6ea327377426cec6113e9f9ca25c3b6c7f82185 100644
+--- a/src/UniGetUI/EntryPoint.cs
++++ b/src/UniGetUI/EntryPoint.cs
+@@ -15,6 +15,9 @@ namespace UniGetUI
+         [STAThread]
+         private static void Main(string[] args)
+         {
++            args = SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(args);
++            CoreData.SetSanitizedProcessArguments(args);
++
+             // Having an async main method breaks WebView2
+             try
+             {
+@@ -106,7 +109,7 @@ namespace UniGetUI
+                 Logger.ImportantInfo($"Runtime: {RuntimeInformation.FrameworkDescription}");
+                 Logger.ImportantInfo($"Elevated: {CoreTools.IsAdministrator()}");
+                 Logger.ImportantInfo($"Packaged (MSIX): {CoreTools.IsPackagedApp()}");
+-                string[] cmdArgs = Environment.GetCommandLineArgs();
++                string[] cmdArgs = UniGetUI.Core.Data.CoreData.GetProcessArguments();
+                 Logger.ImportantInfo($"Args: {(cmdArgs.Length > 1 ? string.Join(" ", cmdArgs.Skip(1)) : "(none)")}");
+ 
+                 // WinRT single-instance fancy stuff
+diff --git a/src/UniGetUI/MainWindow.xaml.cs b/src/UniGetUI/MainWindow.xaml.cs
+index 0f878856cf7df1f8f00b2a5fe1cca95ea173f428..cee67dec565be973f1bfc157c3512bc495a264ce 100644
+--- a/src/UniGetUI/MainWindow.xaml.cs
++++ b/src/UniGetUI/MainWindow.xaml.cs
+@@ -75,7 +75,7 @@ namespace UniGetUI.Interface
+             ApplyProxyVariableToProcess();
+             _applySubtitleToWindow();
+ 
+-            foreach (var arg in Environment.GetCommandLineArgs())
++            foreach (var arg in UniGetUI.Core.Data.CoreData.GetProcessArguments())
+             {
+                 ParametersToProcess.Enqueue(arg);
+             }
+diff --git a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+index d6e144b3756409aa99f63bd096b7274dd998f3d7..6212b9f5e5c9dfe1089d4b1630b5b74a2b0241c0 100644
+--- a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
++++ b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+@@ -518,7 +518,7 @@ namespace UniGetUI.Interface.Dialogs
+                 _ => OperationType.Install,
+             };
+             var commandline = await Task.Run(() =>
+-                Package.Manager.OperationHelper.GetParameters(Package, options, op)
++                Package.Manager.OperationHelper.GetStandaloneParameters(Package, options, op)
+             );
+             CommandBox.Text =
+                 Package.Manager.Properties.ExecutableFriendlyName
+diff --git a/src/UniGetUI/Pages/SoftwarePages/DiscoverSoftwarePage.cs b/src/UniGetUI/Pages/SoftwarePages/DiscoverSoftwarePage.cs
+index e894585d43c72a4f0501d9eb635613cb34e14d62..3127ac394500d3d6229b8b7a85837bf99b5dec1e 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/DiscoverSoftwarePage.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/DiscoverSoftwarePage.cs
+@@ -252,22 +252,12 @@ namespace UniGetUI.Interface.SoftwarePages
+ 
+         public override async Task LoadPackages()
+         {
+-            if (QueryBlock.Text.Trim() != "")
+-            {
+-                await LoadPackages(ReloadReason.External);
+-            }
++            await LoadPackages(ReloadReason.External);
+         }
+ 
+         private void Event_SearchPackages(object? sender, RoutedEventArgs e)
+         {
+-            if (QueryBlock.Text.Trim() != "")
+-            {
+-                _ = (Loader as DiscoverablePackagesLoader)?.ReloadPackages(QueryBlock.Text.Trim());
+-            }
+-            else
+-            {
+-                Loader.StopLoading();
+-            }
++            _ = (Loader as DiscoverablePackagesLoader)?.ReloadPackages(QueryBlock.Text.Trim());
+         }
+ 
+         protected override void WhenPackageCountUpdated() { }
+diff --git a/src/UniGetUI/Pages/SoftwarePages/PackageBundlesPage.cs b/src/UniGetUI/Pages/SoftwarePages/PackageBundlesPage.cs
+index 694958ccd72469a2f920915f0cb6c495d975fef1..8e68622ab49074922462f6803af5bc6d539dc630 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/PackageBundlesPage.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/PackageBundlesPage.cs
+@@ -1,3 +1,4 @@
++using UniGetUI.PackageEngine.Classes.Manager.Classes;
+ using System.Diagnostics;
+ using System.Text.Json;
+ using System.Text.Json.Nodes;
+@@ -689,141 +690,12 @@ namespace UniGetUI.Interface.SoftwarePages
+ 
+             foreach (var pkg in DeserializedData.packages)
+             {
+-                var opts = pkg.InstallationOptions;
+-
+-                if (opts.CustomParameters_Install.Where(x => x.Any()).Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(
+-                            new(
+-                                $"Custom install arguments: [{string.Join(", ", opts.CustomParameters_Install)}]",
+-                                AllowCLIParameters
+-                            )
+-                        );
+-                    if (!AllowCLIParameters)
+-                        opts.CustomParameters_Install.Clear();
+-                }
+-                if (opts.CustomParameters_Update.Where(x => x.Any()).Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(
+-                            new(
+-                                $"Custom update arguments: [{string.Join(", ", opts.CustomParameters_Update)}]",
+-                                AllowCLIParameters
+-                            )
+-                        );
+-                    if (!AllowCLIParameters)
+-                        opts.CustomParameters_Update.Clear();
+-                }
+-                if (opts.CustomParameters_Uninstall.Where(x => x.Any()).Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(
+-                            new(
+-                                $"Custom uninstall arguments: [{string.Join(", ", opts.CustomParameters_Uninstall)}]",
+-                                AllowCLIParameters
+-                            )
+-                        );
+-                    if (!AllowCLIParameters)
+-                        opts.CustomParameters_Uninstall.Clear();
+-                }
+-
+-                if (opts.PreInstallCommand.Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(
+-                            new($"Pre-install command: {opts.PreInstallCommand}", AllowPrePostOps)
+-                        );
+-                    if (!AllowPrePostOps)
+-                        opts.PreInstallCommand = "";
+-                }
+-                if (opts.PostInstallCommand.Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(
+-                            new($"Post-install command: {opts.PostInstallCommand}", AllowPrePostOps)
+-                        );
+-                    if (!AllowPrePostOps)
+-                        opts.PostInstallCommand = "";
+-                }
+-                if (opts.PreUpdateCommand.Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(new($"Pre-update command: {opts.PreUpdateCommand}", AllowPrePostOps));
+-                    if (!AllowPrePostOps)
+-                        opts.PreUpdateCommand = "";
+-                }
+-                if (opts.PostUpdateCommand.Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(
+-                            new($"Post-update command: {opts.PostUpdateCommand}", AllowPrePostOps)
+-                        );
+-                    if (!AllowPrePostOps)
+-                        opts.PostUpdateCommand = "";
+-                }
+-                if (opts.PreUninstallCommand.Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(
+-                            new(
+-                                $"Pre-uninstall command: {opts.PreUninstallCommand}",
+-                                AllowPrePostOps
+-                            )
+-                        );
+-                    if (!AllowPrePostOps)
+-                        opts.PreUninstallCommand = "";
+-                }
+-                if (opts.PostUninstallCommand.Any())
+-                {
+-                    report.IsEmpty = false;
+-                    if (!report.Contents.ContainsKey(pkg.Id))
+-                        report.Contents[pkg.Id] = new();
+-                    report
+-                        .Contents[pkg.Id]
+-                        .Add(
+-                            new(
+-                                $"Post-uninstall command: {opts.PostUninstallCommand}",
+-                                AllowPrePostOps
+-                            )
+-                        );
+-                    if (!AllowPrePostOps)
+-                        opts.PostUninstallCommand = "";
+-                }
+-
+-                pkg.InstallationOptions = opts;
++                IPackageManager? manager = PEInterface.Managers.FirstOrDefault(candidate =>
++                    candidate.Id == pkg.ManagerName || candidate.Name == pkg.ManagerName
++                    || candidate.DisplayName == pkg.ManagerName);
++                pkg.InstallationOptions = BundleImportFilter.Apply(
++                    ref report, pkg.Id, pkg.InstallationOptions, AllowCLIParameters, AllowPrePostOps,
++                    manager?.CommandLineIsShellInterpreted ?? false);
+                 packages.Add(DeserializePackage(pkg));
+             }
+ 
+@@ -908,12 +780,26 @@ namespace UniGetUI.Interface.SoftwarePages
+                     {
+                         if (_p is ImportedPackage package)
+                         {
++                            IReadOnlyList<string> param;
++                            try
++                            {
++                                param = package.Manager.OperationHelper.GetStandaloneParameters(
++                                    package, package.installation_options, OperationType.Install);
++                            }
++                            catch (InvalidOperationException ex)
++                            {
++                                Logger.Warn($"Skipping {package.Id} in the exported script: {ex.Message}");
++                                continue;
++                            }
++
+                             packages.Add(package.Name + " from " + package.Manager.DisplayName);
+ 
+                             foreach (
+                                 var process in package.installation_options.KillBeforeOperation
+                             )
+                             { // Kill required processes, if any. Forcekill if the user has enable said option
++                                if (!CoreTools.IsSafeProcessImageName(process))
++                                    continue;
+                                 commands.Add($"taskkill /im \"{process}\"" + (forceKill ? " /f" : ""));
+                             }
+ 
+@@ -924,11 +810,6 @@ namespace UniGetUI.Interface.SoftwarePages
+ 
+                             // Add install command
+                             var exeName = package.Manager.Properties.ExecutableFriendlyName;
+-                            var param = package.Manager.OperationHelper.GetParameters(
+-                                package,
+-                                package.installation_options,
+-                                OperationType.Install
+-                            );
+                             commands.Add($"{exeName} {string.Join(' ', param)}");
+ 
+                             if (package.installation_options.PostInstallCommand != "")
+diff --git a/src/UniGetUI/Pages/SoftwarePages/SoftwareUpdatesPage.cs b/src/UniGetUI/Pages/SoftwarePages/SoftwareUpdatesPage.cs
+index 87ffd1981610110fcce80b51b96bc5aee2bfa95a..06597ef46536a748ead3ca6643df96a44e6aa2d9 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/SoftwareUpdatesPage.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/SoftwareUpdatesPage.cs
+@@ -411,7 +411,7 @@ namespace UniGetUI.Interface.SoftwarePages
+                     _ = MainApp.Operations.UpdateAll();
+                     await ShowUpgradingPackagesNotification(upgradablePackages);
+                 }
+-                else if (Environment.GetCommandLineArgs().Contains("--updateapps"))
++                else if (UniGetUI.Core.Data.CoreData.GetProcessArguments().Contains("--updateapps"))
+                 {
+                     _ = MainApp.Operations.UpdateAll();
+                     await ShowUpgradingPackagesNotification(upgradablePackages);
+diff --git a/src/UniGetUI/UniGetUI.csproj b/src/UniGetUI/UniGetUI.csproj
+index af340680ae63640cbe8f4830f5ed22763fc2fdf3..475b32e3a607ad660099e4790b4fd6c238e5fc3a 100644
+--- a/src/UniGetUI/UniGetUI.csproj
++++ b/src/UniGetUI/UniGetUI.csproj
+@@ -461,6 +461,10 @@
+         </Content>
+     </ItemGroup>
+ 
++    <ItemGroup>
++        <Content Include="..\SharedAssets\Assets\Utilities\unigetui_ps_operation.ps1" Link="Assets\Utilities\unigetui_ps_operation.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
++    </ItemGroup>
++
+     <ItemGroup>
+         <Compile Include="..\SharedAssemblyInfo.cs" Link="SharedAssemblyInfo.cs" />
+         <Compile Include="..\Shared\SharedPreUiCommandDispatcher.cs" Link="Shared\SharedPreUiCommandDispatcher.cs" />
+-- 
+2.56.0
+

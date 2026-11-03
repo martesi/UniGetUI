@@ -1,0 +1,121 @@
+From f7ee23cb888477e746459982bfc7bde7cfe2183d Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:46:15 +0800
+Subject: [PATCH] backport: Replace Cargo helper tools with native C# package
+ management (#5569)
+
+Upstream-Commit: 83efec6156d01bd67cab4213c79dd7150d92bc08
+Upstream-PR: Devolutions/UniGetUI#5569
+Classic-Source-Commit: f7ee23cb888477e746459982bfc7bde7cfe2183d
+
+---
+ src/UniGetUI.Core.Data/Licenses.cs               | 12 +++---------
+ .../OverridenInstallationOptions.cs              |  4 +---
+ .../IManagedPackageOperationHelper.cs            | 16 ++++++++++++++++
+ 3 files changed, 20 insertions(+), 12 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Interfaces/ManagerHelpers/IManagedPackageOperationHelper.cs
+
+diff --git a/src/UniGetUI.Core.Data/Licenses.cs b/src/UniGetUI.Core.Data/Licenses.cs
+index b2b8d45e00c3daf635d1e77236bf5e45e52492da..8007ad217645f45b824300ac623b11e7a157444e 100644
+--- a/src/UniGetUI.Core.Data/Licenses.cs
++++ b/src/UniGetUI.Core.Data/Licenses.cs
+@@ -12,6 +12,7 @@ namespace UniGetUI.Core.Data
+             { "Windows App Sdk", "MIT" },
+             { "PhotoSauce.MagicScaler", "MIT" },
+             { "YamlDotNet", "MIT" },
++            { "Tomlyn", "BSD-2-Clause" },
+             { "InnoDependencyInstaller", "CPOL 1.02" },
+             // Package managers and related
+             { "WinGet", "MIT" },
+@@ -24,8 +25,6 @@ namespace UniGetUI.Core.Data
+             { "PowerShell Gallery", "Unknown" },
+             { ".NET SDK", "MIT" },
+             { "Cargo", "MIT" },
+-            { "cargo-binstall", "GPL-3.0-only" },
+-            { "cargo-update", "MIT" },
+             { "vcpkg", "MIT" },
+             // Other
+             { "GSudo", "MIT" },
+@@ -58,6 +57,7 @@ namespace UniGetUI.Core.Data
+                 "YamlDotNet",
+                 new Uri("https://github.com/aaubry/YamlDotNet/blob/master/LICENSE.txt")
+             },
++            { "Tomlyn", new Uri("https://github.com/xoofx/tomlyn/blob/main/license.txt") },
+             {
+                 "InnoDependencyInstaller",
+                 new Uri(
+@@ -83,11 +83,6 @@ namespace UniGetUI.Core.Data
+             { ".NET SDK", new Uri("https://github.com/dotnet/sdk/blob/main/LICENSE.TXT") },
+             { "PowerShell Gallery", new Uri("https://www.powershellgallery.com/") },
+             { "Cargo", new Uri("https://github.com/rust-lang/cargo/blob/master/LICENSE-MIT") },
+-            { "cargo-binstall", new Uri("https://spdx.org/licenses/GPL-3.0-only.html") },
+-            {
+-                "cargo-update",
+-                new Uri("https://github.com/nabijaczleweli/cargo-update/blob/master/LICENSE")
+-            },
+             { "vcpkg", new Uri("https://github.com/microsoft/vcpkg/blob/master/LICENSE.txt") },
+             // Other
+             { "GSudo", new Uri("https://github.com/gerardog/gsudo/blob/master/LICENSE.txt") },
+@@ -108,6 +103,7 @@ namespace UniGetUI.Core.Data
+             { "Windows App Sdk", new Uri("https://github.com/microsoft/WindowsAppSDK/") },
+             { "PhotoSauce.MagicScaler", new Uri("https://github.com/saucecontrol/PhotoSauce/") },
+             { "YamlDotNet", new Uri("https://github.com/aaubry/YamlDotNet/") },
++            { "Tomlyn", new Uri("https://github.com/xoofx/tomlyn/") },
+             {
+                 "InnoDependencyInstaller",
+                 new Uri("https://github.com/DomGries/InnoDependencyInstaller")
+@@ -126,8 +122,6 @@ namespace UniGetUI.Core.Data
+             { ".NET SDK", new Uri("https://dotnet.microsoft.com/") },
+             { "PowerShell Gallery", new Uri("https://www.powershellgallery.com/") },
+             { "Cargo", new Uri("https://github.com/rust-lang/cargo") },
+-            { "cargo-binstall", new Uri("https://github.com/cargo-bins/cargo-binstall") },
+-            { "cargo-update", new Uri("https://github.com/nabijaczleweli/cargo-update/") },
+             { "vcpkg", new Uri("https://github.com/microsoft/vcpkg") },
+             // Other
+             { "GSudo", new Uri("https://github.com/gerardog/gsudo/") },
+diff --git a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+index 5b7a01178d4bc3f9c77927f3d8411aa3fa60321d..979c9e2b0ec7d7e08744801dff41ae366b7b7b3a 100644
+--- a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
++++ b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+@@ -11,8 +11,6 @@ public struct OverridenInstallationOptions
+     public bool Pip_BreakSystemPackages = false;
+     public bool WinGet_DropArchAndScope = false;
+     public bool WinGet_UseLocalIdentifier = false;
+-    public bool Cargo_DoNotUseBinstall = false;
+-    public bool Cargo_CustomInstallPathRequested = false;
+ 
+     public OverridenInstallationOptions(string? scope = null, bool? runAsAdministrator = null)
+     {
+@@ -22,6 +20,6 @@ public struct OverridenInstallationOptions
+ 
+     public override string ToString()
+     {
+-        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};PS_AllowClobber={PowerShell_AllowClobber};PS_UpdateThroughInstall={PowerShell_UpdateThroughInstall};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope};WG_UseLocalId={WinGet_UseLocalIdentifier};Cargo_DoNotUseBinstall={Cargo_DoNotUseBinstall};Cargo_CustomInstallPath={Cargo_CustomInstallPathRequested}>";
++        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};PS_AllowClobber={PowerShell_AllowClobber};PS_UpdateThroughInstall={PowerShell_UpdateThroughInstall};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope};WG_UseLocalId={WinGet_UseLocalIdentifier}>";
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Interfaces/ManagerHelpers/IManagedPackageOperationHelper.cs b/src/UniGetUI.PackageEngine.Interfaces/ManagerHelpers/IManagedPackageOperationHelper.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6846d8030b0d4f2579578d41e9af9b2f1469a3dd
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Interfaces/ManagerHelpers/IManagedPackageOperationHelper.cs
+@@ -0,0 +1,16 @@
++using UniGetUI.PackageEngine.Enums;
++using UniGetUI.PackageEngine.Serializable;
++
++namespace UniGetUI.PackageEngine.Interfaces.ManagerProviders;
++
++/// <summary>An optional local execution path; null selects the ordinary manager process.</summary>
++public interface IManagedPackageOperationHelper
++{
++    Task<OperationVeredict?> TryPerformAsync(
++        IPackage package,
++        InstallOptions options,
++        OperationType operation,
++        Action<string> log,
++        Action<OperationProgress> progress,
++        CancellationToken cancellationToken);
++}
+-- 
+2.56.0
+

@@ -2,7 +2,7 @@ name: Classic patch stack
 
 on:
   push:
-    branches: [main]
+    branches: [main, "backport/**-updates"]
     paths:
       - '.gitattributes'
       - 'maintenance/upstream-base.json'

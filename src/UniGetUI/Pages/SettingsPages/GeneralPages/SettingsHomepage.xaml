@@ -33,6 +33,7 @@
 
       <widgets:SettingsPageButton
         x:Name="InterfaceSettingsExpander"
+        AutomationProperties.AutomationId="InterfaceSettingsEntry"
         Click="Interface"
         CornerRadius="8,8,0,0"
         Icon="interactive"

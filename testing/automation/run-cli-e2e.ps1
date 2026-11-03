@@ -997,17 +997,53 @@ try {
     Wait-ForInstalledPackage -Fixture $specificUpdateFixture -ExpectedVersion ([string]$fixtureState[$specificUpdateFixture.manager].latestVersion) | Out-Null
     Add-Tested 'package update'
 
-    $updateManager = Invoke-CliFailure -Arguments @('package', 'update-manager', '--manager', [string]$bundleFixture.manager)
-    if ($updateManager.Text -notmatch 'cannot update manager packages') {
-        throw "package update-manager did not report the expected headless limitation: $($updateManager.Text)"
-    }
-    Add-Tested 'package update-manager' 'expected-failure'
+    # Both bulk updates are scoped to a fixture manager: an unscoped update-all would update
+    # whatever else the runner image has installed.
+    foreach ($bulkUpdate in @(
+            @{ Command = 'update-manager'; Role = 'update-manager' },
+            @{ Command = 'update-all'; Role = 'update-all' }
+        )) {
+        $bulkFixture = Get-ManifestManagerByRole -Role $bulkUpdate.Role
+        if ($null -eq $bulkFixture) {
+            throw "The CLI E2E manifest must define a package manager fixture with the $($bulkUpdate.Role) role."
+        }
 
-    $updateAll = Invoke-CliFailure -Arguments @('package', 'update-all')
-    if ($updateAll.Text -notmatch 'cannot update all packages') {
-        throw "package update-all did not report the expected headless limitation: $($updateAll.Text)"
+        # Restore the old fixture version so each bulk command must perform a real update.
+        $removeOldFixture = Invoke-CliJson -Arguments (@('package', 'uninstall') + (Get-PackageArguments -Fixture $bulkFixture -IncludeSource))
+        Assert-JsonCommandSucceeded -Response $removeOldFixture -Label "prepare $($bulkUpdate.Command): uninstall $($bulkFixture.packageId)"
+        if (-not [string]::IsNullOrWhiteSpace($removeOldFixture.operationId)) {
+            $waitedRemoval = Invoke-CliJson -Arguments @('operation', 'wait', '--id', [string]$removeOldFixture.operationId, '--timeout', '300', '--delay', '1')
+            if ($waitedRemoval.operation.status -ne 'succeeded') {
+                throw "Preparing $($bulkUpdate.Command) could not remove $($bulkFixture.packageId): $($waitedRemoval | ConvertTo-Json -Depth 10)"
+            }
+        }
+        Invoke-CliJson -Arguments @('manager', 'reload', '--manager', [string]$bulkFixture.manager) | Out-Null
+        Wait-ForPackageRemoval -Fixture $bulkFixture | Out-Null
+        $restoreOldFixture = Invoke-CliJson -Arguments (@('package', 'install') + (Get-PackageArguments -Fixture $bulkFixture -IncludeVersion -IncludeSource))
+        Assert-JsonCommandSucceeded -Response $restoreOldFixture -Label "prepare $($bulkUpdate.Command): install $($bulkFixture.packageId)"
+        Wait-ForInstalledPackage -Fixture $bulkFixture -ExpectedVersion $bulkFixture.installVersion | Out-Null
+        Invoke-CliJson -Arguments @('manager', 'reload', '--manager', [string]$bulkFixture.manager) | Out-Null
+        Wait-ForPackageUpdateVisibility -Fixture $bulkFixture | Out-Null
+
+        $bulkResult = Invoke-CliJson -Arguments @('package', $bulkUpdate.Command, '--manager', [string]$bulkFixture.manager, '--wait', 'true', '--timeout', '600')
+        Assert-JsonCommandSucceeded -Response $bulkResult -Label "package $($bulkUpdate.Command) $($bulkFixture.manager)"
+        if (-not $bulkResult.completed) {
+            throw "package $($bulkUpdate.Command) did not wait for its updates: $($bulkResult | ConvertTo-Json -Depth 10)"
+        }
+        if (@($bulkResult.results | Where-Object { $_.package.manager -ne $bulkFixture.manager }).Count -ne 0) {
+            throw "package $($bulkUpdate.Command) --manager $($bulkFixture.manager) queued updates for another manager: $($bulkResult | ConvertTo-Json -Depth 10)"
+        }
+        if (@($bulkResult.results | Where-Object { $_.package.id -eq $bulkFixture.packageId -and $_.operationStatus -eq 'succeeded' }).Count -ne 1) {
+            throw "package $($bulkUpdate.Command) did not update $($bulkFixture.packageId): $($bulkResult | ConvertTo-Json -Depth 10)"
+        }
+        Wait-ForInstalledPackage -Fixture $bulkFixture -ExpectedVersion ([string]$fixtureState[$bulkFixture.manager].latestVersion) | Out-Null
+        Add-Tested "package $($bulkUpdate.Command)"
     }
-    Add-Tested 'package update-all' 'expected-failure'
+
+    $unknownManagerUpdate = Invoke-CliFailure -Arguments @('package', 'update-all', '--manager', 'no-such-manager')
+    if ($unknownManagerUpdate.Text -notmatch 'No package manager matching') {
+        throw "package update-all did not reject an unknown manager: $($unknownManagerUpdate.Text)"
+    }
 
     $reinstall = Invoke-CliJson -Arguments (@('package', 'reinstall') + (Get-PackageArguments -Fixture $bundleFixture -IncludeSource))
     Assert-JsonCommandSucceeded -Response $reinstall -Label 'package reinstall'

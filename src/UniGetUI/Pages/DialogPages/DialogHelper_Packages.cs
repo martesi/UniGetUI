@@ -104,10 +104,11 @@ public static partial class DialogHelper
     public static async Task ShowPackageDetails(
         IPackage package,
         OperationType operation,
-        TEL_InstallReferral referral
+        TEL_InstallReferral referral,
+        string? requestedVersion = null
     )
     {
-        PackageDetailsPage DetailsPage = new(package, operation, referral);
+        PackageDetailsPage DetailsPage = new(package, operation, referral, requestedVersion);
 
         ContentDialog DetailsDialog = DialogFactory.Create_AsWindow(false);
         DetailsDialog.Content = DetailsPage;

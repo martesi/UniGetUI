@@ -1,0 +1,95 @@
+From ff7c50ef13bb2f0d3ddbb8e25afbcfaf2c97ce5f Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:43:46 +0800
+Subject: [PATCH] backport: Honor BUN_INSTALL and BUN_INSTALL_GLOBAL_DIR when
+ locating Bun global packages (#4918) (#5532)
+
+Upstream-Commit: cbf6351f3ed2abf864ec97006e8f809524d90f6d
+Upstream-PR: Devolutions/UniGetUI#4918
+Classic-Source-Commit: ff7c50ef13bb2f0d3ddbb8e25afbcfaf2c97ce5f
+
+---
+ .../Bun.cs                                    | 19 +++++++++-
+ .../BunManagerTests.cs                        | 36 +++++++++++++++++++
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs b/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
+index 5210d01c00b5262a1031e73e290deaf646858b9d..70054c0b0d789b8c8402a60539a766e0ee130afa 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
+@@ -207,7 +207,24 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
+         }
+ 
+         internal static string GetGlobalPackagesDirectory(string userProfile)
+-            => Path.Combine(userProfile, ".bun", "install", "global");
++            => GetGlobalPackagesDirectory(userProfile, Environment.GetEnvironmentVariable);
++
++        // Mirrors Bun's own lookup order: BUN_INSTALL_GLOBAL_DIR, then $BUN_INSTALL/install/global,
++        // then ~/.bun/install/global.
++        internal static string GetGlobalPackagesDirectory(
++            string userProfile,
++            Func<string, string?> getEnvironmentVariable)
++        {
++            string? globalDir = getEnvironmentVariable("BUN_INSTALL_GLOBAL_DIR");
++            if (!string.IsNullOrEmpty(globalDir))
++                return globalDir;
++
++            string? bunInstall = getEnvironmentVariable("BUN_INSTALL");
++            if (!string.IsNullOrEmpty(bunInstall))
++                return Path.Combine(bunInstall, "install", "global");
++
++            return Path.Combine(userProfile, ".bun", "install", "global");
++        }
+ 
+         internal static bool HasGlobalPackageManifest(string globalDir)
+             => Directory.Exists(globalDir) && File.Exists(Path.Combine(globalDir, "package.json"));
+diff --git a/src/UniGetUI.PackageEngine.Tests/BunManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/BunManagerTests.cs
+index 913b231cef269f65bbbeb041ed0765ba99c53570..5592c5a2ce772a03d1300139314c80ea2a309435 100644
+--- a/src/UniGetUI.PackageEngine.Tests/BunManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/BunManagerTests.cs
+@@ -757,6 +757,42 @@ public sealed class BunManagerTests
+         }
+     }
+ 
++    /// <summary>
++    /// Tests the global packages directory follows Bun's lookup order for its environment variables.
++    /// </summary>
++    [Fact]
++    public void GetGlobalPackagesDirectoryHonorsBunEnvironmentVariables()
++    {
++        string userProfile = Path.Combine("home", "user");
++        string globalDir = Path.Combine("custom", "global");
++        string bunInstall = Path.Combine("scoop", "persist", "bun");
++
++        Assert.Equal(
++            globalDir,
++            Bun.GetGlobalPackagesDirectory(
++                userProfile,
++                name => name switch
++                {
++                    "BUN_INSTALL_GLOBAL_DIR" => globalDir,
++                    "BUN_INSTALL" => bunInstall,
++                    _ => null,
++                }));
++
++        Assert.Equal(
++            Path.Combine(bunInstall, "install", "global"),
++            Bun.GetGlobalPackagesDirectory(
++                userProfile,
++                name => name == "BUN_INSTALL" ? bunInstall : null));
++
++        Assert.Equal(
++            Path.Combine(userProfile, ".bun", "install", "global"),
++            Bun.GetGlobalPackagesDirectory(userProfile, _ => null));
++
++        Assert.Equal(
++            Path.Combine(userProfile, ".bun", "install", "global"),
++            Bun.GetGlobalPackagesDirectory(userProfile, _ => ""));
++    }
++
+     /// <summary>
+     /// Tests Bun install location defaults to the global Bun node_modules directory.
+     /// </summary>
+-- 
+2.56.0
+

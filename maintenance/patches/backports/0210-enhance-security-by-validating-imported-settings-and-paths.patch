@@ -1,0 +1,1908 @@
+From e190be14da35b715d146c92b751c073fbf89652e Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:28:23 +0800
+Subject: [PATCH] backport: Enhance security by validating imported settings
+ and paths (#5346)
+
+Upstream-Commit: 566ea0c2d92120fbe63038c43ea80d75f297e3e7
+Upstream-PR: Devolutions/UniGetUI#5346
+Classic-Source-Commit: e190be14da35b715d146c92b751c073fbf89652e
+
+---
+ src/UniGetUI.Core.Data/CoreData.cs            |  23 ++
+ .../IconCacheEngineTests.cs                   |  49 ++-
+ .../IconCacheEngine.cs                        |  29 +-
+ .../SecureSettings.cs                         | 111 +++++-
+ .../SecureSettingsTests.cs                    |  94 +++++
+ .../SettingsImportExportTests.cs              | 353 ++++++++++++++++++
+ .../SettingsEngine_ImportExport.cs            | 188 ++++++++--
+ .../InstallerFileNamingTests.cs               | 270 ++++++++++++++
+ src/UniGetUI.Core.Tools.Tests/MetaTests.cs    |  24 ++
+ src/UniGetUI.Core.Tools.Tests/ToolsTests.cs   |  47 +++
+ .../InstallerFileNaming.cs                    |   4 +-
+ src/UniGetUI.Core.Tools/Tools.cs              |  62 ++-
+ src/UniGetUI.Interface.IpcApi/IpcClient.cs    |   2 +-
+ src/UniGetUI.Interface.IpcApi/IpcTransport.cs |   4 +-
+ .../Packages/Classes/InstallOptionsFactory.cs | 110 +++++-
+ .../Packages/Package.cs                       |   6 +-
+ .../InstallOptionsFactoryTests.cs             | 186 +++++++++
+ 17 files changed, 1497 insertions(+), 65 deletions(-)
+ create mode 100644 src/UniGetUI.Core.Tools.Tests/InstallerFileNamingTests.cs
+
+diff --git a/src/UniGetUI.Core.Data/CoreData.cs b/src/UniGetUI.Core.Data/CoreData.cs
+index af0c8211d64b52317f52ff0a6f314f805c116d0e..1d603bcd88b2ae9ec673ffd1fc3f3b02d09e5a88 100644
+--- a/src/UniGetUI.Core.Data/CoreData.cs
++++ b/src/UniGetUI.Core.Data/CoreData.cs
+@@ -232,6 +232,29 @@ namespace UniGetUI.Core.Data
+             }
+         }
+ 
++        private static string[]? _sanitizedProcessArguments;
++
++        /// <summary>
++        /// Records the process arguments after startup has removed anything that could only
++        /// have been injected, so later consumers do not have to re-read the raw OS command
++        /// line. The executable path is preserved so the shape matches
++        /// Environment.GetCommandLineArgs().
++        /// </summary>
++        public static void SetSanitizedProcessArguments(string[] args)
++        {
++            string[] raw = Environment.GetCommandLineArgs();
++            _sanitizedProcessArguments = raw.Length > 0 ? [raw[0], .. args] : [.. args];
++        }
++
++        /// <summary>
++        /// The sanitized process arguments when startup has published them, and the raw OS
++        /// command line otherwise.
++        /// </summary>
++        public static string[] GetProcessArguments()
++        {
++            return _sanitizedProcessArguments ?? Environment.GetCommandLineArgs();
++        }
++
+         /// <summary>
+         /// The directory where the installation options are stored. The directory is automatically created if it does not exist.
+         /// </summary>
+diff --git a/src/UniGetUI.Core.IconEngine.Tests/IconCacheEngineTests.cs b/src/UniGetUI.Core.IconEngine.Tests/IconCacheEngineTests.cs
+index 9b6391ff5faa86bc666882eabf874be9bea94469..2dc43e55ffa49b8122a3a3b57265b8c404dae586 100644
+--- a/src/UniGetUI.Core.IconEngine.Tests/IconCacheEngineTests.cs
++++ b/src/UniGetUI.Core.IconEngine.Tests/IconCacheEngineTests.cs
+@@ -10,6 +10,39 @@ namespace UniGetUI.Core.IconEngine.Tests
+         private const string ElevenClockIconUrl =
+             "https://raw.githubusercontent.com/Devolutions/UniGetUI/main/src/UniGetUI.Core.IconEngine.Tests/TestData/elevenclock.png";
+ 
++        [Theory]
++        [InlineData(@"..\..\..\evil")]
++        [InlineData("../../evil")]
++        [InlineData("..")]
++        [InlineData("CON")]
++        [InlineData("icon. ")]
++        [InlineData("")]
++        public static void GetIconCacheDirectory_StaysInsideTheIconCache(string packageId)
++        {
++            string root = Path.GetFullPath(CoreData.UniGetUICacheDirectory_Icons);
++            string resolved = Path.GetFullPath(
++                IconCacheEngine.GetIconCacheDirectory("TestManager", packageId)
++            );
++
++            Assert.StartsWith(root + Path.DirectorySeparatorChar, resolved, StringComparison.Ordinal);
++            Assert.Equal(
++                Path.Combine(root, "TestManager"),
++                Path.GetDirectoryName(resolved)
++            );
++        }
++
++        [Fact]
++        public static void GetIconCacheDirectory_KeepsLossilySanitisedIdsApart()
++        {
++            string[] colliding = ["A/B", "AB", "CON", "_CON", "icon. ", "icon"];
++
++            var directories = colliding
++                .Select(id => IconCacheEngine.GetIconCacheDirectory("TestManager", id))
++                .ToList();
++
++            Assert.Equal(colliding.Length, directories.Distinct(StringComparer.Ordinal).Count());
++        }
++
+         [Fact]
+         public static void TestCacheEngineForSha256()
+         {
+@@ -91,9 +124,7 @@ namespace UniGetUI.Core.IconEngine.Tests
+ 
+             string extension = ICON_1.ToString().Split(".")[^1];
+             string expectedFile = Path.Join(
+-                CoreData.UniGetUICacheDirectory_Icons,
+-                managerName,
+-                packageId,
++                IconCacheEngine.GetIconCacheDirectory(managerName, packageId),
+                 $"icon.{extension}"
+             );
+             if (File.Exists(expectedFile))
+@@ -147,9 +178,7 @@ namespace UniGetUI.Core.IconEngine.Tests
+ 
+             string extension = URI.ToString().Split(".")[^1];
+             string expectedFile = Path.Join(
+-                CoreData.UniGetUICacheDirectory_Icons,
+-                MANAGER_NAME,
+-                PACKAGE_ID,
++                IconCacheEngine.GetIconCacheDirectory(MANAGER_NAME, PACKAGE_ID),
+                 $"icon.{extension}"
+             );
+             if (File.Exists(expectedFile))
+@@ -202,9 +231,7 @@ namespace UniGetUI.Core.IconEngine.Tests
+ 
+             string extension = URI_1.ToString().Split(".")[^1];
+             string expectedFile = Path.Join(
+-                CoreData.UniGetUICacheDirectory_Icons,
+-                managerName,
+-                packageId,
++                IconCacheEngine.GetIconCacheDirectory(managerName, packageId),
+                 $"icon.{extension}"
+             );
+             if (File.Exists(expectedFile))
+@@ -255,9 +282,7 @@ namespace UniGetUI.Core.IconEngine.Tests
+             // Clear any cache for reproducible data
+             string extension = ICON_1.ToString().Split(".")[^1];
+             string expectedFile = Path.Join(
+-                CoreData.UniGetUICacheDirectory_Icons,
+-                managerName,
+-                packageId,
++                IconCacheEngine.GetIconCacheDirectory(managerName, packageId),
+                 $"icon.{extension}"
+             );
+             if (File.Exists(expectedFile))
+diff --git a/src/UniGetUI.Core.IconStore/IconCacheEngine.cs b/src/UniGetUI.Core.IconStore/IconCacheEngine.cs
+index 3fb7e9cb426a4f264839c5f757905e79402fb9af..8a007bede300ee6de67237428f589d22f9e0c91a 100644
+--- a/src/UniGetUI.Core.IconStore/IconCacheEngine.cs
++++ b/src/UniGetUI.Core.IconStore/IconCacheEngine.cs
+@@ -1,5 +1,6 @@
+ using System.Collections.ObjectModel;
+ using System.Security.Cryptography;
++using System.Text;
+ using PhotoSauce.MagicScaler;
+ using UniGetUI.Core.Classes;
+ using UniGetUI.Core.Data;
+@@ -115,6 +116,28 @@ namespace UniGetUI.Core.IconEngine
+                 cacheInterval
+             );
+ 
++        /// <summary>
++        /// The directory a package's cached icon lives in. The readable components are lossy,
++        /// so a hash of the raw identity keeps distinct packages apart.
++        /// </summary>
++        public static string GetIconCacheDirectory(string managerName, string packageId)
++        {
++            return Path.Join(
++                CoreData.UniGetUICacheDirectory_Icons,
++                CoreTools.MakeValidFileName(managerName),
++                $"{CoreTools.MakeValidFileName(packageId)}_{IdentityHash(managerName, packageId)}"
++            );
++        }
++
++        private static string IdentityHash(string managerName, string packageId)
++        {
++            byte[] digest = SHA256.HashData(
++                Encoding.UTF8.GetBytes(string.Join('\u0000', managerName, packageId))
++            );
++
++            return Convert.ToHexString(digest.AsSpan(0, 8)).ToLowerInvariant();
++        }
++
+         private static string? _getCacheOrDownloadIcon(
+             CacheableIcon? _icon,
+             string ManagerName,
+@@ -129,11 +152,7 @@ namespace UniGetUI.Core.IconEngine
+             if (icon.IsLocalPath)
+                 return icon.LocalPath;
+ 
+-            string iconLocation = Path.Join(
+-                CoreData.UniGetUICacheDirectory_Icons,
+-                ManagerName,
+-                PackageId
+-            );
++            string iconLocation = GetIconCacheDirectory(ManagerName, PackageId);
+             if (!Directory.Exists(iconLocation))
+                 Directory.CreateDirectory(iconLocation);
+             string iconVersionFile = Path.Join(iconLocation, $"icon.version");
+diff --git a/src/UniGetUI.Core.SecureSettings/SecureSettings.cs b/src/UniGetUI.Core.SecureSettings/SecureSettings.cs
+index e5c8480612657b703c74bfe43c6c20488fe4f183..e0fd9613d4cf0df6fcaf6bdda7c7ab487c986feb 100644
+--- a/src/UniGetUI.Core.SecureSettings/SecureSettings.cs
++++ b/src/UniGetUI.Core.SecureSettings/SecureSettings.cs
+@@ -59,6 +59,18 @@ public static class SecureSettings
+ 
+     public static bool GetForUser(string username, string setting)
+     {
++        if (
++            !TryResolveSecureSettingPath(
++                username,
++                setting,
++                out string settingsLocation,
++                out string settingFile
++            )
++        )
++        {
++            return false;
++        }
++
+         string purifiedSetting = CoreTools.MakeValidFileName(setting);
+         string purifiedUser = CoreTools.MakeValidFileName(username);
+         string cacheKey = $"{purifiedUser}|{purifiedSetting}";
+@@ -67,9 +79,6 @@ public static class SecureSettings
+             return value;
+         }
+ 
+-        var settingsLocation = Path.Join(GetSecureSettingsRoot(), purifiedUser);
+-        var settingFile = Path.Join(settingsLocation, purifiedSetting);
+-
+         if (!Directory.Exists(settingsLocation))
+         {
+             _cache[cacheKey] = false;
+@@ -120,8 +129,21 @@ public static class SecureSettings
+             string purifiedUser = CoreTools.MakeValidFileName(username);
+             _cache.TryRemove($"{purifiedUser}|{purifiedSetting}", out _);
+ 
+-            var settingsLocation = Path.Join(GetSecureSettingsRoot(), purifiedUser);
+-            var settingFile = Path.Join(settingsLocation, purifiedSetting);
++            if (
++                !TryResolveSecureSettingPath(
++                    username,
++                    setting,
++                    out string settingsLocation,
++                    out string settingFile
++                )
++            )
++            {
++                Console.WriteLine(
++                    $"Refused a secure setting path outside the secure settings root: "
++                        + $"user='{username}', setting='{setting}'"
++                );
++                return -1;
++            }
+ 
+             if (!Directory.Exists(settingsLocation))
+             {
+@@ -149,6 +171,85 @@ public static class SecureSettings
+         }
+     }
+ 
++    private static bool TryResolveSecureSettingPath(
++        string username,
++        string setting,
++        out string settingsLocation,
++        out string settingFile
++    )
++    {
++        settingsLocation = string.Empty;
++        settingFile = string.Empty;
++
++        if (!IsSafeRawComponent(username) || !IsSafeRawComponent(setting))
++            return false;
++
++        string purifiedUser = CoreTools.MakeValidFileName(username);
++        string purifiedSetting = CoreTools.MakeValidFileName(setting);
++
++        if (!IsSafePathComponent(purifiedUser) || !IsSafePathComponent(purifiedSetting))
++            return false;
++
++        string root = Path.GetFullPath(GetSecureSettingsRoot());
++        string location = Path.GetFullPath(Path.Join(root, purifiedUser));
++        string file = Path.GetFullPath(Path.Join(location, purifiedSetting));
++
++        if (!IsDirectChildOf(location, root) || !IsDirectChildOf(file, location))
++            return false;
++
++        if (!purifiedUser.Equals(Path.GetFileName(location), StringComparison.Ordinal))
++            return false;
++
++        if (!purifiedSetting.Equals(Path.GetFileName(file), StringComparison.Ordinal))
++            return false;
++
++        if (
++            IsLink(new DirectoryInfo(root))
++            || IsLink(new DirectoryInfo(location))
++            || IsLink(new FileInfo(file))
++        )
++            return false;
++
++        settingsLocation = location;
++        settingFile = file;
++        return true;
++    }
++
++    private static bool IsSafeRawComponent(string value)
++    {
++        return !string.IsNullOrWhiteSpace(value)
++            && !value.All(character => character is '.' || char.IsWhiteSpace(character));
++    }
++
++    private static bool IsSafePathComponent(string value)
++    {
++        return !string.IsNullOrWhiteSpace(value)
++            && value is not ("." or "..")
++            && value.Equals(Path.GetFileName(value), StringComparison.Ordinal);
++    }
++
++    private static bool IsLink(FileSystemInfo entry)
++    {
++        try
++        {
++            return entry.LinkTarget is not null;
++        }
++        catch
++        {
++            return true;
++        }
++    }
++
++    private static bool IsDirectChildOf(string candidate, string parent)
++    {
++        return string.Equals(
++            Path.GetDirectoryName(candidate),
++            parent.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
++            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase
++                : StringComparison.Ordinal
++        );
++    }
++
+     private static string GetSecureSettingsRoot()
+     {
+         if (TEST_SecureSettingsRootOverride is not null)
+diff --git a/src/UniGetUI.Core.Settings.Tests/SecureSettingsTests.cs b/src/UniGetUI.Core.Settings.Tests/SecureSettingsTests.cs
+index c8c67e8d91b1ecc1dc95bfed4731b5953b0ec3c3..8a1e9cb29029327baaf85ffac6b3063545aa5dc7 100644
+--- a/src/UniGetUI.Core.Settings.Tests/SecureSettingsTests.cs
++++ b/src/UniGetUI.Core.Settings.Tests/SecureSettingsTests.cs
+@@ -122,6 +122,100 @@ public sealed class SecureSettingsTests : IDisposable
+         }
+     }
+ 
++    [Theory]
++    [InlineData("..", "AllowCLIArguments")]
++    [InlineData("CurrentUser", "..")]
++    [InlineData("..", "..")]
++    [InlineData("", "AllowCLIArguments")]
++    [InlineData("CurrentUser", "")]
++    [InlineData("   ", "AllowCLIArguments")]
++    public void ApplyForUser_RefusesComponentsThatEscapeTheSecureSettingsRoot(
++        string username,
++        string setting
++    )
++    {
++        string parent = Directory.GetParent(_testRoot)!.FullName;
++        string[] before = Directory.GetFileSystemEntries(parent);
++
++        int result = SecureSettingsStore.ApplyForUser(username, setting, true);
++
++        Assert.NotEqual(0, result);
++        Assert.Equal(before.Length, Directory.GetFileSystemEntries(parent).Length);
++    }
++
++    [Theory]
++    [InlineData("..", "AllowCLIArguments")]
++    [InlineData("CurrentUser", "..")]
++    [InlineData("", "")]
++    public void GetForUser_RefusesComponentsThatEscapeTheSecureSettingsRoot(
++        string username,
++        string setting
++    )
++    {
++        Assert.False(SecureSettingsStore.GetForUser(username, setting));
++    }
++
++    [Fact]
++    public void ApplyForUser_StillWritesInsideTheSecureSettingsRoot()
++    {
++        int result = SecureSettingsStore.ApplyForUser("CurrentUser", "AllowCLIArguments", true);
++
++        Assert.Equal(0, result);
++        Assert.True(
++            File.Exists(Path.Combine(_testRoot, "CurrentUser", "AllowCLIArguments"))
++        );
++        Assert.True(SecureSettingsStore.GetForUser("CurrentUser", "AllowCLIArguments"));
++    }
++
++    [Fact]
++    public void GetForUser_InvalidComponentsDoNotAliasACachedValidEntry()
++    {
++        const string setting = "AllowCLIArguments";
++
++        Assert.Equal(0, SecureSettingsStore.ApplyForUser("_", setting, true));
++        Assert.True(SecureSettingsStore.GetForUser("_", setting));
++
++        Assert.False(SecureSettingsStore.GetForUser("..", setting));
++        Assert.False(SecureSettingsStore.GetForUser(".", setting));
++        Assert.False(SecureSettingsStore.GetForUser("   ", setting));
++
++        Assert.True(SecureSettingsStore.GetForUser("_", setting));
++    }
++
++    [Fact]
++    public void GetForUser_InvalidComponentsDoNotPoisonTheCacheForValidOnes()
++    {
++        const string setting = "AllowCLIArguments";
++
++        Assert.False(SecureSettingsStore.GetForUser("..", setting));
++
++        Assert.Equal(0, SecureSettingsStore.ApplyForUser("_", setting, true));
++        Assert.True(SecureSettingsStore.GetForUser("_", setting));
++    }
++
++    [Fact]
++    public void ApplyForUser_RefusesWhenTheUserDirectoryIsALink()
++    {
++        string outside = Path.Combine(Path.GetTempPath(), $"outside-{Guid.NewGuid():N}");
++        Directory.CreateDirectory(outside);
++        string linked = Path.Combine(_testRoot, "LinkedUser");
++
++        try
++        {
++            Directory.CreateSymbolicLink(linked, outside);
++        }
++        catch
++        {
++            return;
++        }
++
++        int result = SecureSettingsStore.ApplyForUser("LinkedUser", "AllowCLIArguments", true);
++
++        Assert.NotEqual(0, result);
++        Assert.Empty(Directory.GetFiles(outside));
++        Directory.Delete(outside, recursive: true);
++    }
++
+     private string GetCurrentUserSettingsDirectory() =>
+         Path.Combine(_testRoot, CoreTools.MakeValidFileName(Environment.UserName));
+ 
+diff --git a/src/UniGetUI.Core.Settings.Tests/SettingsImportExportTests.cs b/src/UniGetUI.Core.Settings.Tests/SettingsImportExportTests.cs
+index 5dfa26833eecffaed2ebe43bbbbdb5b1bc4961a3..c6e1b66298e2aff3b1628aa25c9fa2e005796dc5 100644
+--- a/src/UniGetUI.Core.Settings.Tests/SettingsImportExportTests.cs
++++ b/src/UniGetUI.Core.Settings.Tests/SettingsImportExportTests.cs
+@@ -67,6 +67,359 @@ public sealed class SettingsImportExportTests : IDisposable
+         Assert.Equal("new-value", Settings.GetValue(Settings.K.FreshValue));
+     }
+ 
++    [Theory]
++    [InlineData(@"..\..\escaped.bat")]
++    [InlineData(@"..\escaped.bat")]
++    [InlineData("../../escaped.bat")]
++    [InlineData("..")]
++    [InlineData(".")]
++    [InlineData("")]
++    [InlineData("   ")]
++    [InlineData(@"nested\escaped.bat")]
++    [InlineData("nested/escaped.bat")]
++    [InlineData(@"C:\escaped.bat")]
++    [InlineData("escaped.bat:stream")]
++    public void ImportFromStringJson_DiscardsKeysThatAreNotPlainFileNames(string key)
++    {
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string>
++            {
++                [key] = "payload",
++                [Settings.ResolveKey(Settings.K.FreshValue)] = "legitimate",
++            }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.Equal("legitimate", Settings.GetValue(Settings.K.FreshValue));
++        Assert.Empty(
++            Directory.EnumerateFiles(_testRoot, "escaped.bat", SearchOption.AllDirectories)
++        );
++        Assert.DoesNotContain(
++            Directory.EnumerateFiles(CoreData.UniGetUIUserConfigurationDirectory),
++            file => File.ReadAllText(file) == "payload"
++        );
++    }
++
++    [Fact]
++    public void ImportFromStringJson_DoesNotWriteOutsideTheConfigurationDirectory()
++    {
++        string escaped = Path.Combine(_testRoot, "startup-payload.bat");
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string> { [@"..\..\startup-payload.bat"] = "@echo payload" }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.False(File.Exists(escaped));
++    }
++
++    [Theory]
++    [InlineData(@".\TelemetryClientToken")]
++    [InlineData(@"nested\..\TelemetryClientToken")]
++    [InlineData("./TelemetryClientToken")]
++    public void ImportFromStringJson_DiscardsPathQualifiedKeysTargetingExcludedFiles(string key)
++    {
++        string token = Path.Combine(
++            CoreData.UniGetUIUserConfigurationDirectory,
++            "TelemetryClientToken"
++        );
++        File.WriteAllText(token, "original-token");
++
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string> { [key] = "attacker-token" }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.Equal("original-token", File.ReadAllText(token));
++    }
++
++    [Fact]
++    public void ImportFromStringJson_DiscardsExcludedKeys()
++    {
++        string token = Path.Combine(
++            CoreData.UniGetUIUserConfigurationDirectory,
++            "TelemetryClientToken"
++        );
++        File.WriteAllText(token, "original-token");
++
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string>
++            {
++                ["TelemetryClientToken"] = "attacker-token",
++                ["CurrentSessionToken"] = "attacker-session",
++            }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.Equal("original-token", File.ReadAllText(token));
++        Assert.False(
++            File.Exists(
++                Path.Combine(CoreData.UniGetUIUserConfigurationDirectory, "CurrentSessionToken")
++            )
++        );
++    }
++
++    [Theory]
++    [InlineData("TelemetryClientToken ")]
++    [InlineData("TelemetryClientToken.")]
++    [InlineData("TelemetryClientToken..")]
++    [InlineData("telemetryclienttoken")]
++    [InlineData("TELEMETRYCLIENTTOKEN")]
++    public void ImportFromStringJson_DiscardsKeysThatCollideWithExcludedFiles(string key)
++    {
++        string token = Path.Combine(
++            CoreData.UniGetUIUserConfigurationDirectory,
++            "TelemetryClientToken"
++        );
++        File.WriteAllText(token, "original-token");
++
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string> { [key] = "attacker-token" }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.Equal("original-token", File.ReadAllText(token));
++    }
++
++    [Theory]
++    [InlineData("FreshValue ")]
++    [InlineData("FreshValue.")]
++    public void ImportFromStringJson_DiscardsKeysTheFileSystemWouldRewrite(string key)
++    {
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string> { [key] = "mangled" }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.NotEqual("mangled", Settings.GetValue(Settings.K.FreshValue));
++    }
++
++    [Theory]
++    [InlineData("CON")]
++    [InlineData("NUL")]
++    [InlineData("con")]
++    [InlineData("LPT1")]
++    [InlineData("COM1.json")]
++    public void ImportFromStringJson_DiscardsReservedDeviceNames(string key)
++    {
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string>
++            {
++                [key] = "payload",
++                [Settings.ResolveKey(Settings.K.FreshValue)] = "legitimate",
++            }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.Equal("legitimate", Settings.GetValue(Settings.K.FreshValue));
++        Assert.DoesNotContain(
++            Directory.EnumerateFiles(CoreData.UniGetUIUserConfigurationDirectory),
++            file => File.ReadAllText(file) == "payload"
++        );
++    }
++
++    [Theory]
++    [InlineData("TELEME~1")]
++    [InlineData("teleme~1")]
++    [InlineData("CURREN~1")]
++    public void ImportFromStringJson_DiscardsShortNameAliasesOfExcludedFiles(string key)
++    {
++        string token = Path.Combine(
++            CoreData.UniGetUIUserConfigurationDirectory,
++            "TelemetryClientToken"
++        );
++        File.WriteAllText(token, "original-token");
++
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string> { [key] = "attacker-token" }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.Equal("original-token", File.ReadAllText(token));
++    }
++
++    [Fact]
++    public void ImportFromStringJson_ContinuesWhenAKeyCollidesWithAnExistingDirectory()
++    {
++        Directory.CreateDirectory(
++            Path.Combine(
++                CoreData.UniGetUIUserConfigurationDirectory,
++                Settings.ResolveKey(Settings.K.Test1)
++            )
++        );
++
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string>
++            {
++                [Settings.ResolveKey(Settings.K.Test1)] = "payload",
++                [Settings.ResolveKey(Settings.K.FreshValue)] = "legitimate",
++            }
++        );
++
++        Assert.Throws<IOException>(() => Settings.ImportFromString_JSON(json));
++
++        Assert.Equal("legitimate", Settings.GetValue(Settings.K.FreshValue));
++        Assert.True(
++            Directory.Exists(
++                Path.Combine(
++                    CoreData.UniGetUIUserConfigurationDirectory,
++                    Settings.ResolveKey(Settings.K.Test1)
++                )
++            )
++        );
++    }
++
++    [Theory]
++    [InlineData("{ not json")]
++    [InlineData("")]
++    [InlineData("[1,2,3]")]
++    public void ImportFromStringJson_KeepsExistingSettingsWhenContentIsMalformed(string content)
++    {
++        Settings.SetValue(Settings.K.FreshValue, "must-survive");
++
++        Assert.ThrowsAny<Exception>(() => Settings.ImportFromString_JSON(content));
++
++        Assert.Equal("must-survive", Settings.GetValue(Settings.K.FreshValue));
++    }
++
++    [Theory]
++    [InlineData("NotARealSettingName")]
++    [InlineData("evil.bat")]
++    [InlineData("NotARealSettingName.json")]
++    public void ImportFromStringJson_DiscardsKeysThatAreNotKnownSettingNames(string key)
++    {
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string>
++            {
++                [key] = "payload",
++                [Settings.ResolveKey(Settings.K.FreshValue)] = "legitimate",
++            }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.Equal("legitimate", Settings.GetValue(Settings.K.FreshValue));
++        Assert.False(
++            File.Exists(Path.Combine(CoreData.UniGetUIUserConfigurationDirectory, key))
++        );
++    }
++
++    [Fact]
++    public void ImportFromStringJson_AcceptsKnownSettingNamesAndTheirJsonCompanions()
++    {
++        string listKey = $"{Settings.ResolveKey(Settings.K.FreshValue)}.json";
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string>
++            {
++                [Settings.ResolveKey(Settings.K.FreshValue)] = "kept",
++                [listKey] = "[]",
++            }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.Equal("kept", Settings.GetValue(Settings.K.FreshValue));
++        Assert.True(
++            File.Exists(Path.Combine(CoreData.UniGetUIUserConfigurationDirectory, listKey))
++        );
++    }
++
++    [Theory]
++    [InlineData("telemetryclienttoken")]
++    [InlineData("TELEMETRYCLIENTTOKEN")]
++    public void ExportToStringJson_ExcludesSensitiveFilesRegardlessOfCasing(string storedName)
++    {
++        File.WriteAllText(
++            Path.Combine(CoreData.UniGetUIUserConfigurationDirectory, storedName),
++            "secret"
++        );
++
++        var exported = JsonSerializer.Deserialize<Dictionary<string, string>>(
++            Settings.ExportToString_JSON()
++        );
++
++        Assert.NotNull(exported);
++        Assert.DoesNotContain("secret", exported!.Values);
++    }
++
++    [Theory]
++    [InlineData("freshvalue")]
++    [InlineData("FRESHVALUE")]
++    [InlineData("freshvalue.json")]
++    public void ImportFromStringJson_RequiresCanonicalCasingForKnownSettingNames(string key)
++    {
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string> { [key] = "payload" }
++        );
++
++        Settings.ImportFromString_JSON(json);
++
++        Assert.False(
++            File.Exists(Path.Combine(CoreData.UniGetUIUserConfigurationDirectory, key))
++        );
++    }
++
++    [Fact]
++    public void ImportFromStringJson_ThrowsWhenAWriteFailsInsteadOfReportingSuccess()
++    {
++        string blocked = Path.Combine(
++            CoreData.UniGetUIUserConfigurationDirectory,
++            Settings.ResolveKey(Settings.K.FreshValue)
++        );
++        Directory.CreateDirectory(blocked);
++
++        string json = JsonSerializer.Serialize(
++            new Dictionary<string, string>
++            {
++                [Settings.ResolveKey(Settings.K.FreshValue)] = "cannot-be-written",
++            }
++        );
++
++        Assert.ThrowsAny<Exception>(() => Settings.ImportFromString_JSON(json));
++    }
++
++    [Fact]
++    public void EveryKeyExportProducesIsAcceptedByImport()
++    {
++        string configuration = CoreData.UniGetUIUserConfigurationDirectory;
++
++        foreach (Settings.K key in Enum.GetValues<Settings.K>())
++        {
++            if (key is Settings.K.Unset)
++                continue;
++
++            string resolved = Settings.ResolveKey(key);
++            File.WriteAllText(Path.Combine(configuration, resolved), "value");
++            File.WriteAllText(Path.Combine(configuration, $"{resolved}.json"), "[]");
++        }
++
++        File.WriteAllText(Path.Combine(configuration, "PendingDesktopShortcuts.json"), "[]");
++        File.WriteAllText(Path.Combine(configuration, "PendingStartMenuShortcuts.json"), "[]");
++
++        var exported = JsonSerializer.Deserialize<Dictionary<string, string>>(
++            Settings.ExportToString_JSON()
++        );
++        Assert.NotNull(exported);
++
++        Settings.ImportFromString_JSON(JsonSerializer.Serialize(exported));
++
++        List<string> lost = exported!
++            .Keys.Where(key => !File.Exists(Path.Combine(configuration, key)))
++            .ToList();
++
++        Assert.True(
++            lost.Count is 0,
++            $"export produced keys that import discarded: {string.Join(", ", lost)}"
++        );
++    }
++
+     [Fact]
+     public void ImportFromFileJson_CopiesSourceWhenBackupLivesInSettingsDirectory()
+     {
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_ImportExport.cs b/src/UniGetUI.Core.Settings/SettingsEngine_ImportExport.cs
+index f24e95b6bc86be0c13e6da5a9283e69e3fcc5c06..33c726badc526010d20207a8133774014ce080e1 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_ImportExport.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_ImportExport.cs
+@@ -6,6 +6,72 @@ namespace UniGetUI.Core.SettingsEngine;
+ 
+ public partial class Settings
+ {
++    private static readonly string[] _nonPortableSettings =
++    [
++        "OperationHistory",
++        "OperationHistory.json",
++        "WinGetAlreadyUpgradedPackages.json",
++        "WinGetUpgradeAttempts.json",
++        "MaintenanceTaskLastRun.json",
++        "MaintenanceTaskLastFailure.json",
++        "MaintenanceSchedules.invalid",
++        "KnownLocalBackupNames.json",
++        "TelemetryClientToken",
++        "CurrentSessionToken",
++        "PendingDesktopShortcuts.json",
++        "PendingStartMenuShortcuts.json",
++    ];
++
++    private static readonly StringComparison _pathComparison = OperatingSystem.IsWindows()
++        ? StringComparison.OrdinalIgnoreCase
++        : StringComparison.Ordinal;
++
++    private static readonly char[] _rejectedKeyChars = ['/', '\\', ':', '~'];
++
++    private static readonly Lazy<HashSet<string>> _importableSettingNames = new(() =>
++    {
++        HashSet<string> names = new(StringComparer.Ordinal);
++        foreach (K key in Enum.GetValues<K>())
++        {
++            if (key is K.Unset)
++                continue;
++
++            string resolved = ResolveKey(key);
++            names.Add(resolved);
++            names.Add($"{resolved}.json");
++        }
++
++        return names;
++    });
++
++    private static readonly string[] _reservedDeviceNames =
++    [
++        "CON",
++        "PRN",
++        "AUX",
++        "NUL",
++        "COM0",
++        "COM1",
++        "COM2",
++        "COM3",
++        "COM4",
++        "COM5",
++        "COM6",
++        "COM7",
++        "COM8",
++        "COM9",
++        "LPT0",
++        "LPT1",
++        "LPT2",
++        "LPT3",
++        "LPT4",
++        "LPT5",
++        "LPT6",
++        "LPT7",
++        "LPT8",
++        "LPT9",
++    ];
++
+     public static void ExportToFile_JSON(string path)
+     {
+         File.WriteAllText(path, ExportToString_JSON());
+@@ -31,14 +97,10 @@ public partial class Settings
+         )
+         {
+             if (
+-                new[]
+-                {
+-                    "OperationHistory",
+-                    "WinGetAlreadyUpgradedPackages.json",
+-                    "WinGetUpgradeAttempts.json",
+-                    "TelemetryClientToken",
+-                    "CurrentSessionToken",
+-                }.Contains(Path.GetFileName(entry))
++                _nonPortableSettings.Contains(
++                    Path.GetFileName(entry),
++                    StringComparer.OrdinalIgnoreCase
++                )
+             )
+                 continue;
+ 
+@@ -47,30 +109,102 @@ public partial class Settings
+         return SettingsJson.SerializeStringDictionary(settings);
+     }
+ 
++    private static bool TryResolveImportedSettingPath(string key, out string resolvedPath)
++    {
++        resolvedPath = string.Empty;
++
++        if (string.IsNullOrWhiteSpace(key))
++            return false;
++
++        if (key is "." or "..")
++            return false;
++
++        if (key.IndexOfAny(_rejectedKeyChars) >= 0)
++            return false;
++
++        if (!key.Equals(Path.GetFileName(key), StringComparison.Ordinal))
++            return false;
++
++        if (key.AsSpan().IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
++            return false;
++
++        if (_nonPortableSettings.Contains(key, StringComparer.OrdinalIgnoreCase))
++            return false;
++
++        if (!_importableSettingNames.Value.Contains(key))
++            return false;
++
++        if (
++            OperatingSystem.IsWindows()
++            && _reservedDeviceNames.Contains(
++                Path.GetFileNameWithoutExtension(key),
++                StringComparer.OrdinalIgnoreCase
++            )
++        )
++            return false;
++
++        string configurationDirectory = Path.GetFullPath(
++            CoreData.UniGetUIUserConfigurationDirectory
++        );
++        string candidate = Path.GetFullPath(Path.Join(configurationDirectory, key));
++
++        if (
++            !string.Equals(
++                Path.GetDirectoryName(candidate),
++                configurationDirectory.TrimEnd(
++                    Path.DirectorySeparatorChar,
++                    Path.AltDirectorySeparatorChar
++                ),
++                _pathComparison
++            )
++        )
++            return false;
++
++        if (!key.Equals(Path.GetFileName(candidate), StringComparison.Ordinal))
++            return false;
++
++        resolvedPath = candidate;
++        return true;
++    }
++
+     public static void ImportFromString_JSON(string jsonContent)
+     {
+-        ResetSettings();
+         Dictionary<string, string> settings =
+-            SettingsJson.DeserializeStringDictionary(jsonContent) ?? [];
++            SettingsJson.DeserializeStringDictionary(jsonContent)
++            ?? throw new JsonException("The settings document must contain a JSON object.");
++
++        ResetSettings();
++        int failedWrites = 0;
+         foreach (KeyValuePair<string, string> entry in settings)
+         {
+-            if (
+-                new[]
+-                {
+-                    "OperationHistory",
+-                    "WinGetAlreadyUpgradedPackages.json",
+-                    "WinGetUpgradeAttempts.json",
+-                    "TelemetryClientToken",
+-                    "CurrentSessionToken",
+-                }.Contains(entry.Key)
+-            )
++            if (!TryResolveImportedSettingPath(entry.Key, out string destination))
++            {
++                Logger.Warn(
++                    $"Discarded imported setting with an unsafe or non-portable key: '{entry.Key}'"
++                );
+                 continue;
++            }
+ 
+-            File.WriteAllText(
+-                Path.Join(CoreData.UniGetUIUserConfigurationDirectory, entry.Key),
+-                entry.Value
++            try
++            {
++                File.WriteAllText(destination, entry.Value);
++            }
++            catch (Exception ex)
++            {
++                failedWrites++;
++                Logger.Error($"Could not import the setting '{entry.Key}'");
++                Logger.Error(ex);
++            }
++        }
++
++        if (failedWrites > 0)
++        {
++            throw new IOException(
++                $"{failedWrites} setting(s) could not be written. The previous configuration was "
++                    + "already cleared, so the imported configuration is incomplete."
+             );
+         }
++
+         Logger.Info("Settings successfully imported from string content.");
+     }
+ 
+@@ -87,7 +221,13 @@ public partial class Settings
+         {
+             try
+             {
+-                if (new[] { "TelemetryClientToken" }.Contains(entry.Split("\\")[^1]))
++                if (
++                    string.Equals(
++                        Path.GetFileName(entry),
++                        "TelemetryClientToken",
++                        StringComparison.OrdinalIgnoreCase
++                    )
++                )
+                     continue;
+ 
+                 File.Delete(entry);
+diff --git a/src/UniGetUI.Core.Tools.Tests/InstallerFileNamingTests.cs b/src/UniGetUI.Core.Tools.Tests/InstallerFileNamingTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..65aacc673faf010753bd5e03333a7bf16bb3e6ec
+--- /dev/null
++++ b/src/UniGetUI.Core.Tools.Tests/InstallerFileNamingTests.cs
+@@ -0,0 +1,270 @@
++using UniGetUI.Core.Data;
++using UniGetUI.Core.SettingsEngine;
++
++namespace UniGetUI.Core.Tools.Tests;
++
++public class InstallerFileNamingTests : IDisposable
++{
++    private readonly string _testRoot;
++
++    public InstallerFileNamingTests()
++    {
++        _testRoot = Path.Combine(
++            Path.GetTempPath(),
++            nameof(InstallerFileNamingTests),
++            Guid.NewGuid().ToString("N")
++        );
++        CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
++        Directory.CreateDirectory(CoreData.UniGetUIUserConfigurationDirectory);
++        Settings.ResetSettings();
++    }
++
++    [Fact]
++    public void Build_NeverEscapesItsDownloadDirectoryForHostileMetadata()
++    {
++        string[] hostile =
++        [
++            "..",
++            @"..\..\..\evil",
++            "../../evil",
++            ".",
++            "",
++            "   ",
++            @"..\..\evil.exe",
++            "....",
++        ];
++
++        string parent = Path.GetFullPath(
++            Path.Combine(Path.GetTempPath(), "IFN", Guid.NewGuid().ToString("N"))
++        );
++
++        foreach (InstallerNameScheme scheme in Enum.GetValues<InstallerNameScheme>())
++        {
++            foreach (string value in hostile)
++            {
++                string built = InstallerFileNaming.Build(
++                    value,
++                    value,
++                    value,
++                    value,
++                    value,
++                    scheme
++                );
++
++                Assert.NotEqual("", built);
++                Assert.Equal(built, Path.GetFileName(built));
++                Assert.Equal(
++                    parent,
++                    Path.GetDirectoryName(Path.GetFullPath(Path.Join(parent, built)))
++                );
++            }
++        }
++    }
++
++    public void Dispose()
++    {
++        Settings.ResetSettings();
++        CoreData.TEST_DataDirectoryOverride = null;
++        if (Directory.Exists(_testRoot))
++            Directory.Delete(_testRoot, recursive: true);
++        GC.SuppressFinalize(this);
++    }
++
++    [Theory]
++    [InlineData("", InstallerNameScheme.PublisherName)]
++    [InlineData("   ", InstallerNameScheme.PublisherName)]
++    [InlineData("nonsense", InstallerNameScheme.PublisherName)]
++    [InlineData("publisher", InstallerNameScheme.PublisherName)]
++    [InlineData("NAME_VERSION", InstallerNameScheme.NameAndVersion)]
++    [InlineData(" id_version ", InstallerNameScheme.IdAndVersion)]
++    [InlineData("publisher_version", InstallerNameScheme.PublisherNameAndVersion)]
++    public void ResolveScheme_MapsStoredValue(string stored, InstallerNameScheme expected)
++    {
++        Settings.SetValue(Settings.K.InstallerFileNameScheme, stored);
++
++        Assert.Equal(expected, InstallerFileNaming.ResolveScheme());
++    }
++
++    [Theory]
++    [InlineData("SpotifyFullSetupX64.exe", "SpotifyFullSetupX64.exe")]
++    [InlineData("jre-8u451-windows-x64", "jre-8u451-windows-x64")]
++    [InlineData("", "Spotify")]
++    public void Build_PublisherNameSchemeKeepsPublisherFileName(string publisherName, string expected)
++    {
++        Assert.Equal(
++            expected,
++            InstallerFileNaming.Build(
++                publisherName,
++                "Spotify",
++                "Spotify.Spotify",
++                "1.2.68",
++                "exe",
++                InstallerNameScheme.PublisherName
++            )
++        );
++    }
++
++    [Theory]
++    [InlineData(InstallerNameScheme.NameAndVersion, "Spotify_1.2.68.exe")]
++    [InlineData(InstallerNameScheme.IdAndVersion, "Spotify.Spotify_1.2.68.exe")]
++    [InlineData(InstallerNameScheme.PublisherNameAndVersion, "SpotifyFullSetupX64_1.2.68.exe")]
++    public void Build_VersionedSchemesComposeExpectedName(
++        InstallerNameScheme scheme,
++        string expected
++    )
++    {
++        Assert.Equal(
++            expected,
++            InstallerFileNaming.Build(
++                "SpotifyFullSetupX64.exe",
++                "Spotify",
++                "Spotify.Spotify",
++                "1.2.68",
++                "exe",
++                scheme
++            )
++        );
++    }
++
++    [Theory]
++    [InlineData("exe", "Node_20.11.1.exe")]
++    [InlineData("nullsoft", "Node_20.11.1.exe")]
++    [InlineData("msix", "Node_20.11.1.msix")]
++    [InlineData("appx", "Node_20.11.1.appx")]
++    [InlineData(".exe", "Node_20.11.1.exe")]
++    [InlineData("Homebrew Formula", "Node_20.11.1")]
++    public void Build_MapsInstallerTypeToItsOwnExtension(string installerType, string expected)
++    {
++        Assert.Equal(
++            expected,
++            InstallerFileNaming.Build(
++                "download",
++                "Node",
++                "OpenJS.NodeJS",
++                "20.11.1",
++                installerType,
++                InstallerNameScheme.NameAndVersion
++            )
++        );
++    }
++
++    [Theory]
++    [InlineData("setup.tar.gz", "Node_20.11.1.tar.gz")]
++    [InlineData("setup.msixbundle", "Node_20.11.1.msixbundle")]
++    [InlineData("setup.appinstaller", "Node_20.11.1.appinstaller")]
++    [InlineData("download", "Node_20.11.1.exe")]
++    [InlineData("installer_20.11.1", "Node_20.11.1.exe")]
++    public void Build_ResolvesExtensionFromPublisherNameOrInstallerType(
++        string publisherName,
++        string expected
++    )
++    {
++        Assert.Equal(
++            expected,
++            InstallerFileNaming.Build(
++                publisherName,
++                "Node",
++                "OpenJS.NodeJS",
++                "20.11.1",
++                "nullsoft",
++                InstallerNameScheme.NameAndVersion
++            )
++        );
++    }
++
++    [Theory]
++    [InlineData(null, "Node.exe")]
++    [InlineData("", "Node.exe")]
++    [InlineData("Unknown", "Node.exe")]
++    [InlineData("unknown", "Node.exe")]
++    [InlineData("Latest", "Node.exe")]
++    [InlineData("Dernière", "Node.exe")]
++    [InlineData("   ", "Node.exe")]
++    [InlineData("2.4 build 7", "Node_2.4_build_7.exe")]
++    public void Build_SkipsUnusableVersions(string? version, string expected)
++    {
++        Assert.Equal(
++            expected,
++            InstallerFileNaming.Build(
++                "setup.exe",
++                "Node",
++                "OpenJS.NodeJS",
++                version,
++                "exe",
++                InstallerNameScheme.NameAndVersion
++            )
++        );
++    }
++
++    [Fact]
++    public void Build_DoesNotRepeatAVersionAlreadyPresentInThePublisherName()
++    {
++        Assert.Equal(
++            "jre-8u451-windows-x64.exe",
++            InstallerFileNaming.Build(
++                "jre-8u451-windows-x64.exe",
++                "Java Runtime Environment",
++                "Oracle.JavaRuntimeEnvironment",
++                "8u451",
++                "exe",
++                InstallerNameScheme.PublisherNameAndVersion
++            )
++        );
++    }
++
++    [Fact]
++    public void Build_StripsCharactersThatCannotBeUsedInFileNames()
++    {
++        Assert.Equal(
++            "Foo Bar Baz_1.0.exe",
++            InstallerFileNaming.Build(
++                "setup.exe",
++                "Foo: Bar / Baz",
++                "Foo.Bar",
++                "1.0",
++                "exe",
++                InstallerNameScheme.NameAndVersion
++            )
++        );
++    }
++
++    [Theory]
++    [InlineData(InstallerNameScheme.NameAndVersion, "Foo.Bar_1.0.exe")]
++    [InlineData(InstallerNameScheme.PublisherNameAndVersion, "Foo.Bar_1.0.exe")]
++    public void Build_FallsBackToAnotherFieldWhenTheChosenOneIsEmpty(
++        InstallerNameScheme scheme,
++        string expected
++    )
++    {
++        Assert.Equal(
++            expected,
++            InstallerFileNaming.Build("", "", "Foo.Bar", "1.0", "exe", scheme)
++        );
++    }
++
++    [Fact]
++    public void Build_NeverReturnsAnEmptyName()
++    {
++        Assert.Equal(
++            "installer_1.0",
++            InstallerFileNaming.Build(null, null, null, "1.0", null, InstallerNameScheme.NameAndVersion)
++        );
++        Assert.Equal(
++            "installer",
++            InstallerFileNaming.Build(null, null, null, null, null, InstallerNameScheme.PublisherName)
++        );
++    }
++
++    [Theory]
++    [InlineData("setup.exe", ".exe")]
++    [InlineData("setup.tar.gz", ".tar.gz")]
++    [InlineData("archive.7z", ".7z")]
++    [InlineData("bundle.appinstaller", ".appinstaller")]
++    [InlineData("release.1234567890123456789", "")]
++    [InlineData("installer_1.2.3", "")]
++    [InlineData("download", "")]
++    public void ExtractExtension_OnlyAcceptsExtensionShapedTails(string fileName, string expected)
++    {
++        Assert.Equal(expected, InstallerFileNaming.ExtractExtension(fileName));
++    }
++}
+diff --git a/src/UniGetUI.Core.Tools.Tests/MetaTests.cs b/src/UniGetUI.Core.Tools.Tests/MetaTests.cs
+index 694169af0defe12cf9d80bbd0144dbdbada40f52..78d9d2f58bafc252d87150451d38e4f60045894f 100644
+--- a/src/UniGetUI.Core.Tools.Tests/MetaTests.cs
++++ b/src/UniGetUI.Core.Tools.Tests/MetaTests.cs
+@@ -4,6 +4,30 @@ namespace UniGetUI.Core.Tools.Tests;
+ 
+ public class MetaTests
+ {
++    [Fact]
++    public void TestProcessArgumentsAreReadFromTheSanitizedSource()
++    {
++        var solutionDirectory = FindRepositoryRoot();
++        var offenders = Directory
++            .GetFiles(solutionDirectory, "*.cs", SearchOption.AllDirectories)
++            .Where(file =>
++                !file.Contains(@"bin\")
++                && !file.Contains(@"obj\")
++                && !file.EndsWith(".g.cs")
++                && !file.EndsWith("Tests.cs")
++                && !file.EndsWith("CoreData.cs")
++            )
++            .Where(file => File.ReadAllText(file).Contains("Environment.GetCommandLineArgs("))
++            .ToList();
++
++        Assert.True(
++            offenders.Count is 0,
++            "Process arguments must be read through CoreData.GetProcessArguments so that "
++                + "arguments injected into a protocol launch cannot reach consumers. Offending "
++                + $"files: {string.Join(", ", offenders)}"
++        );
++    }
++
+     [Fact]
+     public void TestJsonSerializationOptions()
+     {
+diff --git a/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs b/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
+index dbb75f7f7e7440cf34d88db7e7f1bee1d573f260..e7803f5d0508f64729d4e1de1fe1afc829c1c7b9 100644
+--- a/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
++++ b/src/UniGetUI.Core.Tools.Tests/ToolsTests.cs
+@@ -546,5 +546,52 @@ namespace UniGetUI.Core.Tools.Tests
+                 );
+             }
+         }
++        [Theory]
++        [InlineData("..", "_")]
++        [InlineData(".", "_")]
++        [InlineData("...", "_")]
++        [InlineData("", "")]
++        [InlineData("   ", "_")]
++        [InlineData(". . .", "_")]
++        [InlineData(".NET Runtime", ".NET Runtime")]
++        [InlineData("Contoso.Tool", "Contoso.Tool")]
++        [InlineData("Contoso:Tool", "ContosoTool")]
++        [InlineData("CON", "_CON")]
++        [InlineData("con.exe", "_con.exe")]
++        [InlineData("NUL.json", "_NUL.json")]
++        [InlineData("LPT1", "_LPT1")]
++        [InlineData("COM¹.txt", "_COM¹.txt")]
++        [InlineData("LPT²", "_LPT²")]
++        [InlineData("COM³", "_COM³")]
++        [InlineData("icon. ", "icon")]
++        [InlineData("icon...", "icon")]
++        [InlineData("Contoso", "Contoso")]
++        [InlineData("a<b>c|d*e?f", "abcdef")]
++        [InlineData("dir/sub", "dirsub")]
++        [InlineData(@"dir\sub", "dirsub")]
++        public void MakeValidFileName_NeverReturnsATraversalComponent(
++            string input,
++            string expected
++        )
++        {
++            Assert.Equal(expected, CoreTools.MakeValidFileName(input));
++        }
++
++        [Theory]
++        [InlineData(@"..\..\..\evil")]
++        [InlineData("../../evil")]
++        [InlineData("..")]
++        [InlineData(".")]
++        [InlineData("   ")]
++        public void MakeValidFileName_ResultStaysInsideItsParentDirectory(string input)
++        {
++            string parent = Path.Combine(Path.GetTempPath(), "MVFN", Guid.NewGuid().ToString("N"));
++            string resolved = Path.GetFullPath(
++                Path.Join(parent, CoreTools.MakeValidFileName(input))
++            );
++
++            Assert.Equal(Path.GetFullPath(parent), Path.GetDirectoryName(resolved));
++        }
++
+     }
+ }
+diff --git a/src/UniGetUI.Core.Tools/InstallerFileNaming.cs b/src/UniGetUI.Core.Tools/InstallerFileNaming.cs
+index 2f4570b0f3fc94f5f46521218e8e769c5d26ae06..f14adca2578223225cbc453477673ce238798179 100644
+--- a/src/UniGetUI.Core.Tools/InstallerFileNaming.cs
++++ b/src/UniGetUI.Core.Tools/InstallerFileNaming.cs
+@@ -95,9 +95,11 @@ public static class InstallerFileNaming
+             _ => publisherStem,
+         };
+ 
+-        return TrimTrailingSeparators(
++        string built = TrimTrailingSeparators(
+             FirstNonEmpty(stem, publisherStem, name, id, FallbackStem) + extension
+         );
++
++        return built.Length > 0 ? built : FallbackStem + extension;
+     }
+ 
+     private static string Join(string stem, string version)
+diff --git a/src/UniGetUI.Core.Tools/Tools.cs b/src/UniGetUI.Core.Tools/Tools.cs
+index cdcf0ef7c666b96fda4081dd3908000ea642180c..7f27fc08b3af4ad057b7098b0725d937e6e5bf9d 100644
+--- a/src/UniGetUI.Core.Tools/Tools.cs
++++ b/src/UniGetUI.Core.Tools/Tools.cs
+@@ -1050,11 +1050,65 @@ namespace UniGetUI.Core.Tools
+             return LanguageEngine?.Locale ?? "Unset/Unknown";
+         }
+ 
+-        private static readonly HashSet<char> _illegalPathChars = Path.GetInvalidFileNameChars()
+-            .ToHashSet();
++        private static readonly HashSet<char> _illegalPathChars = BuildIllegalPathChars();
+ 
+-        public static string MakeValidFileName(string name) =>
+-            string.Concat(name.Where(x => !_illegalPathChars.Contains(x)));
++        private static HashSet<char> BuildIllegalPathChars()
++        {
++            HashSet<char> characters = new(Path.GetInvalidFileNameChars());
++
++            foreach (char character in @"""<>|:*?\/")
++                characters.Add(character);
++
++            for (char character = (char)0; character < (char)32; character++)
++                characters.Add(character);
++
++            return characters;
++        }
++
++        private static readonly HashSet<string> _reservedDeviceNames = BuildReservedDeviceNames();
++
++        private static HashSet<string> BuildReservedDeviceNames()
++        {
++            HashSet<string> names = new(StringComparer.OrdinalIgnoreCase)
++            {
++                "CON",
++                "PRN",
++                "AUX",
++                "NUL",
++            };
++
++            for (int index = 0; index <= 9; index++)
++            {
++                names.Add($"COM{index}");
++                names.Add($"LPT{index}");
++            }
++
++            foreach (char superscript in "\u00b9\u00b2\u00b3")
++            {
++                names.Add($"COM{superscript}");
++                names.Add($"LPT{superscript}");
++            }
++
++            return names;
++        }
++
++        public static string MakeValidFileName(string name)
++        {
++            string sanitized = string.Concat(name.Where(x => !_illegalPathChars.Contains(x)));
++
++            if (sanitized.Length is 0)
++                return sanitized;
++
++            if (sanitized.All(character => character is '.' || char.IsWhiteSpace(character)))
++                return "_";
++
++            string trimmed = sanitized.TrimEnd('.', ' ');
++
++            if (trimmed.Length is 0)
++                return "_";
++
++            return _reservedDeviceNames.Contains(trimmed.Split('.')[0]) ? $"_{trimmed}" : trimmed;
++        }
+ 
+         public static string EscapeCommandLineArgument(string argument)
+         {
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcClient.cs b/src/UniGetUI.Interface.IpcApi/IpcClient.cs
+index 9941b4c355275770d7e886f4d540bdbc03e20233..5d8d1fa4145d1db9c7efa72cbbbbcb731303eaac 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcClient.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcClient.cs
+@@ -24,7 +24,7 @@ public sealed class IpcClient : IDisposable
+ 
+     public static IpcClient CreateForCli(IReadOnlyList<string>? args = null)
+     {
+-        args ??= Environment.GetCommandLineArgs();
++        args ??= CoreData.GetProcessArguments();
+         IpcTransportOptions requestedOptions = IpcTransportOptions.LoadForClient(args);
+ 
+         if (IpcTransportOptions.HasExplicitClientOverride(args))
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcTransport.cs b/src/UniGetUI.Interface.IpcApi/IpcTransport.cs
+index dbd92ea0bfdaac3f42a808f46a193bb1d2cbf4e0..dfedad4dd753bc247b1c24b198fc3c911c8c5b14 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcTransport.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcTransport.cs
+@@ -66,7 +66,7 @@ public sealed record IpcTransportOptions(
+ 
+     public static IpcTransportOptions LoadForServer(IReadOnlyList<string>? args = null)
+     {
+-        args ??= Environment.GetCommandLineArgs();
++        args ??= CoreData.GetProcessArguments();
+         return Parse(
+             args,
+             includeCliAliases: false,
+@@ -76,7 +76,7 @@ public sealed record IpcTransportOptions(
+ 
+     public static IpcTransportOptions LoadForClient(IReadOnlyList<string>? args = null)
+     {
+-        args ??= Environment.GetCommandLineArgs();
++        args ??= CoreData.GetProcessArguments();
+ 
+         if (HasExplicitClientOverride(args))
+         {
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
+index 68a5d7e1dffe1c8ea8f986447a35255c77548c81..0e63c4cce574984662caae89a8ad61f057082076 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Classes/InstallOptionsFactory.cs
+@@ -1,4 +1,5 @@
+ using System.Collections.Concurrent;
++using System.Security.Cryptography;
+ using System.Text;
+ using System.Text.Json;
+ using System.Text.Json.Nodes;
+@@ -20,18 +21,93 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         public const string PackageIdPlaceholder = "%PACKAGE%";
+         public const string PackageNamePlaceholder = "%NAME%";
+ 
++        public static bool IsIdentityScopedOptionsFile(string fileName) =>
++            StoragePath.IsIdentityScoped(fileName);
++
+         private static class StoragePath
+         {
++            private const string IdentityScopedPrefix = "PackageOptions.";
++
+             public static string Get(IPackageManager manager) =>
+-                "GlobalValues." + manager.Name.Replace(" ", "").Replace(".", "") + ".json";
++                "GlobalValues." + ManagerComponent(manager.Name) + ".json";
+ 
+             public static string Get(IPackage package) =>
+-                package.Manager.Name.Replace(" ", "").Replace(".", "") + "." + package.Id + ".json";
++                IdentityScopedPrefix
++                + ManagerComponent(package.Manager.Name)
++                + "."
++                + CoreTools.MakeValidFileName(package.Id)
++                + "_"
++                + IdentityHash(package)
++                + ".json";
++
++            public static string GetLegacy(IPackage package) =>
++                ManagerComponent(package.Manager.Name) + "." + package.Id + ".json";
++
++            private static string ManagerComponent(string name) =>
++                CoreTools.MakeValidFileName(name.Replace(" ", "").Replace(".", ""));
++
++            public static bool IsIdentityScoped(string fileName) =>
++                fileName.StartsWith(IdentityScopedPrefix, StringComparison.Ordinal);
++
++            private static string IdentityHash(IPackage package)
++            {
++                string identity = string.Join(
++                    '\u0000',
++                    package.Manager.Name,
++                    package.Source.Name,
++                    package.Id
++                );
++                byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
++
++                return Convert.ToHexString(digest.AsSpan(0, 8)).ToLowerInvariant();
++            }
++        }
++
++        private static bool TryResolveOptionsPath(string key, out string filePath)
++        {
++            try
++            {
++                return TryResolveOptionsPathCore(key, out filePath);
++            }
++            catch (Exception ex)
++            {
++                Logger.Warn($"Could not resolve an options path for key {key}");
++                Logger.Warn(ex);
++                filePath = string.Empty;
++                return false;
++            }
++        }
++
++        private static bool TryResolveOptionsPathCore(string key, out string filePath)
++        {
++            filePath = string.Empty;
++
++            string directory = Path.GetFullPath(CoreData.UniGetUIInstallationOptionsDirectory);
++            string candidate = Path.GetFullPath(Path.Join(directory, key));
++
++            if (
++                !string.Equals(
++                    Path.GetDirectoryName(candidate),
++                    directory.TrimEnd(
++                        Path.DirectorySeparatorChar,
++                        Path.AltDirectorySeparatorChar
++                    ),
++                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase
++                        : StringComparison.Ordinal
++                )
++            )
++                return false;
++
++            if (!key.Equals(Path.GetFileName(candidate), StringComparison.Ordinal))
++                return false;
++
++            filePath = candidate;
++            return true;
+         }
+ 
+         // Loading from disk (package and manager)
+         public static InstallOptions LoadForPackage(IPackage package) =>
+-            _loadFromDisk(StoragePath.Get(package));
++            _loadFromDisk(StoragePath.Get(package), StoragePath.GetLegacy(package));
+ 
+         public static Task<InstallOptions> LoadForPackageAsync(IPackage package) =>
+             Task.Run(() => LoadForPackage(package));
+@@ -153,7 +229,12 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         {
+             try
+             {
+-                var filePath = Path.Join(CoreData.UniGetUIInstallationOptionsDirectory, key);
++                if (!TryResolveOptionsPath(key, out string filePath))
++                {
++                    Logger.Error($"Refused to save options to an unsafe path for key {key}");
++                    return;
++                }
++
+                 _optionsCache[key] = options.Copy();
+ 
+                 string fileContents = options.AsJsonString();
+@@ -166,9 +247,26 @@ namespace UniGetUI.PackageEngine.PackageClasses
+             }
+         }
+ 
+-        private static InstallOptions _loadFromDisk(string key)
++        private static InstallOptions _loadFromDisk(string key, string? legacyKey = null)
+         {
+-            var filePath = Path.Join(CoreData.UniGetUIInstallationOptionsDirectory, key);
++            if (
++                legacyKey is not null
++                && !_optionsCache.ContainsKey(key)
++                && TryResolveOptionsPath(key, out string preferred)
++                && !File.Exists(preferred)
++                && TryResolveOptionsPath(legacyKey, out string legacy)
++                && File.Exists(legacy)
++            )
++            {
++                key = legacyKey;
++            }
++
++            if (!TryResolveOptionsPath(key, out string filePath))
++            {
++                Logger.Error($"Refused to load options from an unsafe path for key {key}");
++                return new InstallOptions();
++            }
++
+             try
+             {
+                 InstallOptions serializedOptions;
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+index 01c1b67b01e0bd97da40a77ef9d2531642b3c5d1..8f4047e1d29dbce98d2825818073e315e0cb19c7 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+@@ -204,11 +204,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
+                     Manager.DetailsHelper.GetIcon,
+                     this
+                 );
+-                string? path = IconCacheEngine.GetCacheOrDownloadIcon(
+-                    icon,
+-                    Manager.Name,
+-                    CoreTools.MakeValidFileName(Id)
+-                );
++                string? path = IconCacheEngine.GetCacheOrDownloadIcon(icon, Manager.Name, Id);
+                 return path is null ? null : new Uri((path.StartsWith('/') ? "file://" : "file:///") + path);
+             }
+             catch (Exception ex)
+diff --git a/src/UniGetUI.PackageEngine.Tests/InstallOptionsFactoryTests.cs b/src/UniGetUI.PackageEngine.Tests/InstallOptionsFactoryTests.cs
+index f5c81bcdb264bf58d00c5ceb48612c571f5cd14d..c74f03076e092755ce14f2422e72a61b1e0ddce1 100644
+--- a/src/UniGetUI.PackageEngine.Tests/InstallOptionsFactoryTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/InstallOptionsFactoryTests.cs
+@@ -49,6 +49,192 @@ public sealed class InstallOptionsFactoryTests : IDisposable
+         }
+     }
+ 
++    [Theory]
++    [InlineData(@"..\..\..\PWNED")]
++    [InlineData("../../../PWNED")]
++    [InlineData("..")]
++    [InlineData(".")]
++    [InlineData("")]
++    public void SaveForPackage_NeverWritesOutsideTheInstallOptionsDirectory(string packageId)
++    {
++        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
++        var package = new PackageBuilder().WithManager(manager).WithId(packageId).Build();
++
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { CustomInstallLocation = "MARKER-CONTENT" },
++            package
++        );
++
++        string optionsDirectory = Path.GetFullPath(
++            CoreData.UniGetUIInstallationOptionsDirectory
++        );
++
++        foreach (string written in Directory.GetFiles(
++            _testRoot,
++            "*",
++            SearchOption.AllDirectories
++        ))
++        {
++            if (Path.GetFileName(written).Contains("PWNED", StringComparison.Ordinal))
++            {
++                Assert.Equal(
++                    optionsDirectory,
++                    Path.GetDirectoryName(Path.GetFullPath(written))
++                );
++            }
++        }
++    }
++
++    [Fact]
++    public void SaveForPackage_StillRoundTripsAnOrdinaryPackageId()
++    {
++        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
++        var package = new PackageBuilder().WithManager(manager).WithId("Contoso:Tool").Build();
++
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { CustomInstallLocation = @"C:\Apps\Contoso" },
++            package
++        );
++
++        Assert.Equal(
++            @"C:\Apps\Contoso",
++            InstallOptionsFactory.LoadForPackage(package).CustomInstallLocation
++        );
++    }
++
++    [Fact]
++    public void SaveForPackage_DoesNotLetSanitisationCollideDistinctIds()
++    {
++        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
++        var colonId = new PackageBuilder().WithManager(manager).WithId("Contoso:Tool").Build();
++        var plainId = new PackageBuilder().WithManager(manager).WithId("ContosoTool").Build();
++
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { CustomInstallLocation = "FOR-COLON" },
++            colonId
++        );
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { CustomInstallLocation = "FOR-PLAIN" },
++            plainId
++        );
++
++        Assert.Equal(
++            "FOR-COLON",
++            InstallOptionsFactory.LoadForPackage(colonId).CustomInstallLocation
++        );
++        Assert.Equal(
++            "FOR-PLAIN",
++            InstallOptionsFactory.LoadForPackage(plainId).CustomInstallLocation
++        );
++    }
++
++    [Fact]
++    public void SaveForPackage_KeepsSameIdFromDifferentSourcesApart()
++    {
++        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
++        var fromA = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Tool")
++            .WithSource(new SourceBuilder().WithManager(manager).WithName("winget").Build())
++            .Build();
++        var fromB = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso.Tool")
++            .WithSource(new SourceBuilder().WithManager(manager).WithName("msstore").Build())
++            .Build();
++
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { CustomInstallLocation = "FROM-A" },
++            fromA
++        );
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { CustomInstallLocation = "FROM-B" },
++            fromB
++        );
++
++        Assert.Equal(
++            "FROM-A",
++            InstallOptionsFactory.LoadForPackage(fromA).CustomInstallLocation
++        );
++        Assert.Equal(
++            "FROM-B",
++            InstallOptionsFactory.LoadForPackage(fromB).CustomInstallLocation
++        );
++    }
++
++    [Fact]
++    public void SaveForPackage_KeepsAmbiguousSourceAndIdSplitsApart()
++    {
++        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
++        var dottedSource = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("c")
++            .WithSource(new SourceBuilder().WithManager(manager).WithName("a.b").Build())
++            .Build();
++        var dottedId = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("b.c")
++            .WithSource(new SourceBuilder().WithManager(manager).WithName("a").Build())
++            .Build();
++
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { CustomInstallLocation = "DOTTED-SOURCE" },
++            dottedSource
++        );
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { CustomInstallLocation = "DOTTED-ID" },
++            dottedId
++        );
++
++        Assert.Equal(
++            "DOTTED-SOURCE",
++            InstallOptionsFactory.LoadForPackage(dottedSource).CustomInstallLocation
++        );
++        Assert.Equal(
++            "DOTTED-ID",
++            InstallOptionsFactory.LoadForPackage(dottedId).CustomInstallLocation
++        );
++    }
++
++    [Fact]
++    public void LoadForPackage_DoesNotThrowOnPackageIdsWithControlCharacters()
++    {
++        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
++        var package = new PackageBuilder()
++            .WithManager(manager)
++            .WithId("Contoso\0Tool")
++            .Build();
++
++        var loaded = InstallOptionsFactory.LoadForPackage(package);
++
++        Assert.NotNull(loaded);
++    }
++
++    [Fact]
++    public void AutoUpdatesMigration_IgnoresIdentityScopedOptionFiles()
++    {
++        var manager = new PackageManagerBuilder().WithName("WinGet").Build();
++        var package = new PackageBuilder().WithManager(manager).WithId("Contoso.Tool").Build();
++
++        InstallOptionsFactory.SaveForPackage(
++            new InstallOptions { AutoUpdatePackage = true },
++            package
++        );
++
++        string written = Directory
++            .GetFiles(CoreData.UniGetUIInstallationOptionsDirectory, "*.json")
++            .Select(Path.GetFileName)
++            .First(name => !name!.StartsWith("GlobalValues.", StringComparison.Ordinal));
++
++        Assert.True(InstallOptionsFactory.IsIdentityScopedOptionsFile(written!));
++        Assert.False(
++            InstallOptionsFactory.IsIdentityScopedOptionsFile(
++                "WinGet.foo_0123456789abcdef.json"
++            )
++        );
++        Assert.False(InstallOptionsFactory.IsIdentityScopedOptionsFile("WinGet.Contoso.Tool.json"));
++    }
++
+     [Fact]
+     public void LoadApplicable_UsesManagerDefaultsAndExpandsPackageToken()
+     {
+-- 
+2.56.0
+

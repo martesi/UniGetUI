@@ -29,26 +29,25 @@ namespace UniGetUI.Avalonia.Infrastructure;
 /// </summary>
 internal static class AvaloniaPackageOperationHelper
 {
-    public static async Task UpdateAllAsync()
-    {
-        foreach (var pkg in UpgradablePackagesLoader.Instance.Packages.ToList())
-        {
-            if (pkg.Tag is PackageTag.BeingProcessed or PackageTag.OnQueue) continue;
-            var opts = await InstallOptionsFactory.LoadApplicableAsync(pkg);
-            var op = new UpdatePackageOperation(pkg, opts);
-            op.OperationSucceeded += (_, _) => TelemetryHandler.UpdatePackage(pkg, TEL_OP_RESULT.SUCCESS);
-            op.OperationFailed += (_, _) => TelemetryHandler.UpdatePackage(pkg, TEL_OP_RESULT.FAILED);
-            AvaloniaOperationRegistry.Add(op);
-            _ = op.MainThread();
-        }
-    }
+    public static Task<IReadOnlyList<AbstractOperation>> UpdateAllAsync() =>
+        UpdatePackagesAsync(null);
 
-    public static async Task UpdateAllForManagerAsync(string managerName)
+    public static Task<IReadOnlyList<AbstractOperation>> UpdateAllForManagerAsync(string managerName) =>
+        UpdatePackagesAsync(managerName);
+
+    private static async Task<IReadOnlyList<AbstractOperation>> UpdatePackagesAsync(string? managerName)
     {
-        foreach (var pkg in UpgradablePackagesLoader.Instance.Packages
-            .Where(p => p.Manager.Id == managerName)
-            .ToList())
+        var loader = UpgradablePackagesLoader.Instance;
+        if (loader.IsLoading)
+            await loader.WaitForCurrentLoadAsync();
+        else if (!loader.IsLoaded)
+            await loader.ReloadPackages();
+
+        List<AbstractOperation> started = [];
+        foreach (var pkg in loader.Packages.ToList())
         {
+            if (managerName is not null && !pkg.Manager.Id.Equals(managerName, StringComparison.OrdinalIgnoreCase))
+                continue;
             if (pkg.Tag is PackageTag.BeingProcessed or PackageTag.OnQueue) continue;
             var opts = await InstallOptionsFactory.LoadApplicableAsync(pkg);
             var op = new UpdatePackageOperation(pkg, opts);
@@ -56,7 +55,9 @@ internal static class AvaloniaPackageOperationHelper
             op.OperationFailed += (_, _) => TelemetryHandler.UpdatePackage(pkg, TEL_OP_RESULT.FAILED);
             AvaloniaOperationRegistry.Add(op);
             _ = op.MainThread();
+            started.Add(op);
         }
+        return started;
     }
 
     public static async Task UpdateForIdAsync(string packageId)

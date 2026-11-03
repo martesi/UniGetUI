@@ -1,0 +1,872 @@
+From 62d3a213011cf1c9a9400620db082b07d3e69b3c Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 13:05:15 -0800
+Subject: [PATCH] backport: open and share package links in Classic
+
+Upstream-Commit: 1d9fea30e2d2157fe0f4a0dcf6d15324087c86ec
+Upstream-PR: Devolutions/UniGetUI#5611
+Classic-Source-Commit: 2bd148752228b16944bbcda7c7055b21293cec9d
+---
+ docs/CLI.md                                   |   4 +-
+ src/Languages/lang_en.json                    |  13 +-
+ .../IpcPackageApi.cs                          |  19 +-
+ .../TelemetryHandler.cs                       |   1 +
+ src/UniGetUI.Tests/PackageLinkTests.cs        | 174 ++++++++++++++++++
+ src/UniGetUI.Tests/UniGetUI.Tests.csproj      |   1 +
+ src/UniGetUI/App.xaml.cs                      |  16 +-
+ src/UniGetUI/MainWindow.xaml.cs               |  82 ++++++++-
+ .../DialogPages/DialogHelper_Packages.cs      |   5 +-
+ .../InstallOptions_Package.xaml.cs            |   5 +
+ .../Pages/DialogPages/PackageDetailsPage.xaml |   1 +
+ .../DialogPages/PackageDetailsPage.xaml.cs    |   5 +-
+ .../AbstractPackagesPage.xaml.cs              |  33 ++++
+ .../SoftwarePages/DiscoverSoftwarePage.cs     |   4 +
+ .../SoftwarePages/InstalledPackagesPage.cs    |   4 +
+ src/UniGetUI/Services/PackageLink.cs          | 152 +++++++++++++++
+ testing/automation/run-winui-ui-e2e.ps1       |  28 ++-
+ 17 files changed, 533 insertions(+), 14 deletions(-)
+ create mode 100644 src/UniGetUI.Tests/PackageLinkTests.cs
+ create mode 100644 src/UniGetUI/Services/PackageLink.cs
+
+diff --git a/docs/CLI.md b/docs/CLI.md
+index dcdfda4..3d93322 100644
+--- a/docs/CLI.md
++++ b/docs/CLI.md
+@@ -240,12 +240,14 @@ UniGetUI also accepts the following `unigetui://` links:
+ 
+ | Deep link | Meaning |
+ | --- | --- |
+-| `unigetui://showPackage?id={id}&managerName={manager}&sourceName={source}` | Opens package details for the specified package. |
++| `unigetui://package?id={id}&manager={manager}&source={source}&version={version}` | Finds the package and opens its details. Only `id` is required. |
+ | `unigetui://showUniGetUI` | Shows UniGetUI and brings the window to the front. |
+ | `unigetui://showDiscoverPage` | Opens the Discover page. |
+ | `unigetui://showUpdatesPage` | Opens the Updates page. |
+ | `unigetui://showInstalledPage` | Opens the Installed page. |
+ 
++Use **Copy link** in a package's context menu to share it. A link opens package details; it does not install the package. The optional `version` selects a version when the manager supports it. The recipient must have the package manager enabled and its source available.
++
+ ## Installer parameters
+ 
+ The installer is Inno Setup based. It supports the standard [Inno Setup command-line parameters](https://jrsoftware.org/ishelp/index.php?topic=setupcmdline) plus these UniGetUI-specific switches:
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+index 1ba5407..3c5f46a 100644
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -861,5 +861,16 @@
+   "UniGetUI is still running": "UniGetUI is still running",
+   "UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences.": "UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences.",
+   "The packages listed here won't be taken in account when checking for updates. Click the update button on their right to update them once, or the delete button to stop ignoring their updates.": "The packages listed here won't be taken in account when checking for updates. Click the update button on their right to update them once, or the delete button to stop ignoring their updates.",
+-  "Update {0} once, keeping its updates ignored": "Update {0} once, keeping its updates ignored"
++  "Update {0} once, keeping its updates ignored": "Update {0} once, keeping its updates ignored",
++    "Copy link": "Copy link",
++    "A link to {0} was copied to the clipboard.": "A link to {0} was copied to the clipboard.",
++    "The package link could not be copied.": "The package link could not be copied.",
++    "The package link is invalid.": "The package link is invalid.",
++    "This version of UniGetUI does not support the package manager {0}.": "This version of UniGetUI does not support the package manager {0}.",
++    "{0} is disabled. Enable it in the settings to open this package.": "{0} is disabled. Enable it in the settings to open this package.",
++    "{0} is not available on this computer.": "{0} is not available on this computer.",
++    "Looking for {0}...": "Looking for {0}...",
++    "{0} was not found.": "{0} was not found.",
++    "{0} does not support installing a specified version.": "{0} does not support installing a specified version.",
++    "The package link could not be opened": "The package link could not be opened"
+ }
+diff --git a/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs b/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
+index 5faed55..b1c6721 100644
+--- a/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
++++ b/src/UniGetUI.Interface.IpcApi/IpcPackageApi.cs
+@@ -469,6 +469,12 @@ public static class IpcPackageApi
+         return FindAnyPackage(request);
+     }
+ 
++    public static IPackage FindCatalogPackage(IpcPackageActionRequest request)
++    {
++        ArgumentNullException.ThrowIfNull(request);
++        return FindSearchResult(request, sanitizeQuery: true);
++    }
++
+     public static IReadOnlyList<string> GetPackageVersions(IpcPackageActionRequest request)
+     {
+         ArgumentNullException.ThrowIfNull(request);
+@@ -700,11 +706,20 @@ public static class IpcPackageApi
+         };
+     }
+ 
+-    private static IPackage FindSearchResult(IpcPackageActionRequest request)
++    private static IPackage FindSearchResult(
++        IpcPackageActionRequest request,
++        bool sanitizeQuery = false
++    )
+     {
++        string query = sanitizeQuery
++            ? CoreTools.EnsureSafeQueryString(request.PackageId)
++            : request.PackageId;
++        if (string.IsNullOrWhiteSpace(query))
++            throw new InvalidOperationException("The package identifier is not a valid search query.");
++
+         foreach (var manager in GetManagers(request.ManagerName))
+         {
+-            var package = manager.FindPackages(request.PackageId).FirstOrDefault(candidate =>
++            var package = manager.FindPackages(query).FirstOrDefault(candidate =>
+                 MatchesIdentity(candidate, request)
+             );
+             if (package is not null)
+diff --git a/src/UniGetUI.Interface.Telemetry/TelemetryHandler.cs b/src/UniGetUI.Interface.Telemetry/TelemetryHandler.cs
+index 8d85cbf..db8a350 100644
+--- a/src/UniGetUI.Interface.Telemetry/TelemetryHandler.cs
++++ b/src/UniGetUI.Interface.Telemetry/TelemetryHandler.cs
+@@ -21,6 +21,7 @@ public enum TEL_InstallReferral
+     DIRECT_SEARCH,
+     FROM_BUNDLE,
+     ALREADY_INSTALLED,
++    FROM_LINK,
+ }
+ 
+ public enum TEL_OP_RESULT
+diff --git a/src/UniGetUI.Tests/PackageLinkTests.cs b/src/UniGetUI.Tests/PackageLinkTests.cs
+new file mode 100644
+index 0000000..112eb2e
+--- /dev/null
++++ b/src/UniGetUI.Tests/PackageLinkTests.cs
+@@ -0,0 +1,174 @@
++using UniGetUI.Interface;
++using UniGetUI.PackageEngine.Classes.Manager;
++using UniGetUI.PackageEngine.PackageClasses;
++
++namespace UniGetUI.Tests;
++
++public sealed class PackageLinkTests
++{
++    [Fact]
++    public void Parse_ReadsEveryParameter()
++    {
++        PackageLink? link = PackageLink.TryParse(
++            "unigetui://package?manager=winget&source=msstore&id=TechSmith.Snagit.2025&version=25.1.0&name=Snagit%202025");
++
++        Assert.Equal(
++            new PackageLink("TechSmith.Snagit.2025", "winget", "msstore", "25.1.0", "Snagit 2025"),
++            link);
++    }
++
++    [Fact]
++    public void Parse_OnlyNeedsAnId()
++    {
++        Assert.Equal(new PackageLink("Git.Git", null, null, null, null), PackageLink.TryParse("unigetui://package?id=Git.Git"));
++    }
++
++    [Theory]
++    [InlineData("unigetui://package/?id=Git.Git")]
++    [InlineData("unigetui:package?id=Git.Git")]
++    [InlineData("UNIGETUI://Package?ID=Git.Git")]
++    [InlineData("unigetui://package?id=Git.Git#fragment")]
++    [InlineData("unigetui://package?id=Git.Git&")]
++    [InlineData("unigetui://package?id=%20Git.Git%20")]
++    public void Parse_AcceptsTheShapesBrowsersAndShellsProduce(string uri)
++    {
++        Assert.Equal("Git.Git", PackageLink.TryParse(uri)?.Id);
++    }
++
++    [Fact]
++    public void Parse_DecodesPlusAsASpace()
++    {
++        Assert.Equal("Visual Studio Code", PackageLink.TryParse("unigetui://package?id=x&name=Visual+Studio+Code")?.Name);
++    }
++
++    [Fact]
++    public void Parse_IgnoresUnknownParameters()
++    {
++        Assert.Equal("Git.Git", PackageLink.TryParse("unigetui://package?id=Git.Git&future=1")?.Id);
++    }
++
++    [Fact]
++    public void Parse_DoesNotTakeInstallOptionsFromTheLink()
++    {
++        PackageLink? link = PackageLink.TryParse(
++            "unigetui://package?id=Git.Git&args=--silent&installer=https%3A%2F%2Fexample.test%2Fevil.exe");
++
++        Assert.Equal(new PackageLink("Git.Git", null, null, null, null), link);
++    }
++
++    [Theory]
++    [InlineData("unigetui://package")]
++    [InlineData("unigetui://package?")]
++    [InlineData("unigetui://package?id=")]
++    [InlineData("unigetui://package?id=%20")]
++    [InlineData("unigetui://package?manager=winget")]
++    [InlineData("unigetui://package?id=Git.Git&id=Other.Package")]
++    [InlineData("unigetui://package?id=Git.Git&ID=Other.Package")]
++    [InlineData("unigetui://package?id=Git.Git%0A--import-settings")]
++    [InlineData("unigetui://package?id=Git.Git&name=a%00b")]
++    [InlineData("unigetui://openUniGetUI")]
++    [InlineData("unigetui://packages?id=Git.Git")]
++    [InlineData("https://package?id=Git.Git")]
++    [InlineData("package?id=Git.Git")]
++    [InlineData("")]
++    [InlineData(null)]
++    public void Parse_RefusesMalformedOrOtherLinks(string? uri)
++    {
++        Assert.Null(PackageLink.TryParse(uri));
++    }
++
++    [Fact]
++    public void Parse_RefusesOversizedValuesAndLinks()
++    {
++        string longValue = new('a', PackageLink.MaxValueLength + 1);
++        Assert.Null(PackageLink.TryParse($"unigetui://package?id={longValue}"));
++        Assert.NotNull(PackageLink.TryParse($"unigetui://package?id={longValue[1..]}"));
++
++        string longLink = "unigetui://package?id=Git.Git&padding=" + new string('a', PackageLink.MaxLinkLength);
++        Assert.Null(PackageLink.TryParse(longLink));
++    }
++
++    [Theory]
++    [InlineData("unigetui://package?id=Git.Git", true)]
++    [InlineData("unigetui://package?id=", true)]
++    [InlineData("unigetui://package/", true)]
++    [InlineData("unigetui://openUniGetUI", false)]
++    [InlineData("unigetui://updateAll", false)]
++    [InlineData("C:\\bundle.ubundle", false)]
++    public void IsPackageLink_RecognisesTheActionWhetherOrNotTheLinkIsValid(string arg, bool expected)
++    {
++        Assert.Equal(expected, PackageLink.IsPackageLink(arg));
++    }
++
++    [Fact]
++    public void ToUri_RoundTripsValuesThatNeedEncoding()
++    {
++        PackageLink link = new("@scope/pkg&x=1", "npm", "my source", "1.0.0-beta+2", "Name: with & symbols / ?");
++
++        string uri = link.ToUri();
++
++        Assert.StartsWith("unigetui://package?manager=npm&source=my%20source&id=%40scope%2Fpkg%26x%3D1&", uri);
++        Assert.Equal(link, PackageLink.TryParse(uri));
++    }
++
++    [Fact]
++    public void ToUri_LeavesOutMissingParameters()
++    {
++        Assert.Equal("unigetui://package?id=Git.Git", new PackageLink("Git.Git", null, null, null, null).ToUri());
++    }
++
++    [Fact]
++    public void FromPackage_NamesTheManagerAndPackage()
++    {
++        var manager = new NullPackageManager();
++        var package = new Package("Snagit 2025", "TechSmith.Snagit.2025", "25.1.0",
++            new ManagerSource(manager, "main", new Uri("https://example.test/feed")), manager);
++
++        PackageLink link = PackageLink.FromPackage(package);
++
++        // The test manager has no custom sources, so the source is left out.
++        Assert.Equal(new PackageLink("TechSmith.Snagit.2025", manager.Id, null, null, "Snagit 2025"), link);
++        Assert.True(PackageLink.CanLinkTo(package));
++    }
++
++    [Fact]
++    public void FromPackage_DropsANameTooLongToParse()
++    {
++        var manager = new NullPackageManager();
++        var package = new Package(new string('n', PackageLink.MaxValueLength + 1), "Some.Package", "1.0",
++            new ManagerSource(manager, "main", new Uri("https://example.test/feed")), manager);
++
++        PackageLink link = PackageLink.FromPackage(package);
++
++        Assert.Null(link.Name);
++        Assert.Equal(link, PackageLink.TryParse(link.ToUri()));
++    }
++
++    [Fact]
++    public void CanLinkTo_RefusesPackagesOnlyKnownToThisComputer()
++    {
++        var package = new Package("Local", "Local.App", "1.0", NullSource.Instance, NullPackageManager.Instance);
++
++        Assert.False(PackageLink.CanLinkTo(package));
++    }
++
++    [Fact]
++    public void CanLinkTo_RefusesAnIdentifierThatCannotBeParsed()
++    {
++        var manager = new NullPackageManager();
++        var package = new Package("Example", new string('a', PackageLink.MaxValueLength + 1), "1.0",
++            new ManagerSource(manager, "main", new Uri("https://example.test/feed")), manager);
++
++        Assert.False(PackageLink.CanLinkTo(package));
++    }
++
++    [Theory]
++    [InlineData("Git", "Git", "Git")]
++    [InlineData("git", "Git", "Git")]
++    [InlineData("Git", "Git.Git", "Git (Git.Git)")]
++    [InlineData(null, "Git.Git", "Git.Git")]
++    public void DisplayName_ShowsTheIdOnlyWhenItAddsSomething(string? name, string id, string expected)
++    {
++        Assert.Equal(expected, new PackageLink(id, null, null, null, name).DisplayName);
++    }
++}
+diff --git a/src/UniGetUI.Tests/UniGetUI.Tests.csproj b/src/UniGetUI.Tests/UniGetUI.Tests.csproj
+index f444b51..bb582f7 100644
+--- a/src/UniGetUI.Tests/UniGetUI.Tests.csproj
++++ b/src/UniGetUI.Tests/UniGetUI.Tests.csproj
+@@ -49,5 +49,6 @@
+         <Compile Include="..\UniGetUI\CLIHandler.cs" Link="CLIHandler.cs" />
+         <Compile Include="..\UniGetUI\CsvExportHelpers.cs" Link="CsvExportHelpers.cs" />
+         <Compile Include="..\UniGetUI\ModernAppLauncher.cs" Link="ModernAppLauncher.cs" />
++        <Compile Include="..\UniGetUI\Services\PackageLink.cs" Link="PackageLink.cs" />
+     </ItemGroup>
+ </Project>
+diff --git a/src/UniGetUI/App.xaml.cs b/src/UniGetUI/App.xaml.cs
+index 55fe2d2..f6208e4 100644
+--- a/src/UniGetUI/App.xaml.cs
++++ b/src/UniGetUI/App.xaml.cs
+@@ -21,6 +21,7 @@ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageOperations;
+ using UniGetUI.Pages.DialogPages;
+ using UniGetUI.Services;
++using UniGetUI.Shared;
+ using Windows.ApplicationModel.Activation;
+ using LaunchActivatedEventArgs = Microsoft.UI.Xaml.LaunchActivatedEventArgs;
+ 
+@@ -403,11 +404,11 @@ namespace UniGetUI
+                 RaiseExceptionAsFatal = false;
+ 
+                 // Process any remaining command-line arguments
+-                MainWindow.ProcessCommandLineParameters();
+                 MainWindow.ParametersToProcess.ItemEnqueued += (_, _) =>
+                 {
+                     MainWindow.DispatcherQueue.TryEnqueue(MainWindow.ProcessCommandLineParameters);
+                 };
++                MainWindow.ProcessCommandLineParameters();
+ 
+                 _ = CheckForMissingDependencies();
+ 
+@@ -671,14 +672,15 @@ namespace UniGetUI
+                 {
+                     // If the app redirection event comes from a launch, extract
+                     // the CLI arguments and redirect them to the ParameterProcessor
+-                    foreach (
+-                        Match argument in Regex.Matches(
++                    string[] arguments = Regex.Matches(
+                             launchArguments.Arguments,
+                             "([^ \"']+|\"[^\"]+\"|'[^']+')"
+                         )
+-                    )
++                        .Select(argument => argument.Value)
++                        .ToArray();
++                    foreach (string argument in SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(arguments))
+                     {
+-                        MainWindow.ParametersToProcess.Enqueue(argument.Value);
++                        MainWindow.ParametersToProcess.Enqueue(argument);
+                     }
+                 }
+                 else
+@@ -688,6 +690,10 @@ namespace UniGetUI
+                     );
+                 }
+             }
++            else if (kind is ExtendedActivationKind.Protocol && rawArgs.Data is IProtocolActivatedEventArgs protocol)
++            {
++                MainWindow.ParametersToProcess.Enqueue(protocol.Uri.AbsoluteUri);
++            }
+             else
+             {
+                 Logger.Warn("REDIRECTOR ACTIVATOR: args.Kind is not Launch but rather " + kind);
+diff --git a/src/UniGetUI/MainWindow.xaml.cs b/src/UniGetUI/MainWindow.xaml.cs
+index dad45a9..64d04c7 100644
+--- a/src/UniGetUI/MainWindow.xaml.cs
++++ b/src/UniGetUI/MainWindow.xaml.cs
+@@ -18,8 +18,10 @@ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.Interface.Enums;
++using UniGetUI.Interface.Telemetry;
+ using UniGetUI.PackageEngine;
+ using UniGetUI.PackageEngine.Classes.Manager.Classes;
++using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.PackageClasses;
+ using UniGetUI.PackageEngine.PackageLoader;
+@@ -370,6 +372,15 @@ namespace UniGetUI.Interface
+         /// <param name="link">the unigetui:// deep link to handle</param>
+         private void HandleDeepLink(string link)
+         {
++            if (PackageLink.IsPackageLink(link))
++            {
++                if (PackageLink.TryParse(link) is { } packageLink)
++                    _ = OpenPackageLinkAsync(packageLink);
++                else
++                    ShowPackageLinkError(CoreTools.Translate("The package link is invalid."));
++                return;
++            }
++
+             string baseUrl = Uri.UnescapeDataString(link[11..]);
+             Logger.ImportantInfo("Begin handle of deep link with body " + baseUrl);
+ 
+@@ -403,6 +414,72 @@ namespace UniGetUI.Interface
+             }
+         }
+ 
++        private async Task OpenPackageLinkAsync(PackageLink link)
++        {
++            ShowFromTray();
++            if (link.Manager is { } managerId)
++            {
++                var manager = PEInterface.Managers.FirstOrDefault(candidate =>
++                    candidate.Id.Equals(managerId, StringComparison.OrdinalIgnoreCase)
++                );
++                if (manager is null)
++                {
++                    ShowPackageLinkError(CoreTools.Translate("This version of UniGetUI does not support the package manager {0}.", managerId));
++                    return;
++                }
++                if (!manager.IsEnabled())
++                {
++                    ShowPackageLinkError(CoreTools.Translate("{0} is disabled. Enable it in the settings to open this package.", manager.DisplayName));
++                    return;
++                }
++                if (!manager.IsReady())
++                {
++                    ShowPackageLinkError(CoreTools.Translate("{0} is not available on this computer.", manager.DisplayName));
++                    return;
++                }
++            }
++
++            IPackage? package = null;
++            int loadingId = DialogHelper.ShowLoadingDialog(CoreTools.Translate("Looking for {0}...", link.DisplayName));
++            try
++            {
++                package = await Task.Run(() => IpcPackageApi.FindCatalogPackage(new IpcPackageActionRequest
++                {
++                    PackageId = link.Id,
++                    ManagerName = link.Manager,
++                    PackageSource = link.Source,
++                }));
++            }
++            catch (Exception ex)
++            {
++                Logger.Warn($"Could not resolve the package link for {link.Id}");
++                Logger.Warn(ex);
++            }
++            finally
++            {
++                DialogHelper.HideLoadingDialog(loadingId);
++            }
++
++            if (package is null || package.Source.IsVirtualManager)
++            {
++                ShowPackageLinkError(CoreTools.Translate("{0} was not found.", link.DisplayName));
++                return;
++            }
++            if (link.Version is not null && !package.Manager.Capabilities.SupportsCustomVersions)
++            {
++                ShowPackageLinkError(CoreTools.Translate("{0} does not support installing a specified version.", package.Manager.DisplayName));
++                return;
++            }
++
++            await DialogHelper.ShowPackageDetails(package, OperationType.Install, TEL_InstallReferral.FROM_LINK, link.Version);
++        }
++
++        private static void ShowPackageLinkError(string message)
++        {
++            Logger.Warn(message);
++            DialogHelper.ShowDismissableBalloon(CoreTools.Translate("The package link could not be opened"), message);
++        }
++
+         /// <summary>
+         /// Will process any remaining CLI parameter stored on MainWindow.ParametersToProcess
+         /// </summary>
+@@ -450,7 +527,10 @@ namespace UniGetUI.Interface
+                         Logger.Warn("Unknown parameter " + param);
+                     }
+                 }
+-                else if (param.Length > 11 && param.ToLower().StartsWith("unigetui://"))
++                else if (
++                    PackageLink.IsPackageLink(param)
++                    || param.StartsWith("unigetui://", StringComparison.OrdinalIgnoreCase)
++                )
+                 {
+                     HandleDeepLink(param);
+                 }
+diff --git a/src/UniGetUI/Pages/DialogPages/DialogHelper_Packages.cs b/src/UniGetUI/Pages/DialogPages/DialogHelper_Packages.cs
+index 461f09f..1c069e1 100644
+--- a/src/UniGetUI/Pages/DialogPages/DialogHelper_Packages.cs
++++ b/src/UniGetUI/Pages/DialogPages/DialogHelper_Packages.cs
+@@ -104,10 +104,11 @@ public static partial class DialogHelper
+     public static async Task ShowPackageDetails(
+         IPackage package,
+         OperationType operation,
+-        TEL_InstallReferral referral
++        TEL_InstallReferral referral,
++        string? requestedVersion = null
+     )
+     {
+-        PackageDetailsPage DetailsPage = new(package, operation, referral);
++        PackageDetailsPage DetailsPage = new(package, operation, referral, requestedVersion);
+ 
+         ContentDialog DetailsDialog = DialogFactory.Create_AsWindow(false);
+         DetailsDialog.Content = DetailsPage;
+diff --git a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+index b32dd94..c06ff4a 100644
+--- a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
++++ b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+@@ -366,6 +366,11 @@ namespace UniGetUI.Interface.Dialogs
+                     VersionComboBox.SelectedValue = ver;
+                 }
+             }
++            if (!string.IsNullOrWhiteSpace(Options.Version) && !versions.Contains(Options.Version))
++            {
++                VersionComboBox.Items.Add(Options.Version);
++                VersionComboBox.SelectedValue = Options.Version;
++            }
+             IgnoreUpdatesCheckbox.IsChecked = await Package.HasUpdatesIgnoredAsync();
+ 
+             VersionComboBox.IsEnabled =
+diff --git a/src/UniGetUI/Pages/DialogPages/PackageDetailsPage.xaml b/src/UniGetUI/Pages/DialogPages/PackageDetailsPage.xaml
+index 2673e2f..e995f88 100644
+--- a/src/UniGetUI/Pages/DialogPages/PackageDetailsPage.xaml
++++ b/src/UniGetUI/Pages/DialogPages/PackageDetailsPage.xaml
+@@ -50,6 +50,7 @@
+ 
+           <TextBlock
+             Name="PackageName"
++            AutomationProperties.AutomationId="PackageDetailsName"
+             Grid.Column="1"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+diff --git a/src/UniGetUI/Pages/DialogPages/PackageDetailsPage.xaml.cs b/src/UniGetUI/Pages/DialogPages/PackageDetailsPage.xaml.cs
+index aa79386..03dd59a 100644
+--- a/src/UniGetUI/Pages/DialogPages/PackageDetailsPage.xaml.cs
++++ b/src/UniGetUI/Pages/DialogPages/PackageDetailsPage.xaml.cs
+@@ -53,7 +53,8 @@ namespace UniGetUI.Interface.Dialogs
+         public PackageDetailsPage(
+             IPackage package,
+             OperationType role,
+-            TEL_InstallReferral referral
++            TEL_InstallReferral referral,
++            string? requestedVersion = null
+         )
+         {
+             if (role == OperationType.None)
+@@ -119,6 +120,8 @@ namespace UniGetUI.Interface.Dialogs
+             InstalledPackage = UpgradablePackage?.GetInstalledPackages().FirstOrDefault();
+ 
+             var options = InstallOptionsFactory.LoadForPackage(package);
++            if (!string.IsNullOrWhiteSpace(requestedVersion))
++                options.Version = requestedVersion;
+             InstallOptionsPage = new InstallOptionsPage(package, OperationRole, options);
+             InstallOptionsPage.Close += (_, _) => Close?.Invoke(this, EventArgs.Empty);
+             InstallOptionsPage.HideCloseButton();
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+index c804901..422b7d1 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+@@ -229,6 +229,39 @@ namespace UniGetUI.Interface
+         protected abstract void WhenPackagesLoaded(ReloadReason reason);
+         protected abstract void WhenPackageCountUpdated();
+         protected abstract void WhenShowingContextMenu(IPackage package);
++
++        protected BetterMenuItem CreateCopyLinkMenuItem()
++        {
++            BetterMenuItem item = new()
++            {
++                Text = CoreTools.AutoTranslated("Copy link"),
++                IconName = IconType.Info_Round,
++            };
++            item.Click += (_, _) =>
++            {
++                if (SelectedItem is not { } package || !PackageLink.CanLinkTo(package))
++                    return;
++                try
++                {
++                    var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
++                    data.SetText(PackageLink.FromPackage(package).ToUri());
++                    Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
++                    DialogHelper.ShowDismissableBalloon(
++                        CoreTools.Translate("Copy link"),
++                        CoreTools.Translate("A link to {0} was copied to the clipboard.", package.Name)
++                    );
++                }
++                catch (Exception ex)
++                {
++                    Logger.Error(ex);
++                    DialogHelper.ShowDismissableBalloon(
++                        CoreTools.Translate("Copy link"),
++                        CoreTools.Translate("The package link could not be copied.")
++                    );
++                }
++            };
++            return item;
++        }
+         public abstract void GenerateToolBar();
+         public abstract BetterMenu GenerateContextMenu();
+ 
+diff --git a/src/UniGetUI/Pages/SoftwarePages/DiscoverSoftwarePage.cs b/src/UniGetUI/Pages/SoftwarePages/DiscoverSoftwarePage.cs
+index 3127ac3..a00b714 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/DiscoverSoftwarePage.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/DiscoverSoftwarePage.cs
+@@ -23,6 +23,7 @@ namespace UniGetUI.Interface.SoftwarePages
+         private BetterMenuItem? MenuInteractive;
+         private BetterMenuItem? MenuSkipHash;
+         private BetterMenuItem? MenuDownloadInstaller;
++        private BetterMenuItem? MenuCopyLink;
+ 
+         public DiscoverSoftwarePage()
+             : base(
+@@ -149,6 +150,7 @@ namespace UniGetUI.Interface.SoftwarePages
+             };
+             menuDetails.Click += MenuDetails_Invoked;
+             menu.Items.Add(menuDetails);
++            menu.Items.Add(MenuCopyLink = CreateCopyLinkMenuItem());
+ 
+             return menu;
+         }
+@@ -271,6 +273,7 @@ namespace UniGetUI.Interface.SoftwarePages
+                 || MenuInteractive is null
+                 || MenuSkipHash is null
+                 || MenuDownloadInstaller is null
++                || MenuCopyLink is null
+             )
+             {
+                 Logger.Warn("MenuItems are null on DiscoverPackagesPage");
+@@ -281,6 +284,7 @@ namespace UniGetUI.Interface.SoftwarePages
+             MenuInteractive.IsEnabled = package.Manager.Capabilities.CanRunInteractively;
+             MenuSkipHash.IsEnabled = package.Manager.Capabilities.CanSkipIntegrityChecks;
+             MenuDownloadInstaller.IsEnabled = package.Manager.Capabilities.CanDownloadInstaller;
++            MenuCopyLink.IsEnabled = PackageLink.CanLinkTo(package);
+         }
+ 
+         private void ExportSelection_Click(object sender, RoutedEventArgs e) =>
+diff --git a/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs b/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
+index add1bcd..c34b59b 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/InstalledPackagesPage.cs
+@@ -31,6 +31,7 @@ namespace UniGetUI.Interface.SoftwarePages
+         private BetterMenuItem? MenuUninstallThenReinstall;
+         private BetterMenuItem? MenuIgnoreUpdates;
+         private BetterMenuItem? MenuPackageDetails;
++        private BetterMenuItem? MenuCopyLink;
+         private BetterMenuItem? MenuOpenInstallLocation;
+         private BetterMenuItem? MenuDownloadInstaller;
+         private BetterMenuItem? MenuUpdate;
+@@ -195,6 +196,7 @@ namespace UniGetUI.Interface.SoftwarePages
+             };
+             MenuPackageDetails.Click += MenuDetails_Invoked;
+             menu.Items.Add(MenuPackageDetails);
++            menu.Items.Add(MenuCopyLink = CreateCopyLinkMenuItem());
+ 
+             return menu;
+         }
+@@ -371,6 +373,7 @@ namespace UniGetUI.Interface.SoftwarePages
+                 || MenuReinstallPackage is null
+                 || MenuIgnoreUpdates is null
+                 || MenuPackageDetails is null
++                || MenuCopyLink is null
+                 || MenuOpenInstallLocation is null
+                 || MenuDownloadInstaller is null
+                 || MenuUpdate is null
+@@ -401,6 +404,7 @@ namespace UniGetUI.Interface.SoftwarePages
+             MenuUninstallThenReinstall.IsEnabled = !IS_LOCAL;
+             MenuIgnoreUpdates.IsEnabled = false; // Will be set on the lines below;
+             MenuPackageDetails.IsEnabled = !IS_LOCAL;
++            MenuCopyLink.IsEnabled = PackageLink.CanLinkTo(package);
+             MenuDownloadInstaller.IsEnabled =
+                 !IS_LOCAL && package.Manager.Capabilities.CanDownloadInstaller;
+             ;
+diff --git a/src/UniGetUI/Services/PackageLink.cs b/src/UniGetUI/Services/PackageLink.cs
+new file mode 100644
+index 0000000..4a616ed
+--- /dev/null
++++ b/src/UniGetUI/Services/PackageLink.cs
+@@ -0,0 +1,152 @@
++using System.Text;
++using UniGetUI.PackageEngine.Interfaces;
++
++namespace UniGetUI.Interface;
++
++/// <summary>
++/// A <c>unigetui://package?manager=…&amp;source=…&amp;id=…</c> deep link. It names a package so
++/// that the recipient's UniGetUI can look it up in its own managers and open the package details,
++/// from where the user installs it. A link identifies a package and nothing else: it never carries
++/// installer URLs, arguments or other install options, which always come from the recipient's
++/// own settings.
++/// </summary>
++internal sealed record PackageLink(string Id, string? Manager, string? Source, string? Version, string? Name)
++{
++    public const string Action = "package";
++
++    private const string SchemePrefix = "unigetui:";
++
++    // Long enough for any real package identity, short enough that a crafted link cannot hand
++    // the package lookup an arbitrarily large query.
++    internal const int MaxLinkLength = 2048;
++    internal const int MaxValueLength = 256;
++
++    /// <summary>
++    /// Whether <paramref name="arg"/> is a <c>unigetui:</c> link to the package action, valid or not.
++    /// </summary>
++    public static bool IsPackageLink(string? arg)
++        => TrySplit(arg, out string action, out _)
++           && action.Equals(Action, StringComparison.OrdinalIgnoreCase);
++
++    /// <summary>
++    /// Parses a package link, or returns null when <paramref name="arg"/> is not one or is malformed:
++    /// no <c>id</c>, a repeated parameter, a control character, or a value or link over the size limits.
++    /// Unknown parameters are ignored, so a newer link still opens in an older version.
++    /// </summary>
++    public static PackageLink? TryParse(string? arg)
++    {
++        if (arg is null || arg.Length > MaxLinkLength)
++            return null;
++
++        if (!TrySplit(arg, out string action, out string query)
++            || !action.Equals(Action, StringComparison.OrdinalIgnoreCase))
++            return null;
++
++        Dictionary<string, string> values = new(StringComparer.OrdinalIgnoreCase);
++        foreach (string pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
++        {
++            int separator = pair.IndexOf('=');
++            string rawKey = separator < 0 ? pair : pair[..separator];
++            string rawValue = separator < 0 ? "" : pair[(separator + 1)..];
++
++            if (!TryDecode(rawKey, out string key) || !TryDecode(rawValue, out string value))
++                return null;
++
++            // A repeated parameter makes the link ambiguous about which package it names.
++            if (!values.TryAdd(key, value))
++                return null;
++        }
++
++        if (Get("id") is not { } id)
++            return null;
++
++        return new PackageLink(id, Get("manager"), Get("source"), Get("version"), Get("name"));
++
++        string? Get(string key)
++            => values.TryGetValue(key, out string? value) && value.Trim() is { Length: > 0 } trimmed
++                ? trimmed
++                : null;
++    }
++
++    /// <summary>
++    /// Whether a link can name <paramref name="package"/>: packages that only exist on this
++    /// machine, such as the WinGet "Local PC" entries, cannot be found from another one.
++    /// </summary>
++    public static bool CanLinkTo(IPackage package) =>
++        !package.Source.IsVirtualManager && TryParse(FromPackage(package).ToUri()) is not null;
++
++    public static PackageLink FromPackage(IPackage package) => new(
++        package.Id,
++        package.Manager.Id,
++        // Managers without custom sources only have their default source, so naming it adds nothing.
++        package.Manager.Capabilities.SupportsCustomSources ? package.Source.Name : null,
++        Version: null,
++        // The name is only shown while looking the package up; drop it rather than produce a
++        // link that the parser would refuse.
++        package.Name.Length <= MaxValueLength ? package.Name : null);
++
++    public string ToUri()
++    {
++        StringBuilder uri = new($"{SchemePrefix}//{Action}");
++        char separator = '?';
++        Append("manager", Manager);
++        Append("source", Source);
++        Append("id", Id);
++        Append("version", Version);
++        Append("name", Name);
++        return uri.ToString();
++
++        void Append(string key, string? value)
++        {
++            if (string.IsNullOrEmpty(value))
++                return;
++
++            uri.Append(separator).Append(key).Append('=').Append(Uri.EscapeDataString(value));
++            separator = '&';
++        }
++    }
++
++    /// <summary>The package as it should be named before it is found: its name and id, or its id.</summary>
++    public string DisplayName
++        => Name is null || Name.Equals(Id, StringComparison.OrdinalIgnoreCase) ? Id : $"{Name} ({Id})";
++
++    private static bool TrySplit(string? arg, out string action, out string query)
++    {
++        action = "";
++        query = "";
++
++        if (arg is null || !arg.StartsWith(SchemePrefix, StringComparison.OrdinalIgnoreCase))
++            return false;
++
++        string rest = arg[SchemePrefix.Length..];
++
++        int fragment = rest.IndexOf('#');
++        if (fragment >= 0)
++            rest = rest[..fragment];
++
++        int queryStart = rest.IndexOf('?');
++        if (queryStart >= 0)
++        {
++            query = rest[(queryStart + 1)..];
++            rest = rest[..queryStart];
++        }
++
++        // unigetui://package, unigetui:package and the unigetui://package/ some browsers produce
++        action = rest.Trim('/');
++        return true;
++    }
++
++    private static bool TryDecode(string raw, out string decoded)
++    {
++        try
++        {
++            decoded = Uri.UnescapeDataString(raw.Replace('+', ' '));
++            return decoded.Length <= MaxValueLength && !decoded.Any(char.IsControl);
++        }
++        catch (UriFormatException)
++        {
++            decoded = "";
++            return false;
++        }
++    }
++}
+diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
+index 6da9708..81ab491 100644
+--- a/testing/automation/run-winui-ui-e2e.ps1
++++ b/testing/automation/run-winui-ui-e2e.ps1
+@@ -236,7 +236,33 @@ try {
+ 
+     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
+ 
+-    Write-Host 'WinUI UI E2E passed: settings, tray icon control, and CSV toolbar are reachable.'
++    $toolsBefore = (& dotnet tool list --global | Out-String)
++    $packageLink = 'unigetui://package?manager=dotnet-tool&id=dotnetsay&version=2.1.4'
++    Write-Host 'Opening a package link in the running app'
++    $redirect = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
++        -ArgumentList $packageLink -PassThru
++    $details = Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) `
++        'PackageDetailsName' -TimeoutSeconds 180
++    if ($details.Current.Name -notmatch '(?i)dotnetsay') {
++        throw 'The running app did not open the requested package.'
++    }
++    Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
++    Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
++
++    Write-Host 'Opening a package link at startup'
++    $appProcess = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
++        -ArgumentList $packageLink -PassThru
++    $details = Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) `
++        'PackageDetailsName' -TimeoutSeconds 180
++    if ($details.Current.ProcessId -ne $appProcess.Id -or $details.Current.Name -notmatch '(?i)dotnetsay') {
++        throw 'The app did not open the requested package at startup.'
++    }
++    $toolsAfter = (& dotnet tool list --global | Out-String)
++    if ($toolsBefore -ne $toolsAfter) {
++        throw 'Opening a package link changed the installed dotnet tools.'
++    }
++
++    Write-Host 'WinUI UI E2E passed: settings, tray icon control, CSV toolbar, and package links.'
+ }
+ finally {
+     if ($appProcess -and -not $appProcess.HasExited) {
+-- 
+2.51.1
+

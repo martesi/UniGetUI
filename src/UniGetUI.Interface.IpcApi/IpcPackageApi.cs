@@ -1,4 +1,6 @@
 using UniGetUI.Core.Logging;
+using UniGetUI.Core.Tools;
+using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine;
 using UniGetUI.PackageEngine.Classes.Packages.Classes;
 using UniGetUI.PackageEngine.Enums;
@@ -51,6 +53,18 @@ public sealed class IpcPackageOperationResult
     public IpcPackageInfo? Package { get; set; }
     public string? OutputPath { get; set; }
     public IReadOnlyList<string> Output { get; set; } = [];
+}
+
+public sealed class IpcPackageBulkOperationResult
+{
+    public string Status { get; set; } = "success";
+    public string Command { get; set; } = "";
+    public bool Completed { get; set; }
+    public string? Message { get; set; }
+    public int QueuedCount { get; set; }
+    public int SucceededCount { get; set; }
+    public int FailedCount { get; set; }
+    public IReadOnlyList<IpcPackageOperationResult> Results { get; set; } = [];
 }
 
 public sealed class IpcPackageDependencyInfo
@@ -113,6 +127,8 @@ internal enum IpcPackageLookupMode
 
 public static class IpcPackageApi
 {
+    private static readonly SemaphoreSlim BulkUpdateQueueLock = new(1, 1);
+
     public static IReadOnlyList<IpcPackageInfo> SearchPackages(
         string query,
         string? managerName = null,
@@ -123,8 +139,12 @@ public static class IpcPackageApi
 
         maxResults = Math.Clamp(maxResults, 1, 500);
 
+        string safeQuery = CoreTools.EnsureSafeQueryString(query);
+        if (safeQuery.Length is 0)
+            return [];
+
         return GetManagers(managerName)
-            .SelectMany(manager => manager.FindPackages(query))
+            .SelectMany(manager => manager.FindPackages(safeQuery))
             .DistinctBy(GetPackageIdentity)
             .Select(ToIpcPackageInfo)
             .OrderBy(package => package.Name, StringComparer.OrdinalIgnoreCase)
@@ -181,6 +201,97 @@ public static class IpcPackageApi
             request,
             (pkg, options) => new UpdatePackageOperation(pkg, options)
         );
+    }
+
+    /// <summary>
+    /// Queues an update for every available update, or for those of one manager, and returns the
+    /// operations it started. Sessions with a window queue them through the window instead, so
+    /// they show in its operations list; this is what a headless session uses.
+    /// </summary>
+    public static async Task<IReadOnlyList<AbstractOperation>> QueueAllUpdatesAsync(
+        string? managerName = null
+    )
+    {
+        await BulkUpdateQueueLock.WaitAsync();
+        try
+        {
+            List<AbstractOperation> operations = [];
+            foreach (var package in await GetUpdatesToApplyAsync(managerName))
+            {
+                if (
+                    package.Tag is PackageTag.OnQueue or PackageTag.BeingProcessed
+                    || IpcOperationApi.HasPendingPackageOperation(package)
+                )
+                    continue;
+
+                var options = await InstallOptionsFactory.LoadApplicableAsync(package);
+                var operation = new UpdatePackageOperation(package, options);
+                IpcOperationApi.Track(operation);
+                _ = Task.Run(() => RunTrackedOperationAsync(operation));
+                operations.Add(operation);
+            }
+
+            return operations;
+        }
+        finally
+        {
+            BulkUpdateQueueLock.Release();
+        }
+    }
+
+    internal static IpcPackageBulkOperationResult CreateQueuedBulkResult(
+        string command,
+        IReadOnlyList<AbstractOperation> operations
+    )
+    {
+        var results = operations
+            .OfType<PackageOperation>()
+            .Select(operation =>
+                CreateOperationResult(command, operation.Package, operation, completed: false)
+            )
+            .ToArray();
+
+        return new IpcPackageBulkOperationResult
+        {
+            Command = command,
+            Completed = results.Length == 0,
+            Message = results.Length == 0
+                ? "No updates are available."
+                : "The updates were queued for background execution.",
+            QueuedCount = results.Length,
+            Results = results,
+        };
+    }
+
+    // Reads the update list the app shows, never the managers' raw lists: only the loader applies
+    // ignored updates, skipped minor updates and the minimum update age.
+    private static async Task<IReadOnlyList<IPackage>> GetUpdatesToApplyAsync(string? managerName)
+    {
+        var loader = UpgradablePackagesLoader.Instance
+            ?? throw new InvalidOperationException(
+                "The current UniGetUI session has not loaded its package updates."
+            );
+
+        // Headless sessions have no visible page to refresh stale package lists. Refresh installed
+        // packages first so the update loader validates candidates against the current versions.
+        if (InstalledPackagesLoader.Instance is { } installedLoader)
+        {
+            if (installedLoader.IsLoading)
+                await installedLoader.WaitForCurrentLoadAsync();
+            await installedLoader.ReloadPackages();
+            if (installedLoader.IsLoading)
+                await installedLoader.WaitForCurrentLoadAsync();
+        }
+
+        if (loader.IsLoading)
+            await loader.WaitForCurrentLoadAsync();
+        await loader.ReloadPackages();
+        if (loader.IsLoading)
+            await loader.WaitForCurrentLoadAsync();
+
+        return loader.Packages
+            .Where(package => MatchesManager(package.Manager, managerName))
+            .ToArray();
     }
 
     public static Task<IpcPackageOperationResult> UninstallPackageAsync(
@@ -356,6 +467,12 @@ public static class IpcPackageApi
     {
         ArgumentNullException.ThrowIfNull(request);
         return FindAnyPackage(request);
+    }
+
+    public static IPackage FindCatalogPackage(IpcPackageActionRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return FindSearchResult(request, sanitizeQuery: true);
     }
 
     public static IReadOnlyList<string> GetPackageVersions(IpcPackageActionRequest request)
@@ -589,11 +706,20 @@ public static class IpcPackageApi
         };
     }
 
-    private static IPackage FindSearchResult(IpcPackageActionRequest request)
+    private static IPackage FindSearchResult(
+        IpcPackageActionRequest request,
+        bool sanitizeQuery = false
+    )
     {
+        string query = sanitizeQuery
+            ? CoreTools.EnsureSafeQueryString(request.PackageId)
+            : request.PackageId;
+        if (string.IsNullOrWhiteSpace(query))
+            throw new InvalidOperationException("The package identifier is not a valid search query.");
+
         foreach (var manager in GetManagers(request.ManagerName))
         {
-            var package = manager.FindPackages(request.PackageId).FirstOrDefault(candidate =>
+            var package = manager.FindPackages(query).FirstOrDefault(candidate =>
                 MatchesIdentity(candidate, request)
             );
             if (package is not null)

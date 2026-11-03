@@ -1,6 +1,8 @@
 name: WinUI UI E2E
 
 on:
+  push:
+    branches: [ "backport/**-updates" ]
   pull_request:
     branches: [ "main" ]
     paths:
@@ -38,6 +40,24 @@ jobs:
       - name: Build WinUI application
         working-directory: src
         run: dotnet build UniGetUI/UniGetUI.csproj --no-restore --configuration Release /p:Platform=x64
+
+      - name: Verify WinUI executable
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path src/UniGetUI/bin/x64/Release -Filter UniGetUI.exe -Recurse | Select-Object -First 1
+          if ($null -eq $exe) {
+              throw "The WinUI executable was not produced."
+          }
+          Write-Host "WinUI executable: $($exe.FullName)"
+
+      - name: Upload WinUI executable
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unigetui-classic-winui-x64
+          path: src/UniGetUI/bin/x64/Release/
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Run WinUI UI E2E
         shell: pwsh

@@ -411,7 +411,7 @@ namespace UniGetUI.Interface.SoftwarePages
                     _ = MainApp.Operations.UpdateAll();
                     await ShowUpgradingPackagesNotification(upgradablePackages);
                 }
-                else if (Environment.GetCommandLineArgs().Contains("--updateapps"))
+                else if (UniGetUI.Core.Data.CoreData.GetProcessArguments().Contains("--updateapps"))
                 {
                     _ = MainApp.Operations.UpdateAll();
                     await ShowUpgradingPackagesNotification(upgradablePackages);

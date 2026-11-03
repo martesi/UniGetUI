@@ -1,0 +1,187 @@
+From 65f870e194983732784597ff031ec1fd85a0140c Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:36:47 +0800
+Subject: [PATCH] backport: Search PSGallery by package id on PowerShell 5.x
+ (#5455)
+
+Upstream-Commit: a5ceb9654f9017c7a181f1a846ba265bf3af1a2e
+Upstream-PR: Devolutions/UniGetUI#5455
+Classic-Source-Commit: 65f870e194983732784597ff031ec1fd85a0140c
+
+---
+ .../OverridenInstallationOptions.cs           |  3 +-
+ .../BaseNuGet.cs                              | 11 +--
+ .../Helpers/PowerShellPkgOperationHelper.cs   | 13 ++++
+ .../PowerShell.cs                             |  2 +
+ .../PowerShellManagerTests.cs                 | 67 +++++++++++++++++++
+ 5 files changed, 90 insertions(+), 6 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+index c2993f1a2a992fbbafc29650a994c79c4397e9c1..0ef5c946ac1ac5d2b9962d1351e08c83fb16515c 100644
+--- a/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
++++ b/src/UniGetUI.PackageEngine.Enums/OverridenInstallationOptions.cs
+@@ -5,6 +5,7 @@ public struct OverridenInstallationOptions
+     public string? Scope;
+     public bool? RunAsAdministrator;
+     public bool PowerShell_DoNotSetScopeParameter = false;
++    public bool PowerShell_AllowClobber = false;
+     public bool? WinGet_SpecifyVersion = null;
+     public bool Pip_BreakSystemPackages = false;
+     public bool WinGet_DropArchAndScope = false;
+@@ -20,6 +21,6 @@ public struct OverridenInstallationOptions
+ 
+     public override string ToString()
+     {
+-        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope};WG_UseLocalId={WinGet_UseLocalIdentifier};Cargo_DoNotUseBinstall={Cargo_DoNotUseBinstall};Cargo_CustomInstallPath={Cargo_CustomInstallPathRequested}>";
++        return $"<Scope={Scope};RunAsAdministrator={RunAsAdministrator};WG_SpecifyVersion={WinGet_SpecifyVersion};PS_NoScope={PowerShell_DoNotSetScopeParameter};PS_AllowClobber={PowerShell_AllowClobber};Pip_BreakSystemPackages={Pip_BreakSystemPackages};WG_DropArchAndScope={WinGet_DropArchAndScope};WG_UseLocalId={WinGet_UseLocalIdentifier};Cargo_DoNotUseBinstall={Cargo_DoNotUseBinstall};Cargo_CustomInstallPath={Cargo_CustomInstallPathRequested}>";
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+index 08a1e778ea03640f574e33af6b386efc595239e4..07ff811eecf1766efa718d0f382f34e15fb1c31a 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+@@ -18,13 +18,14 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+     public abstract class BaseNuGet : PackageManager
+     {
+         /// <summary>
+-        /// Only applies to V2 sources. When true, searches use
++        /// Applies to V2 sources and to local folder feeds. When true, V2 searches use
+         /// Packages()?$filter=substringof(query,Id) which searches by package name only but
+         /// returns reliable results (e.g. PSGallery's Search() endpoint silently omits some
+-        /// packages). When false, the standard Search() endpoint is used which supports
+-        /// full-text search across name, description, and tags. V3 sources use
+-        /// SearchQueryService and fall back to an exact package-id lookup when the feed
+-        /// advertises no search service or returns no results.
++        /// packages), and a local feed matches the package id alone instead of also matching
++        /// title, tags, summary, description, and authors. When false, the standard Search()
++        /// endpoint is used which supports full-text search across name, description, and
++        /// tags. V3 sources use SearchQueryService and fall back to an exact package-id
++        /// lookup when the feed advertises no search service or returns no results.
+         /// </summary>
+         protected virtual bool UseSubstringSearch => false;
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
+index 3509f5e1a43c7a116f9fe6048f600d0e87942a95..72807ed5141edb8f7fae9230498889a91e0e6526 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/Helpers/PowerShellPkgOperationHelper.cs
+@@ -55,6 +55,9 @@ internal sealed class PowerShellPkgOperationHelper : BasePkgOperationHelper
+ 
+         if (operation is OperationType.Install)
+         {
++            if (package.OverridenOptions.PowerShell_AllowClobber)
++                parameters.Add("-AllowClobber");
++
+             if (options.SkipHashCheck)
+                 parameters.Add("-SkipPublisherCheck");
+ 
+@@ -128,6 +131,16 @@ internal sealed class PowerShellPkgOperationHelper : BasePkgOperationHelper
+             return OperationVeredict.AutoRetry;
+         }
+ 
++        if (
++            operation is OperationType.Install
++            && output_string.Contains("CommandAlreadyAvailable")
++            && !package.OverridenOptions.PowerShell_AllowClobber
++        )
++        {
++            package.OverridenOptions.PowerShell_AllowClobber = true;
++            return OperationVeredict.AutoRetry;
++        }
++
+         return returnCode == 0 ? OperationVeredict.Success : OperationVeredict.Failure;
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+index 63c3b46c556752e0e6d704c0eaf6f0fa97badc73..ee1cad2c15e450512c54107261eb48cf39532f30 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+@@ -123,6 +123,8 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+             return ParseInstalledPackages(outputLines, this);
+         }
+ 
++        protected override bool UseSubstringSearch => true;
++
+         public override List<string> FindCandidateExecutableFiles()
+         {
+             var candidates = CoreTools.WhichMultiple("powershell.exe");
+diff --git a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+index 1ea530087ccf0573b8a2194894b934d73edb3ce0..c0c0ddb6db8b0ddebc1753b47771b11d2471c20e 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PowerShellManagerTests.cs
+@@ -220,6 +220,73 @@ public sealed class PowerShellManagerTests
+         Assert.Equal("http://proxy", parameters[^2]);
+     }
+ 
++    private static readonly string[] ClobberFailureOutput =
++    [
++        "PackageManagement\\Install-Package : The following commands are already available on this ",
++        "system:'Find-Package,Install-Package,Uninstall-Package'. This module 'PackageManagement' may override the existing ",
++        "commands. If you still want to install this module 'PackageManagement', use -AllowClobber parameter.",
++        "    + FullyQualifiedErrorId : CommandAlreadyAvailable,Validate-ModuleCommandAlreadyAvailable,Microsoft.PowerShell.Pack ",
++        "   ageManagement.Cmdlets.InstallPackage",
++    ];
++
++    [Fact]
++    public void GetResult_RetriesWithAllowClobberOnAClobberFailure()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Install,
++            ClobberFailureOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.AutoRetry, veredict);
++        Assert.True(package.OverridenOptions.PowerShell_AllowClobber);
++
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Install
++        );
++
++        Assert.Contains("-AllowClobber", parameters);
++    }
++
++    [Fact]
++    public void GetResult_DoesNotRetryAClobberFailureTwice()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++        package.OverridenOptions.PowerShell_AllowClobber = true;
++
++        var veredict = manager.OperationHelper.GetResult(
++            package,
++            OperationType.Install,
++            ClobberFailureOutput,
++            1
++        );
++
++        Assert.Equal(OperationVeredict.Failure, veredict);
++    }
++
++    [Fact]
++    public void GetParameters_DoesNotSendAllowClobberOnUpdate()
++    {
++        var manager = new PowerShell();
++        var package = BuildInstalledPackage(manager);
++        package.OverridenOptions.PowerShell_AllowClobber = true;
++
++        var parameters = manager.OperationHelper.GetParameters(
++            package,
++            new InstallOptions(),
++            OperationType.Update
++        );
++
++        Assert.DoesNotContain("-AllowClobber", parameters);
++    }
++
+     [Fact]
+     public void Capabilities_ScopeAppliesToInstallOnly()
+     {
+-- 
+2.56.0
+

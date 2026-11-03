@@ -93,6 +93,24 @@ namespace UniGetUI.Core.SettingsEngine.Tests
         }
 
         [Theory]
+        [InlineData(false, false, true)]
+        [InlineData(false, true, false)]
+        [InlineData(true, false, false)]
+        [InlineData(true, true, false)]
+        public void TrayIconVisibilityFollowsBackgroundAndIconSettings(
+            bool disableSystemTray,
+            bool hideSystemTrayIcon,
+            bool expectedVisible
+        )
+        {
+            Settings.Set(Settings.K.DisableSystemTray, disableSystemTray);
+            Settings.Set(Settings.K.HideSystemTrayIcon, hideSystemTrayIcon);
+
+            Assert.Equal(expectedVisible, Settings.IsSystemTrayIconVisible());
+            Assert.Equal(disableSystemTray, Settings.AreNotificationsDisabled());
+        }
+
+        [Theory]
         [InlineData(Settings.K.Test1, true, false, false, true)]
         [InlineData(Settings.K.Test2, true, false, false, false)]
         [InlineData(Settings.K.Test3, true, false, true, true)]
@@ -547,6 +565,51 @@ namespace UniGetUI.Core.SettingsEngine.Tests
                     )
                 )
             );
+        }
+
+        [Fact]
+        public void ADictionaryLoadPublishedAfterAWriteKeepsTheWrite()
+        {
+            Settings.ResetSettings();
+            string file = Path.Join(
+                CoreData.UniGetUIUserConfigurationDirectory,
+                $"{Settings.ResolveKey(Settings.K.DisabledManagers)}.json"
+            );
+            var staleLoad = new Dictionary<object, object?> { ["Stale"] = true };
+
+            Settings.SetDictionary(
+                Settings.K.DisabledManagers,
+                new Dictionary<string, bool> { ["Written"] = true }
+            );
+
+            Assert.False(Settings._publishLoadedDictionary(Settings.K.DisabledManagers, staleLoad));
+            Assert.True(
+                Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, "Written")
+            );
+            Assert.False(
+                Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, "Stale")
+            );
+
+            Settings.SetDictionaryItem(Settings.K.DisabledManagers, "Other", false);
+            string onDisk = File.ReadAllText(file);
+            Assert.Contains("Written", onDisk);
+            Assert.DoesNotContain("Stale", onDisk);
+
+            Settings.ResetSettings();
+        }
+
+        [Fact]
+        public void ADictionaryLoadIntoAColdCacheIsPublished()
+        {
+            Settings.ResetSettings();
+            var load = new Dictionary<object, object?> { ["Loaded"] = true };
+
+            Assert.True(Settings._publishLoadedDictionary(Settings.K.DisabledManagers, load));
+            Assert.True(
+                Settings.DictionaryContainsKey<string, bool>(Settings.K.DisabledManagers, "Loaded")
+            );
+
+            Settings.ResetSettings();
         }
 
         [Fact]

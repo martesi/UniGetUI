@@ -1,3 +1,4 @@
+using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.SettingsEngine.SecureSettings;
 using UniGetUI.Core.Tools;
@@ -41,6 +42,28 @@ internal static class SharedPreUiCommandDispatcher
 
     private const string EnableSecureSettingForUserArgument = SecureSettings.Args.ENABLE_FOR_USER;
     private const string DisableSecureSettingForUserArgument = SecureSettings.Args.DISABLE_FOR_USER;
+
+    internal const string ProtocolLaunchScheme = "unigetui:";
+
+    public static string[] IgnoreArgumentsInjectedIntoProtocolLaunch(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            return args;
+        }
+
+        if (!args[0].StartsWith(ProtocolLaunchScheme, StringComparison.OrdinalIgnoreCase))
+        {
+            return args;
+        }
+
+        Logger.Warn(
+            $"A {ProtocolLaunchScheme} launch carried {args.Length - 1} extra argument(s). "
+                + "They can only come from an injected quote in the URI, so they are ignored."
+        );
+
+        return [args[0]];
+    }
 
     public static int? TryHandle(IReadOnlyList<string> args, SharedPreUiCommandExitCodes exitCodes)
     {

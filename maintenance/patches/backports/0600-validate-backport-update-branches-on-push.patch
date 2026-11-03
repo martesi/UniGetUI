@@ -1,0 +1,69 @@
+From 10d8a8665a2ad6c98d585ea8125cbf76bac38a29 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Mon, 26 Oct 2026 00:03:12 +0800
+Subject: [PATCH] ci: validate backport update branches on push
+
+Classic-Source-Commit: 10d8a8665a2ad6c98d585ea8125cbf76bac38a29
+
+---
+ .github/workflows/classic-guard.yml    | 2 +-
+ .github/workflows/cli-headless-e2e.yml | 2 ++
+ .github/workflows/dotnet-test.yml      | 2 +-
+ .github/workflows/winui-ui-e2e.yml     | 2 ++
+ 4 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/classic-guard.yml b/.github/workflows/classic-guard.yml
+index dad1ec858268f2aeacc014ff31c3dfa7d1ef9009..6a620b6c8106e2902c450c73bbaee99474ab74a8 100644
+--- a/.github/workflows/classic-guard.yml
++++ b/.github/workflows/classic-guard.yml
+@@ -2,7 +2,7 @@ name: Classic guard
+ 
+ on:
+   push:
+-    branches: [main]
++    branches: [main, "backport/**-updates"]
+   pull_request:
+     branches: [main]
+ 
+diff --git a/.github/workflows/cli-headless-e2e.yml b/.github/workflows/cli-headless-e2e.yml
+index 5e7517b6d3c12fb8d3cf5fef7573ffb68455a95f..d16fd616232f06a657d798de86a3c8248a6f7efe 100644
+--- a/.github/workflows/cli-headless-e2e.yml
++++ b/.github/workflows/cli-headless-e2e.yml
+@@ -1,6 +1,8 @@
+ name: CLI Headless E2E
+ 
+ on:
++  push:
++    branches: [ "backport/**-updates" ]
+   pull_request:
+     branches: [ "main" ]
+     paths:
+diff --git a/.github/workflows/dotnet-test.yml b/.github/workflows/dotnet-test.yml
+index d83d40a0c083456a2441e15482f6903738732673..b3fc3e86e1357aef8ecd03dcf7c068af788340ec 100644
+--- a/.github/workflows/dotnet-test.yml
++++ b/.github/workflows/dotnet-test.yml
+@@ -1,7 +1,7 @@
+ name: .NET Tests
+ on:
+   push:
+-    branches: [ "main" ]
++    branches: [ "main", "backport/**-updates" ]
+     paths:
+       - 'global.json'
+       - '**.cs'
+diff --git a/.github/workflows/winui-ui-e2e.yml b/.github/workflows/winui-ui-e2e.yml
+index 32c88ac72ba4664c04066a349547f1d46b931228..ef33e7f6a38f7707dc04376a08a12def46bdd562 100644
+--- a/.github/workflows/winui-ui-e2e.yml
++++ b/.github/workflows/winui-ui-e2e.yml
+@@ -1,6 +1,8 @@
+ name: WinUI UI E2E
+ 
+ on:
++  push:
++    branches: [ "backport/**-updates" ]
+   pull_request:
+     branches: [ "main" ]
+     paths:
+-- 
+2.56.0
+

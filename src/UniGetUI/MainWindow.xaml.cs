@@ -18,8 +18,10 @@ using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
+using UniGetUI.Interface.Telemetry;
 using UniGetUI.PackageEngine;
 using UniGetUI.PackageEngine.Classes.Manager.Classes;
+using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.PackageLoader;
@@ -39,6 +41,7 @@ namespace UniGetUI.Interface
 
         private TaskbarIcon? TrayIcon;
         private bool HasLoadedLastGeometry;
+        private bool _showingHiddenTrayIconNotice;
 
         public MainView NavigationPage = null!;
         public bool IsInterfaceVisible => MainContentFrame.Content is not null;
@@ -75,7 +78,7 @@ namespace UniGetUI.Interface
             ApplyProxyVariableToProcess();
             _applySubtitleToWindow();
 
-            foreach (var arg in Environment.GetCommandLineArgs())
+            foreach (var arg in UniGetUI.Core.Data.CoreData.GetProcessArguments())
             {
                 ParametersToProcess.Enqueue(arg);
             }
@@ -268,21 +271,17 @@ namespace UniGetUI.Interface
                 )
                 {
                     args.Cancel = true;
-                    DWMThreadHelper.ChangeState_DWM(true);
-                    DWMThreadHelper.ChangeState_XAML(true);
-
-                    try
+                    if (
+                        !Settings.Get(Settings.K.DisableSystemTray)
+                        && Settings.Get(Settings.K.HideSystemTrayIcon)
+                        && !Settings.Get(Settings.K.ShownHiddenTrayIconNotice)
+                    )
                     {
-                        EfficiencyModeUtilities.SetEfficiencyMode(true);
+                        if (!_showingHiddenTrayIconNotice)
+                            _ = ShowHiddenTrayIconNoticeAsync();
+                        return;
                     }
-                    catch (Exception ex)
-                    {
-                        Logger.Error("Could not disable efficiency mode");
-                        Logger.Error(ex);
-                    }
-
-                    MainContentFrame.Content = null;
-                    AppWindow.Hide();
+                    HideToBackground();
                 }
                 else
                 {
@@ -297,6 +296,63 @@ namespace UniGetUI.Interface
             {
                 Logger.Error(ex);
             }
+        }
+
+        private void HideToBackground()
+        {
+            DWMThreadHelper.ChangeState_DWM(true);
+            DWMThreadHelper.ChangeState_XAML(true);
+            try
+            {
+                EfficiencyModeUtilities.SetEfficiencyMode(true);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Could not enable efficiency mode");
+                Logger.Error(ex);
+            }
+
+            MainContentFrame.Content = null;
+            AppWindow.Hide();
+        }
+
+        private async Task ShowHiddenTrayIconNoticeAsync()
+        {
+            _showingHiddenTrayIconNotice = true;
+            try
+            {
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = XamlRoot,
+                    Title = CoreTools.Translate("UniGetUI is still running"),
+                    Content = new TextBlock
+                    {
+                        Text = CoreTools.Translate("UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences."),
+                        TextWrapping = TextWrapping.Wrap,
+                    },
+                    PrimaryButtonText = CoreTools.Translate("OK"),
+                    SecondaryButtonText = CoreTools.Translate("Quit UniGetUI"),
+                    DefaultButton = ContentDialogButton.Primary,
+                };
+                var result = await DialogHelper.ShowDialogAsync(dialog);
+                Settings.Set(Settings.K.ShownHiddenTrayIconNotice, true);
+                if (result is ContentDialogResult.Secondary)
+                {
+                    MainApp.Instance.DisposeAndQuit();
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Could not show the background notice:");
+                Logger.Error(ex);
+            }
+            finally
+            {
+                _showingHiddenTrayIconNotice = false;
+            }
+
+            HideToBackground();
         }
 
         /// <summary>
@@ -316,6 +372,15 @@ namespace UniGetUI.Interface
         /// <param name="link">the unigetui:// deep link to handle</param>
         private void HandleDeepLink(string link)
         {
+            if (PackageLink.IsPackageLink(link))
+            {
+                if (PackageLink.TryParse(link) is { } packageLink)
+                    _ = OpenPackageLinkAsync(packageLink);
+                else
+                    ShowPackageLinkError(CoreTools.Translate("The package link is invalid."));
+                return;
+            }
+
             string baseUrl = Uri.UnescapeDataString(link[11..]);
             Logger.ImportantInfo("Begin handle of deep link with body " + baseUrl);
 
@@ -347,6 +412,72 @@ namespace UniGetUI.Interface
             {
                 Logger.Error(new UriFormatException($"Malformed URL {link}"));
             }
+        }
+
+        private async Task OpenPackageLinkAsync(PackageLink link)
+        {
+            ShowFromTray();
+            if (link.Manager is { } managerId)
+            {
+                var manager = PEInterface.Managers.FirstOrDefault(candidate =>
+                    candidate.Id.Equals(managerId, StringComparison.OrdinalIgnoreCase)
+                );
+                if (manager is null)
+                {
+                    ShowPackageLinkError(CoreTools.Translate("This version of UniGetUI does not support the package manager {0}.", managerId));
+                    return;
+                }
+                if (!manager.IsEnabled())
+                {
+                    ShowPackageLinkError(CoreTools.Translate("{0} is disabled. Enable it in the settings to open this package.", manager.DisplayName));
+                    return;
+                }
+                if (!manager.IsReady())
+                {
+                    ShowPackageLinkError(CoreTools.Translate("{0} is not available on this computer.", manager.DisplayName));
+                    return;
+                }
+            }
+
+            IPackage? package = null;
+            int loadingId = DialogHelper.ShowLoadingDialog(CoreTools.Translate("Looking for {0}...", link.DisplayName));
+            try
+            {
+                package = await Task.Run(() => IpcPackageApi.FindCatalogPackage(new IpcPackageActionRequest
+                {
+                    PackageId = link.Id,
+                    ManagerName = link.Manager,
+                    PackageSource = link.Source,
+                }));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not resolve the package link for {link.Id}");
+                Logger.Warn(ex);
+            }
+            finally
+            {
+                DialogHelper.HideLoadingDialog(loadingId);
+            }
+
+            if (package is null || package.Source.IsVirtualManager)
+            {
+                ShowPackageLinkError(CoreTools.Translate("{0} was not found.", link.DisplayName));
+                return;
+            }
+            if (link.Version is not null && !package.Manager.Capabilities.SupportsCustomVersions)
+            {
+                ShowPackageLinkError(CoreTools.Translate("{0} does not support installing a specified version.", package.Manager.DisplayName));
+                return;
+            }
+
+            await DialogHelper.ShowPackageDetails(package, OperationType.Install, TEL_InstallReferral.FROM_LINK, link.Version);
+        }
+
+        private static void ShowPackageLinkError(string message)
+        {
+            Logger.Warn(message);
+            DialogHelper.ShowDismissableBalloon(CoreTools.Translate("The package link could not be opened"), message);
         }
 
         /// <summary>
@@ -396,7 +527,10 @@ namespace UniGetUI.Interface
                         Logger.Warn("Unknown parameter " + param);
                     }
                 }
-                else if (param.Length > 11 && param.ToLower().StartsWith("unigetui://"))
+                else if (
+                    PackageLink.IsPackageLink(param)
+                    || param.StartsWith("unigetui://", StringComparison.OrdinalIgnoreCase)
+                )
                 {
                     HandleDeepLink(param);
                 }
@@ -651,7 +785,7 @@ namespace UniGetUI.Interface
                     }
                 }
 
-                if (Settings.Get(Settings.K.DisableSystemTray))
+                if (!Settings.IsSystemTrayIconVisible())
                 {
                     TrayIcon.Visibility = Visibility.Collapsed;
                 }

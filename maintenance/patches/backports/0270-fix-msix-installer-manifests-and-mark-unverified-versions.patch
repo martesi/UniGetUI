@@ -1,0 +1,610 @@
+From cc376a28114ae0503daf568cab3ba3d512071f7f Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:31:18 +0800
+Subject: [PATCH] backport: Fix MSIX installer manifests and mark unverified
+ versions (#5369)
+
+Upstream-Commit: fe5a6f94d1dc15632fb347a7813e22b3675f7a78
+Upstream-PR: Devolutions/UniGetUI#5369
+Classic-Source-Commit: cc376a28114ae0503daf568cab3ba3d512071f7f
+
+---
+ .../IPackage.cs                               |   1 +
+ .../ClientHelpers/NativeWinGetHelper.cs       |  20 ++-
+ .../ClientHelpers/PingetCliHelper.cs          |  10 +-
+ .../PingetPackageDetailsProvider.cs           | 109 +++++++++++--
+ .../ClientHelpers/WinGetCliHelper.cs          |  13 +-
+ .../Manager/Classes/NullPackageManager.cs     |   1 -
+ .../Packages/InstalledVersionNotice.cs        |  39 +++++
+ .../Packages/InvalidImportedPackage.cs        |   2 +
+ .../Packages/Package.cs                       |   1 +
+ .../InstalledVersionNoticeTests.cs            |  37 +++++
+ .../WinGetCliParsingTests.cs                  |  22 +++
+ .../WinGetManagerTests.cs                     | 149 ++++++++++++++++++
+ 12 files changed, 387 insertions(+), 17 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/InstalledVersionNotice.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/InstalledVersionNoticeTests.cs
+
+diff --git a/src/UniGetUI.PackageEngine.Interfaces/IPackage.cs b/src/UniGetUI.PackageEngine.Interfaces/IPackage.cs
+index eab30a5100de9360a4d941b7bf6a2dba8fc694d4..a90962cca257655f3939ea90381294d30a244d38 100644
+--- a/src/UniGetUI.PackageEngine.Interfaces/IPackage.cs
++++ b/src/UniGetUI.PackageEngine.Interfaces/IPackage.cs
+@@ -23,6 +23,7 @@ namespace UniGetUI.PackageEngine.Interfaces
+         /// languages, so it must never be substituted into a command line.
+         /// </summary>
+         public bool HasConcreteVersion { get; }
++        public bool InstalledVersionIsUnverified { get; }
+         public CoreTools.Version NormalizedVersion { get; }
+         public CoreTools.Version NormalizedNewVersion { get; }
+         public IManagerSource Source { get; }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+index 19b4edce8ae1c22f5e884e86c3cc32a6d05df835..d1d5bc68cfbb81a0b41e507f1edb532e82091809 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -347,9 +347,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     nativePackage.DefaultInstallVersion.PackageCatalog.Info.Name
+                 );
+ 
++                string? reportedVersion = nativePackage.InstalledVersion.Version;
+                 string version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(
+                     nativePackage.Id,
+-                    nativePackage.InstalledVersion.Version
++                    reportedVersion
+                 );
+ 
+                 var UniGetUIPackage = new Package(
+@@ -359,7 +360,12 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     nativePackage.DefaultInstallVersion.Version,
+                     source,
+                     Manager
+-                );
++                )
++                {
++                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
++                        reportedVersion
++                    ),
++                };
+ 
+                 // Suppress an update that repeatedly fails to stick (#5158); the COM path still avoids
+                 // the one-shot "already upgraded" cache (#5042).
+@@ -414,9 +420,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     source = Manager.GetLocalSource(nativePackage.Id);
+                 }
+ 
++                string? reportedVersion = nativePackage.InstalledVersion.Version;
+                 string version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(
+                     nativePackage.Id,
+-                    nativePackage.InstalledVersion.Version
++                    reportedVersion
+                 );
+ 
+                 logger.Log(
+@@ -428,7 +435,12 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+                     version,
+                     source,
+                     Manager
+-                );
++                )
++                {
++                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
++                        reportedVersion
++                    ),
++                };
+                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
+                 packages.Add(UniGetUIPackage);
+             }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+index 3dd9aee8cfa8130977f7f8aff3b2a7cf4878a4e2..49802bbce4901f0ee1496a6cfce427b5198ea9ff 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+@@ -65,7 +65,10 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+                 match.AvailableVersion!,
+                 GetSource(match),
+                 Manager
+-            );
++            )
++            {
++                InstalledVersionIsUnverified = versionUnknown,
++            };
+ 
+             // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
+             if (versionUnknown || !WinGetPkgOperationHelper.ConsumeAlreadyUpgradedSuppression(package))
+@@ -99,6 +102,11 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+                     GetSource(match),
+                     Manager
+                 )
++                {
++                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
++                        match.InstalledVersion
++                    ),
++                }
+             )
+             .ToArray();
+     }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
+index 22f96856ce2c5230a96e6dc9f8be7c69995b1012..2240b54ff3b169e5714cc5a551496b6ff99d522d 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
+@@ -471,7 +471,88 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
+     /// </summary>
+     internal static IReadOnlySet<string>? TryGetInstallerHostsForVersion(
+         IPackage package,
+-        string version
++        string version,
++        Func<PackageQuery, ShowResult>? showPackage = null
++    )
++    {
++        string? trimmedVersion = TrimTrailingZeroSegments(version);
++        IReadOnlyList<string>? urls = TryGetInstallerUrlsCore(
++            package,
++            version,
++            requireExactVersion: true,
++            showPackage,
++            logFailures: trimmedVersion is null
++        );
++
++        if (urls is null && trimmedVersion is not null)
++        {
++            urls = TryGetInstallerUrlsCore(
++                package,
++                trimmedVersion,
++                requireExactVersion: true,
++                showPackage
++            );
++        }
++
++        if (urls is null)
++            return null;
++
++        HashSet<string> hosts = new(StringComparer.OrdinalIgnoreCase);
++        foreach (string url in urls)
++        {
++            if (TryCreateUri(url, out Uri? uri) && uri is not null)
++                hosts.Add(uri.Host);
++        }
++
++        return hosts.Count > 0 ? hosts : null;
++    }
++
++    internal static IReadOnlyList<string>? TryGetInstallerUrls(
++        IPackage package,
++        string? version,
++        Func<PackageQuery, ShowResult>? showPackage = null
++    )
++    {
++        IReadOnlyList<string>? urls = TryGetInstallerUrlsCore(
++            package,
++            version,
++            requireExactVersion: false,
++            showPackage
++        );
++        if (urls is not null || string.IsNullOrWhiteSpace(version))
++            return urls;
++
++        return TryGetInstallerUrlsCore(package, null, requireExactVersion: false, showPackage);
++    }
++
++    internal static string? TrimTrailingZeroSegments(string version)
++    {
++        if (string.IsNullOrWhiteSpace(version))
++            return null;
++
++        string[] segments = version.Split('.');
++        if (segments.Length < 2)
++            return null;
++
++        foreach (string segment in segments)
++        {
++            if (segment.Length == 0 || !segment.All(char.IsAsciiDigit))
++                return null;
++        }
++
++        int last = segments.Length - 1;
++        while (last > 0 && segments[last].All(character => character == '0'))
++            last--;
++
++        return last == segments.Length - 1 ? null : string.Join('.', segments[..(last + 1)]);
++    }
++
++    private static IReadOnlyList<string>? TryGetInstallerUrlsCore(
++        IPackage package,
++        string? version,
++        bool requireExactVersion,
++        Func<PackageQuery, ShowResult>? showPackage,
++        bool logFailures = true
+     )
+     {
+         try
+@@ -490,11 +571,18 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
+             string returnedVersion = result.Manifest.Version ?? "";
+             if (!string.Equals(returnedVersion, version, StringComparison.OrdinalIgnoreCase))
+             {
+-                Logger.Info(
+-                    $"Pinget returned manifest version '{returnedVersion}' when '{version}' "
+-                    + $"was requested for {package.Id}; treating as not found"
+-                );
+-                return null;
++                string returnedVersion = result.Manifest.Version ?? "";
++                if (!string.Equals(returnedVersion, version, StringComparison.OrdinalIgnoreCase))
++                {
++                    if (logFailures)
++                    {
++                        Logger.Info(
++                            $"Pinget returned manifest version '{returnedVersion}' when '{version}' "
++                            + $"was requested for {package.Id}; treating as not found"
++                        );
++                    }
++                    return null;
++                }
+             }
+ 
+             HashSet<string> hosts = new(StringComparer.OrdinalIgnoreCase);
+@@ -508,9 +596,12 @@ internal sealed class PingetPackageDetailsProvider : IPingetPackageDetailsProvid
+         }
+         catch (Exception ex)
+         {
+-            Logger.Warn(
+-                $"Could not resolve installer hosts for {package.Id} version {version}: {ex.Message}"
+-            );
++            if (logFailures)
++            {
++                Logger.Warn(
++                    $"Could not resolve installer URLs for {package.Id} version {version}: {ex.Message}"
++                );
++            }
+             return null;
+         }
+     }
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+index a13f67d0ec6ec27968cb4eb7bc7c9e92b3c313d7..c01d9ffae9eab703077726d8e5843d91efd216be 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+@@ -152,7 +152,10 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+                 if (versionUnknown)
+                     version = WinGetPkgOperationHelper.GetLastInstalledVersion(id);
+ 
+-                var package = new Package(name, id, version, newVersion, source, manager);
++                var package = new Package(name, id, version, newVersion, source, manager)
++                {
++                    InstalledVersionIsUnverified = versionUnknown,
++                };
+                 // Skip one-shot suppression for unknown versions so the restored mark isn't cleared.
+                 if (
+                     versionUnknown
+@@ -248,8 +251,14 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+                             ? manager.GetLocalSource(id) // Load Winget Local Sources
+                             : manager.SourcesHelper.Factory.GetSourceOrDefault(sourceName);
+ 
++                    bool versionUnknown = WinGetPkgOperationHelper.IsUnknownVersion(version);
+                     version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(id, version);
+-                    packages.Add(new Package(name, id, version, source, manager));
++                    packages.Add(
++                        new Package(name, id, version, source, manager)
++                        {
++                            InstalledVersionIsUnverified = versionUnknown,
++                        }
++                    );
+                 }
+                 catch (Exception e)
+                 {
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
+index 62172bf38d65ce84b08734f6084e20efa5adcee5..2ffee7c5ea378b52a4a1877e2da6a21cc32284c5 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
+@@ -36,7 +36,6 @@ namespace UniGetUI.PackageEngine.Classes.Manager
+         }
+         public System.Text.Encoding OutputEncoding => System.Text.Encoding.UTF8;
+ 
+-        public bool InstallerUrlFollowsPackageVersion => false;
+ 
+         public string Id
+         {
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/InstalledVersionNotice.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/InstalledVersionNotice.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b56057e1aa85010c1b5a305e51e1a3c3bcfa918c
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/InstalledVersionNotice.cs
+@@ -0,0 +1,39 @@
++using UniGetUI.Core.Tools;
++using UniGetUI.PackageEngine.Interfaces;
++
++namespace UniGetUI.PackageEngine.PackageClasses
++{
++    public static class InstalledVersionNotice
++    {
++        public static string? BuildTooltip(IPackage package) =>
++            BuildTooltip(
++                package.InstalledVersionIsUnverified,
++                package.VersionString,
++                package.Manager.DisplayName
++            );
++
++        public static string? BuildTooltip(
++            bool installedVersionIsUnverified,
++            string versionString,
++            string managerDisplayName
++        )
++        {
++            if (!installedVersionIsUnverified)
++                return null;
++
++            string reason = CoreTools.Translate(
++                "{0} could not read the version of this package that is currently installed.",
++                managerDisplayName
++            );
++
++            string detail = versionString is null or "" or "Unknown"
++                ? CoreTools.Translate("No installed version is known for it.")
++                : CoreTools.Translate(
++                    "The version shown is the one UniGetUI last installed ({0}); if the package has been updated by anything else since, that is out of date.",
++                    versionString
++                );
++
++            return reason + "\n" + detail;
++        }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/InvalidImportedPackage.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/InvalidImportedPackage.cs
+index 00863f13c3da1e30be30c91859681e1fec05b820..40c31e2eb17e2e4f452f80341133b47c78241bf8 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/InvalidImportedPackage.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/InvalidImportedPackage.cs
+@@ -48,6 +48,8 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         // An incompatible package cannot be operated on, so it never reaches a command line.
+         public bool HasConcreteVersion => false;
+ 
++        public bool InstalledVersionIsUnverified => false;
++
+         public string VersionString { get; }
+ 
+         public CoreTools.Version NormalizedVersion { get; }
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+index b69bc45fbb247fbd8b7840deec7b9beebd827078..bdc402c53d8b8a540bbacaa8c2e9c891bb8a2764 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+@@ -74,6 +74,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
+         public virtual string VersionString { get; }
+ 
+         public virtual bool HasConcreteVersion => true;
++        public bool InstalledVersionIsUnverified { get; init; }
+         public CoreTools.Version NormalizedVersion { get; }
+         public CoreTools.Version NormalizedNewVersion { get; }
+         public bool IsPopulated { get; set; }
+diff --git a/src/UniGetUI.PackageEngine.Tests/InstalledVersionNoticeTests.cs b/src/UniGetUI.PackageEngine.Tests/InstalledVersionNoticeTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4dc550d611e6397453422d7a5767cc8373d593cb
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/InstalledVersionNoticeTests.cs
+@@ -0,0 +1,37 @@
++using UniGetUI.PackageEngine.PackageClasses;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++public sealed class InstalledVersionNoticeTests
++{
++    [Fact]
++    public void ReturnsNothingWhenTheVersionWasRead()
++    {
++        Assert.Null(InstalledVersionNotice.BuildTooltip(false, "1.0.0", "WinGet"));
++    }
++
++    [Fact]
++    public void NamesTheManagerAndTheRememberedVersion()
++    {
++        string? tooltip = InstalledVersionNotice.BuildTooltip(true, "6.0.0.3482", "WinGet");
++
++        Assert.NotNull(tooltip);
++        Assert.Contains("WinGet", tooltip);
++        Assert.Contains("6.0.0.3482", tooltip);
++        Assert.DoesNotContain("{0}", tooltip);
++    }
++
++    [Theory]
++    [InlineData("Unknown")]
++    [InlineData("")]
++    public void SaysNothingIsKnownWhenThereIsNoRememberedVersion(string versionString)
++    {
++        string? tooltip = InstalledVersionNotice.BuildTooltip(true, versionString, "WinGet");
++        string? remembered = InstalledVersionNotice.BuildTooltip(true, "1.0.0", "WinGet");
++
++        Assert.NotNull(tooltip);
++        Assert.Contains("WinGet", tooltip);
++        Assert.DoesNotContain("{0}", tooltip);
++        Assert.NotEqual(remembered, tooltip);
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
+index b2c3c30be5c584b22e1e473448bcde40d27db0cc..4ad5d73ac0a4015293f7a9472cd02a1b4abed415 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetCliParsingTests.cs
+@@ -79,6 +79,28 @@ public sealed class WinGetCliParsingTests : IDisposable
+         Assert.Same(manager.MicrosoftStoreSource, packages[3].Source);
+     }
+ 
++    [Fact]
++    public void ParseInstalledPackagesFlagsRowsWhoseVersionWinGetCouldNotRead()
++    {
++        var manager = new WinGet();
++
++        IReadOnlyList<Package> packages = WinGetCliHelper.ParseInstalledPackages(
++            manager,
++            Lines(
++                """
++                Name     Id                Version Available Source
++                ----------------------------------------------------
++                NoVer    Fabrikam.NoVer    Unknown           winget
++                Readable Fabrikam.Readable 1.0.0             winget
++                """
++            )
++        );
++
++        Assert.Equal(2, packages.Count);
++        Assert.True(packages[0].InstalledVersionIsUnverified);
++        Assert.False(packages[1].InstalledVersionIsUnverified);
++    }
++
+     [Fact]
+     public void ParseInstalledPackagesReadsEnglishTable()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index eff30ae6eb0ef1b3addf5664051b6227b301da23..4b4e2604fb0f0e7b4dadfcafe56f043b2da8d3e1 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -843,6 +843,155 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.Contains("utility", details.Tags);
+     }
+ 
++    [Fact]
++    public void TryGetInstallerUrlsCollectsEveryInstallerUrlWithoutDuplicates()
++    {
++        var package = CreatePingetQueryPackage();
++        var urls = PingetPackageDetailsProvider.TryGetInstallerUrls(
++            package,
++            null,
++            _ => CreatePingetShowResult(
++                installerUrls:
++                [
++                    "https://example.test/tool-x64.exe",
++                    "https://EXAMPLE.test/TOOL-X64.exe",
++                    "",
++                    "https://cdn.example.test/tool-arm64.exe",
++                ]
++            )
++        );
++
++        Assert.Equal(
++            ["https://example.test/tool-x64.exe", "https://cdn.example.test/tool-arm64.exe"],
++            urls
++        );
++    }
++
++    [Fact]
++    public void TryGetInstallerUrlsFallsBackToTheLatestManifestWhenTheVersionIsNotIndexed()
++    {
++        var package = CreatePingetQueryPackage();
++        List<string?> requestedVersions = [];
++
++        var urls = PingetPackageDetailsProvider.TryGetInstallerUrls(
++            package,
++            "9.9.9",
++            query =>
++            {
++                requestedVersions.Add(query.Version);
++                if (query.Version is not null)
++                    throw new InvalidOperationException("version not found in index");
++
++                return CreatePingetShowResult(installerUrls: ["https://example.test/latest.exe"]);
++            }
++        );
++
++        Assert.Equal(["9.9.9", null], requestedVersions);
++        Assert.Equal(["https://example.test/latest.exe"], urls);
++    }
++
++    [Fact]
++    public void TryGetInstallerUrlsReturnsNullWhenTheManifestHasNoInstaller()
++    {
++        var package = CreatePingetQueryPackage();
++
++        Assert.Null(
++            PingetPackageDetailsProvider.TryGetInstallerUrls(
++                package,
++                null,
++                _ => CreatePingetShowResult(installerUrls: [])
++            )
++        );
++    }
++
++    [Fact]
++    public void TryGetInstallerHostsForVersionRejectsAManifestOfAnotherVersion()
++    {
++        var package = CreatePingetQueryPackage();
++
++        Assert.Null(
++            PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
++                package,
++                "9.9.9",
++                _ => CreatePingetShowResult(installerUrls: ["https://example.test/latest.exe"])
++            )
++        );
++    }
++
++    [Fact]
++    public void TryGetInstallerHostsForVersionFallsBackToTheTrimmedMsixVersion()
++    {
++        var package = CreatePingetQueryPackage();
++
++        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
++            package,
++            "1.2.3.0",
++            _ => CreatePingetShowResult(installerUrls: ["https://example.test/tool.msixbundle"])
++        );
++
++        Assert.NotNull(hosts);
++        Assert.Equal(["example.test"], hosts.Order());
++    }
++
++    [Fact]
++    public void TryGetInstallerHostsForVersionDoesNotRetryWhenThereIsNothingToTrim()
++    {
++        var package = CreatePingetQueryPackage();
++        int lookups = 0;
++
++        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
++            package,
++            "9.9.9",
++            _ =>
++            {
++                lookups++;
++                return CreatePingetShowResult(installerUrls: ["https://example.test/tool.exe"]);
++            }
++        );
++
++        Assert.Null(hosts);
++        Assert.Equal(1, lookups);
++    }
++
++    [Theory]
++    [InlineData("2.7.11.0", "2.7.11")]
++    [InlineData("2.7.11.0.0", "2.7.11")]
++    [InlineData("1.0.0.0", "1")]
++    [InlineData("0.0.0.0", "0")]
++    [InlineData("2.7.11", null)]
++    [InlineData("2.7.0.11", null)]
++    [InlineData("1.2.3-beta.0", null)]
++    [InlineData("4", null)]
++    [InlineData("", null)]
++    public void TrimTrailingZeroSegmentsOnlyTrimsPlainDottedVersions(
++        string version,
++        string? expected
++    )
++    {
++        Assert.Equal(expected, PingetPackageDetailsProvider.TrimTrailingZeroSegments(version));
++    }
++
++    [Fact]
++    public void TryGetInstallerHostsForVersionReturnsTheHostsOfTheRequestedVersion()
++    {
++        var package = CreatePingetQueryPackage();
++
++        var hosts = PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(
++            package,
++            "1.2.3",
++            _ => CreatePingetShowResult(
++                installerUrls:
++                [
++                    "https://example.test/tool-x64.exe",
++                    "https://cdn.example.test/tool-arm64.exe",
++                ]
++            )
++        );
++
++        Assert.NotNull(hosts);
++        Assert.Equal(["cdn.example.test", "example.test"], hosts.Order());
++    }
++
+     [Fact]
+     public void PingetPackageDetailsProviderKeepsExistingDetailsWhenShowFails()
+     {
+-- 
+2.56.0
+

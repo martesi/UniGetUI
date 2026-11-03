@@ -150,6 +150,20 @@ namespace UniGetUI.Interface.Dialogs
 
             VersionComboBox.Items.Add(CoreTools.Translate("Latest"));
             VersionComboBox.SelectedIndex = 0;
+            if (!package.Manager.Capabilities.CanListVersions)
+            {
+                VersionComboBox.Visibility = Visibility.Collapsed;
+                VersionTextBox.Visibility = Visibility.Visible;
+                VersionTextBox.PlaceholderText = CoreTools.Translate("Latest");
+                VersionTextBox.Text = Options.Version;
+                VersionTextBox.TextChanged += (_, _) =>
+                {
+                    string version = VersionTextBox.Text.Trim();
+                    IgnoreUpdatesCheckbox.IsChecked = version.Length > 0;
+                    if (version.Length == 0 || CoreTools.IsValidPackageVersion(version))
+                        _ = GenerateCommand();
+                };
+            }
             if (package.Manager.Capabilities.SupportsPreRelease)
             {
                 VersionComboBox.Items.Add(CoreTools.Translate("PreRelease"));
@@ -163,7 +177,7 @@ namespace UniGetUI.Interface.Dialogs
             SkipMinorLevelComboBox.SelectedIndex = Options.SkipMinorUpdatesLevel - 2;
             SkipMinorLevelComboBox.IsEnabled = Options.SkipMinorUpdates;
 
-            if (Package.Manager.Capabilities.SupportsCustomVersions)
+            if (Package.Manager.Capabilities.SupportsCustomVersions && Package.Manager.Capabilities.CanListVersions)
             {
                 _ = LoadVersions();
             }
@@ -282,6 +296,7 @@ namespace UniGetUI.Interface.Dialogs
                         Package.Manager.Capabilities.SupportsCustomVersions
                         || Package.Manager.Capabilities.SupportsPreRelease
                     );
+                VersionTextBox.IsEnabled = operation is OperationType.Install or OperationType.None;
                 ScopeCombo.IsEnabled =
                     Package.Manager.Capabilities.SupportsCustomScopes
                     && operation switch
@@ -351,6 +366,11 @@ namespace UniGetUI.Interface.Dialogs
                     VersionComboBox.SelectedValue = ver;
                 }
             }
+            if (!string.IsNullOrWhiteSpace(Options.Version) && !versions.Contains(Options.Version))
+            {
+                VersionComboBox.Items.Add(Options.Version);
+                VersionComboBox.SelectedValue = Options.Version;
+            }
             IgnoreUpdatesCheckbox.IsChecked = await Package.HasUpdatesIgnoredAsync();
 
             VersionComboBox.IsEnabled =
@@ -412,7 +432,11 @@ namespace UniGetUI.Interface.Dialogs
             foreach (var p in ProcessesToKill)
                 options.KillBeforeOperation.Add(p.Name);
 
-            if (
+            if (!Package.Manager.Capabilities.CanListVersions)
+            {
+                options.Version = VersionTextBox.Text.Trim();
+            }
+            else if (
                 VersionComboBox.SelectedValue.ToString() != CoreTools.Translate("PreRelease")
                 && VersionComboBox.SelectedValue.ToString() != CoreTools.Translate("Latest")
             )
@@ -518,7 +542,7 @@ namespace UniGetUI.Interface.Dialogs
                 _ => OperationType.Install,
             };
             var commandline = await Task.Run(() =>
-                Package.Manager.OperationHelper.GetParameters(Package, options, op)
+                Package.Manager.OperationHelper.GetStandaloneParameters(Package, options, op)
             );
             CommandBox.Text =
                 Package.Manager.Properties.ExecutableFriendlyName

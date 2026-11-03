@@ -2,7 +2,7 @@ name: Classic guard
 
 on:
   push:
-    branches: [main]
+    branches: [main, "backport/**-updates"]
   pull_request:
     branches: [main]
 

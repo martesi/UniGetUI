@@ -1,0 +1,244 @@
+From 22d2d59df593afdbde3d50a38aa96ec0748b1d5f Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:49:09 +0800
+Subject: [PATCH] backport: Invalidate a manager's installed-package caches
+ when an operation succeeds (#5586)
+
+Upstream-Commit: 0def3dc7f6d3ba8d77b39d100dac2a363400a85f
+Upstream-PR: Devolutions/UniGetUI#5586
+Classic-Source-Commit: 22d2d59df593afdbde3d50a38aa96ec0748b1d5f
+
+---
+ .../IPackageManager.cs                        |  4 +++
+ .../BaseNuGet.cs                              |  9 ++++++-
+ .../Scoop.cs                                  |  8 ++++--
+ .../ClientHelpers/NativeWinGetHelper.cs       | 11 +++++---
+ .../PackageOperations.cs                      |  7 +++++-
+ .../Manager/Classes/NullPackageManager.cs     |  8 ++++++
+ .../Manager/PackageManager.cs                 | 15 ++++++++++-
+ .../PackageOperationsTests.cs                 | 21 ++++++++++++++++
+ .../WinGetManagerTests.cs                     | 25 +++++++++++++++++++
+ 9 files changed, 99 insertions(+), 9 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Interfaces/IPackageManager.cs b/src/UniGetUI.PackageEngine.Interfaces/IPackageManager.cs
+index 6a2a6dab287d90290e088cbc27e58c68abe183c5..55fecc526f1eabf2034682edfba67e99d12a844a 100644
+--- a/src/UniGetUI.PackageEngine.Interfaces/IPackageManager.cs
++++ b/src/UniGetUI.PackageEngine.Interfaces/IPackageManager.cs
+@@ -75,6 +75,10 @@ namespace UniGetUI.PackageEngine.Interfaces
+         /// </summary>
+         public IReadOnlyList<IPackage> GetInstalledPackages();
+ 
++        public long InstalledPackagesGeneration { get; }
++
++        public void InvalidateInstalledPackages();
++
+         /// <summary>
+         /// Refreshes the Package Manager sources/indexes
+         /// Each manager MUST implement this method.
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+index 559b5ba07d02785df8d18c82d3970b41408e22d6..c34a9bf6c1f810acfb8dcacf6d93348cd7f9b1ef 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+@@ -854,7 +854,14 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
+         }
+ 
+         protected sealed override IReadOnlyList<Package> GetInstalledPackages_UnSafe() =>
+-            TaskRecycler<IReadOnlyList<Package>>.RunOrAttach(_getInstalledPackages_UnSafe);
++            TaskRecycler<IReadOnlyList<Package>>.RunOrAttach(
++                ListInstalledPackagesForGeneration,
++                InstalledPackagesGeneration
++            );
++
++        private IReadOnlyList<Package> ListInstalledPackagesForGeneration(
++            long installedPackagesGeneration
++        ) => _getInstalledPackages_UnSafe();
+ 
+         protected abstract IReadOnlyList<Package> _getInstalledPackages_UnSafe();
+     }
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+index 71510f2532da0c51a19b7ef68ba57605d7f0f7a2..d83b5506a6018bc29cf3c65e07d91b422d173177 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+@@ -440,9 +440,13 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
+         }
+ 
+         protected override IReadOnlyList<Package> GetInstalledPackages_UnSafe() =>
+-            TaskRecycler<IReadOnlyList<Package>>.RunOrAttach(_getInstalledPackages_UnSafe, 15);
++            TaskRecycler<IReadOnlyList<Package>>.RunOrAttach(
++                _getInstalledPackages_UnSafe,
++                InstalledPackagesGeneration,
++                15
++            );
+ 
+-        private IReadOnlyList<Package> _getInstalledPackages_UnSafe()
++        private IReadOnlyList<Package> _getInstalledPackages_UnSafe(long installedPackagesGeneration)
+         {
+             using Process p = new()
+             {
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+index 4984c48d931c610c08b0dcf8bafe1b98ee6d4613..ab35788bdd039943521192dd9a22fd4e7be6b615 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -470,21 +470,24 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
+ 
+     private IReadOnlyList<CatalogPackage> GetCachedLocalWinGetPackages(int? cacheSeconds = null)
+     {
+-        long sourceIndexGeneration = WinGet.SourceIndexGeneration;
++        (long, long) generations = (
++            WinGet.SourceIndexGeneration,
++            Manager.InstalledPackagesGeneration
++        );
+ 
+         return cacheSeconds is null
+             ? TaskRecycler<IReadOnlyList<CatalogPackage>>.RunOrAttach(
+                 EnumerateLocalWinGetPackages,
+-                sourceIndexGeneration
++                generations
+             )
+             : TaskRecycler<IReadOnlyList<CatalogPackage>>.RunOrAttach(
+                 EnumerateLocalWinGetPackages,
+-                sourceIndexGeneration,
++                generations,
+                 cacheSeconds.Value
+             );
+     }
+ 
+-    private IReadOnlyList<CatalogPackage> EnumerateLocalWinGetPackages(long sourceIndexGeneration)
++    private IReadOnlyList<CatalogPackage> EnumerateLocalWinGetPackages((long, long) generations)
+     {
+         return _localPackagesProvider is not null
+             ? _localPackagesProvider()
+diff --git a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+index a69084881bfcb3b8857c4bd017128c6a9fa682bf..0103ac12633e524810eef6c848ffc0d336ee1cf5 100644
+--- a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
++++ b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+@@ -60,7 +60,12 @@ namespace UniGetUI.PackageEngine.Operations
+ 
+                 Package.SetTag(PackageTag.OnQueue);
+             };
+-            CancelRequested += (_, _) => Package.SetTag(PackageTag.Default);
++            StatusChanged += (_, status) =>
++            {
++                if (status is OperationStatus.Canceled)
++                    Package.SetTag(PackageTag.Default);
++            };
++            OperationSucceeded += (_, _) => Package.Manager.InvalidateInstalledPackages();
+             OperationSucceeded += (_, _) => HandleSuccess();
+             OperationFailed += (_, _) => HandleFailure();
+         }
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
+index e6466cad91757265d853aa1117387285df467837..864f9c676b7d822e6c5e503c9887ead2b2b403a9 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/NullPackageManager.cs
+@@ -15,6 +15,14 @@ namespace UniGetUI.PackageEngine.Classes.Manager
+ {
+     public class NullPackageManager : IPackageManager
+     {
++        public bool LastUpdatesListingFailed => false;
++
++        public bool LastInstalledListingFailed => false;
++
++        public long InstalledPackagesGeneration => 0;
++
++        public void InvalidateInstalledPackages() { }
++
+         public static NullPackageManager Instance = new();
+         public ManagerProperties Properties { get; }
+         public ManagerCapabilities Capabilities { get; }
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+index 5abea438dcb39c3edafe38c352f368d36e9092bb..a58a77ac1829b80b4a71fba0866a2f90ccf8f71a 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+@@ -537,7 +537,20 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+         /// Returns an array of Package objects that represent the installed reported by the manager.
+         /// This method is fail-safe and will return an empty array if an error occurs.
+         /// </summary>
+-        public IReadOnlyList<IPackage> GetInstalledPackages() => _getInstalledPackages(false);
++        public bool LastInstalledListingFailed { get; private set; }
++
++        private long _installedPackagesGeneration;
++
++        public long InstalledPackagesGeneration => Volatile.Read(ref _installedPackagesGeneration);
++
++        public void InvalidateInstalledPackages() =>
++            Interlocked.Increment(ref _installedPackagesGeneration);
++
++        public IReadOnlyList<IPackage> GetInstalledPackages()
++        {
++            LastInstalledListingFailed = false;
++            return _getInstalledPackages(false);
++        }
+ 
+         private IReadOnlyList<IPackage> _getInstalledPackages(bool SecondAttempt)
+         {
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+index 91b3015c2ad814ea9b7736b61a48df96849c574a..69dbe017580e2b816550b7e2d9390553230693c3 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+@@ -474,6 +474,27 @@ public sealed class PackageOperationsTests
+         return () => reported;
+     }
+ 
++    [Fact]
++    public async Task ASuccessfulOperationInvalidatesTheInstalledPackagesOfItsManager()
++    {
++        if (!OperatingSystem.IsWindows())
++            return;
++
++        var manager = CreateSlowProcessManager(serializesOperations: false);
++        InitializeLoaders();
++        long generationBefore = manager.InstalledPackagesGeneration;
++        using var operation = new UpdatePackageOperation(
++            new PackageBuilder().WithManager(manager).WithId("updated").Build(),
++            new InstallOptions(),
++            IgnoreParallelInstalls: true
++        );
++
++        await operation.MainThread().WaitAsync(TimeSpan.FromSeconds(30));
++
++        Assert.Equal(OperationStatus.Succeeded, operation.Status);
++        Assert.NotEqual(generationBefore, manager.InstalledPackagesGeneration);
++    }
++
+     [Fact]
+     public async Task OperationsOfASerializingManagerNeverRunTheirProcessesConcurrently()
+     {
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index 61b952f211e36408d52596744cd5f59bc0cecedb..0fc786377419072bb1cca1ee0a82b9227a76e0b3 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -866,6 +866,31 @@ public sealed class WinGetManagerTests : IDisposable
+         Assert.Equal(1, snapshots);
+     }
+ 
++    [Fact]
++    public void NativeWinGetHelperTakesAFreshSnapshotOnceTheInstalledPackagesAreInvalidated()
++    {
++        WinGet.MarkSourceIndexRefreshed();
++        var manager = new TestableWinGet();
++        int snapshots = 0;
++        var helper = new NativeWinGetHelper(
++            manager,
++            systemCliHelperFactory: null,
++            skipInitialization: true,
++            localPackagesProvider: () =>
++            {
++                snapshots++;
++                return [];
++            }
++        );
++
++        helper.GetInstalledPackages_UnSafe();
++        manager.InvalidateInstalledPackages();
++        helper.GetInstalledPackages_UnSafe();
++        helper.GetAvailableUpdates_UnSafe();
++
++        Assert.Equal(2, snapshots);
++    }
++
+     [Fact]
+     public void RefreshPackageIndexesAdvancesTheSourceIndexGenerationWhenTheCliCallFails()
+     {
+-- 
+2.56.0
+

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.IconEngine;
@@ -6,6 +7,7 @@ using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.ManagerClasses.Classes;
 using UniGetUI.PackageEngine.Managers.Generic.NuGet.Internal;
 
 namespace UniGetUI.PackageEngine.Managers.PowerShellManager
@@ -20,9 +22,25 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
             var logger = Manager.TaskLogger.CreateNew(LoggableTaskType.LoadPackageDetails);
             try
             {
-                details.ManifestUrl = NuGetManifestLoader.GetManifestUrl(details.Package);
+                string version = ResolveDetailsVersion(details.Package);
+                details.Version = version;
+
+                if (NuGetLocalFeed.TryGetDirectory(details.Package.Source, out string directory))
+                {
+                    logger.Close(GetDetailsLocal(details, directory, version, logger) ? 0 : 1);
+                    return;
+                }
+
+                if (NuGetV3ServiceIndex.IsV3Source(details.Package.Source))
+                {
+                    logger.Close(GetDetailsV3(details, version, logger) ? 0 : 1);
+                    return;
+                }
+
+                details.ManifestUrl = NuGetManifestLoader.GetManifestUrl(details.Package, version);
                 string? PackageManifestContents = NuGetManifestLoader.GetManifestContent(
-                    details.Package
+                    details.Package,
+                    version
                 );
                 logger.Log(PackageManifestContents);
 
@@ -223,8 +241,239 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
             }
         }
 
+        private static bool GetDetailsLocal(
+            IPackageDetails details,
+            string directory,
+            string version,
+            INativeTaskLogger logger
+        )
+        {
+            IPackage package = details.Package;
+            LocalNuGetPackage? local = NuGetLocalFeed.Find(directory, package.Id, version);
+
+            if (local is null)
+            {
+                logger.Error(
+                    $"No package file for {package.Id} version {version} was found "
+                        + $"on source {package.Source.Name} at Directory={directory}"
+                );
+                return false;
+            }
+
+            Uri packageFile = new(local.FilePath);
+            details.ManifestUrl = packageFile;
+            details.InstallerUrl = packageFile;
+            details.InstallerSize = local.Size;
+            details.InstallerType = CoreTools.Translate("NuPkg (zipped manifest)");
+            details.Description = FirstNonEmpty(local.Description, local.Summary);
+            details.ReleaseNotes = local.ReleaseNotes;
+            details.License = local.License;
+            details.UpdateDate = local.LastWriteTimeUtc.ToString("u", CultureInfo.InvariantCulture);
+            details.Tags =
+                local.Tags?.Split(
+                    [' ', ',', ';', '\t', '\n', '\r'],
+                    StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
+                ) ?? [];
+
+            string? authors = FirstNonEmpty(local.Authors, local.Owners);
+            if (authors is not null)
+            {
+                details.Author = authors;
+                details.Publisher = authors;
+            }
+
+            if (Uri.TryCreate(local.ProjectUrl, UriKind.Absolute, out Uri? projectUrl))
+                details.HomepageUrl = projectUrl;
+
+            if (Uri.TryCreate(local.LicenseUrl, UriKind.Absolute, out Uri? licenseUrl))
+                details.LicenseUrl = licenseUrl;
+
+            details.Dependencies.Clear();
+            foreach (LocalNuGetDependency dependency in local.Dependencies)
+            {
+                details.Dependencies.Add(
+                    new()
+                    {
+                        Name = dependency.Id,
+                        Version = FormatDependencyRange(dependency.Range),
+                        Mandatory = true,
+                    }
+                );
+            }
+
+            return true;
+        }
+
+        private static bool GetDetailsV3(
+            IPackageDetails details,
+            string version,
+            INativeTaskLogger logger
+        )
+        {
+            IPackage package = details.Package;
+            NuGetV3ServiceIndex? index = NuGetV3ServiceIndex.Resolve(package.Source);
+            if (index is null)
+            {
+                logger.Error(
+                    $"Could not resolve the NuGet V3 service index for source {package.Source.Name} "
+                        + $"at Url={package.Source.Url} on manager {package.Manager.Name}"
+                );
+                return false;
+            }
+
+            details.ManifestUrl =
+                NuGetV3Client.GetRegistrationLeafUrl(index, package.Id, version)
+                ?? NuGetV3Client.GetNuspecUrl(index, package.Id, version);
+
+            V3CatalogEntry? entry = GetOrFetchCatalogEntry(package, index, version);
+            if (entry is null)
+            {
+                logger.Error(
+                    $"No V3 metadata could be loaded for package {package.Id} on manager "
+                        + $"{package.Manager.Name}, returning empty PackageDetails"
+                );
+                return false;
+            }
+
+            details.InstallerType = CoreTools.Translate("NuPkg (zipped manifest)");
+            details.Description = FirstNonEmpty(entry.Description, entry.Summary);
+            details.UpdateDate = entry.Published;
+            details.ReleaseNotes = entry.ReleaseNotes;
+            details.License = string.IsNullOrWhiteSpace(entry.LicenseExpression)
+                ? null
+                : entry.LicenseExpression;
+            details.InstallerHash = entry.PackageHash;
+            details.Tags = entry.GetTags().ToArray();
+
+            string? authors = entry.GetAuthors();
+            if (!string.IsNullOrWhiteSpace(authors))
+            {
+                details.Author = authors;
+                details.Publisher = authors;
+            }
+
+            if (Uri.TryCreate(entry.ProjectUrl, UriKind.Absolute, out Uri? projectUrl))
+                details.HomepageUrl = projectUrl;
+
+            if (Uri.TryCreate(entry.LicenseUrl, UriKind.Absolute, out Uri? licenseUrl))
+                details.LicenseUrl = licenseUrl;
+
+            Uri? installerUrl =
+                Uri.TryCreate(entry.PackageContent, UriKind.Absolute, out Uri? packageContent)
+                    ? packageContent
+                    : NuGetV3Client.GetPackageContentUrl(index, package.Id, version);
+            details.InstallerUrl = installerUrl;
+
+            if (entry.PackageSize > 0)
+                details.InstallerSize = entry.PackageSize;
+            else if (installerUrl is not null)
+                details.InstallerSize = CoreTools.GetFileSizeAsLong(installerUrl);
+
+            details.Dependencies.Clear();
+            HashSet<string> alreadyAdded = new(StringComparer.OrdinalIgnoreCase);
+            foreach (V3DependencyGroup group in entry.DependencyGroups ?? [])
+            {
+                foreach (V3Dependency dependency in group.Dependencies ?? [])
+                {
+                    if (
+                        string.IsNullOrWhiteSpace(dependency.Id)
+                        || !alreadyAdded.Add(dependency.Id)
+                    )
+                        continue;
+
+                    details.Dependencies.Add(
+                        new()
+                        {
+                            Name = dependency.Id,
+                            Version = FormatDependencyRange(dependency.Range),
+                            Mandatory = true,
+                        }
+                    );
+                }
+            }
+
+            return true;
+        }
+
+        private static V3CatalogEntry? GetOrFetchCatalogEntry(
+            IPackage package,
+            NuGetV3ServiceIndex index,
+            string? version = null
+        )
+        {
+            version ??= package.VersionString;
+            long hash = NuGetManifestLoader.GetCacheKey(package, version);
+            if (BaseNuGet.V3Entries.TryGetValue(hash, out V3CatalogEntry? cached))
+            {
+                Logger.Debug(
+                    $"Loading cached NuGet V3 metadata for package {package.Id} on manager {package.Manager.Name}"
+                );
+                return cached;
+            }
+
+            V3CatalogEntry? entry = NuGetV3Client.GetCatalogEntry(index, package.Id, version);
+
+            if (entry is not null)
+                BaseNuGet.V3Entries[hash] = entry;
+
+            return entry;
+        }
+
+        private string ResolveDetailsVersion(IPackage package)
+        {
+            if (package.HasConcreteVersion)
+                return package.VersionString;
+
+            try
+            {
+                IReadOnlyList<string> versions = GetInstallableVersions_UnSafe(package);
+                return NuGetV3Client.SelectHighestVersion(versions, includePreRelease: false)
+                    ?? NuGetV3Client.SelectHighestVersion(versions, includePreRelease: true)
+                    ?? package.VersionString;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(
+                    $"Could not resolve the newest version of package {package.Id} on manager "
+                        + $"{package.Manager.Name}, the listed version will be used instead"
+                );
+                Logger.Warn(ex);
+                return package.VersionString;
+            }
+        }
+
+        private static string? FirstNonEmpty(params string?[] values)
+        {
+            foreach (string? value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value;
+            }
+
+            return null;
+        }
+
+        internal static string FormatDependencyRange(string? range)
+        {
+            if (string.IsNullOrWhiteSpace(range))
+                return string.Empty;
+
+            string value = range.Trim();
+            if (!value.StartsWith('[') && !value.StartsWith('('))
+                return value;
+
+            string lowerBound = value.Trim('[', ']', '(', ')').Split(',')[0].Trim();
+            return lowerBound.Length is 0 ? value : lowerBound;
+        }
+
         protected override CacheableIcon? GetIcon_UnSafe(IPackage package)
         {
+            if (NuGetLocalFeed.TryGetDirectory(package.Source, out string directory))
+                return GetIconLocal(package, directory);
+
+            if (NuGetV3ServiceIndex.IsV3Source(package.Source))
+                return GetIconV3(package);
+
             string? ManifestContent = NuGetManifestLoader.GetManifestContent(package);
             if (ManifestContent is null)
             {
@@ -252,6 +501,69 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
             );
         }
 
+        private CacheableIcon? GetIconLocal(IPackage package, string directory)
+        {
+            LocalNuGetPackage? local = NuGetLocalFeed.Find(
+                directory,
+                package.Id,
+                package.VersionString
+            );
+
+            if (local is null)
+                return null;
+
+            if (Uri.TryCreate(local.IconUrl, UriKind.Absolute, out Uri? iconUrl))
+                return new CacheableIcon(iconUrl, package.VersionString);
+
+            string? extracted = NuGetLocalFeed.ExtractIcon(
+                local,
+                IconCacheEngine.GetIconCacheDirectory(Manager.Name, package.Id)
+            );
+
+            return extracted is null ? null : new CacheableIcon(extracted);
+        }
+
+        private static CacheableIcon? GetIconV3(IPackage package)
+        {
+            long hash = package.GetVersionedHash();
+            bool searchReported = BaseNuGet.V3IconUrls.TryGetValue(
+                hash,
+                out string? searchIconUrl
+            );
+
+            if (searchReported && !string.IsNullOrWhiteSpace(searchIconUrl))
+            {
+                return Uri.TryCreate(searchIconUrl, UriKind.Absolute, out Uri? searchUri)
+                    ? new CacheableIcon(searchUri, package.VersionString)
+                    : null;
+            }
+
+            V3CatalogEntry? entry = BaseNuGet.V3Entries.GetValueOrDefault(hash);
+
+            if (entry is null && searchReported)
+                return null;
+
+            NuGetV3ServiceIndex? index = NuGetV3ServiceIndex.Resolve(package.Source);
+            if (index is null)
+                return null;
+
+            entry ??= GetOrFetchCatalogEntry(package, index);
+            if (entry is null)
+                return null;
+
+            if (Uri.TryCreate(entry.IconUrl, UriKind.Absolute, out Uri? iconUrl))
+                return new CacheableIcon(iconUrl, package.VersionString);
+
+            if (
+                !string.IsNullOrWhiteSpace(entry.IconFile)
+                && NuGetV3Client.GetEmbeddedIconUrl(index, package.Id, package.VersionString)
+                    is { } embeddedIconUrl
+            )
+                return new CacheableIcon(embeddedIconUrl, package.VersionString);
+
+            return null;
+        }
+
         protected override IReadOnlyList<Uri> GetScreenshots_UnSafe(IPackage package)
         {
             throw new NotImplementedException();
@@ -259,6 +571,38 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
 
         protected override IReadOnlyList<string> GetInstallableVersions_UnSafe(IPackage package)
         {
+            if (NuGetLocalFeed.TryGetDirectory(package.Source, out string directory))
+            {
+                try
+                {
+                    return NuGetLocalFeed.GetVersionsDescending(directory, package.Id);
+                }
+                catch (Exception e)
+                {
+                    Logger.Warn(
+                        $"Could not list the versions of package {package.Id} on the local "
+                            + $"folder feed at Directory={directory}"
+                    );
+                    Logger.Warn(e);
+                    return [];
+                }
+            }
+
+            if (NuGetV3ServiceIndex.IsV3Source(package.Source))
+            {
+                NuGetV3ServiceIndex? index = NuGetV3ServiceIndex.Resolve(package.Source);
+                if (index is null)
+                {
+                    Logger.Warn(
+                        $"Could not resolve the NuGet V3 service index for source {package.Source.Name} "
+                            + $"to load versions of package {package.Id}"
+                    );
+                    return [];
+                }
+
+                return NuGetV3Client.GetVersionsDescending(index, package.Id);
+            }
+
             Uri SearchUrl = new($"{package.Source.Url}/FindPackagesById()?id='{package.Id}'");
             Logger.Debug(
                 $"Begin package version search with url={SearchUrl} on manager {Manager.Name}"

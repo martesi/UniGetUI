@@ -1,0 +1,825 @@
+From 1498ae095a29ed79b913cdde5dd13bd50b95e64f Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:43:42 +0800
+Subject: [PATCH] backport: Resolve junctions in the elevated WinGet TEMP
+ folder (#5526)
+
+Upstream-Commit: 402385f8290ebe59a48a142b26ad2e5ad7a1f756
+Upstream-PR: Devolutions/UniGetUI#5526
+
+Upstream-Commit: caca9a1dc7802bc14cb4bf16dd99675a55f02444
+Upstream-PR: Devolutions/UniGetUI#5343
+Classic-Source-Commit: 1498ae095a29ed79b913cdde5dd13bd50b95e64f
+
+---
+ src/UniGetUI.Core.Logger/AppPaths.cs          | 388 ++++++++++++++++++
+ .../UniGetUI.Core.Logging.csproj              |   1 +
+ .../AppPathsTests.cs                          | 246 +++++++++++
+ .../ClientHelpers/PingetCliHelper.cs          |   4 +-
+ .../PingetPackageDetailsProvider.cs           |   4 +-
+ .../ClientHelpers/WinGetCliHelper.cs          |  20 +-
+ .../WinGet.cs                                 |   8 +-
+ 7 files changed, 644 insertions(+), 27 deletions(-)
+ create mode 100644 src/UniGetUI.Core.Logger/AppPaths.cs
+ create mode 100644 src/UniGetUI.Core.Logging.Tests/AppPathsTests.cs
+
+diff --git a/src/UniGetUI.Core.Logger/AppPaths.cs b/src/UniGetUI.Core.Logger/AppPaths.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d455e2bb37c67aef0233c81606d70821ae52ed35
+--- /dev/null
++++ b/src/UniGetUI.Core.Logger/AppPaths.cs
+@@ -0,0 +1,388 @@
++using System.Diagnostics;
++using System.Runtime.InteropServices;
++using Microsoft.Win32.SafeHandles;
++
++namespace UniGetUI.Core.Logging
++{
++    public static partial class AppPaths
++    {
++        private const string PortableMarkerFileName = "ForceUniGetUIPortable";
++        private const string PortableDataDirectoryName = "Settings";
++        private const string PortablePermissionTestFileName = "PermissionTestFile";
++        private const string PortableScratchDirectoryName = "Temp";
++        private const string FirstRunMarkerFileName = "FirstRun.pending";
++        private const string ScratchDirectoryName = "UniGetUI";
++        private const string ElevatedTempDirectoryName = "ElevatedWinGetTemp";
++        private const uint FileReadAttributes = 0x00000080;
++        private const uint FileShareAll = 0x00000007;
++        private const uint OpenExisting = 3;
++        private const uint FileFlagBackupSemantics = 0x02000000;
++        private const uint FileNameNormalized = 0x00000000;
++        private const uint VolumeNameGuid = 0x00000001;
++        private const string VolumeGuidPathPrefix = @"\\?\Volume{";
++        private const int PathBufferLength = 1024;
++        private const string ExtendedPathPrefix = @"\\?\";
++        private const string ExtendedUncPathPrefix = @"\\?\UNC\";
++        private const string BundledModernAppDirectoryName = "Avalonia";
++        private const string WindowsExecutableName = "UniGetUI.exe";
++        private const string BundledPingetExecutableName = "pinget.exe";
++
++        private static readonly Lock PortableModeLock = new();
++        private static string? __installation_directory;
++        private static volatile bool __portable_mode_resolved;
++        private static string? __portable_data_directory;
++        private static ElevatedTempDirectoryCache? __elevated_temp_directory;
++
++        [ThreadStatic]
++        private static bool __resolving_portable_mode;
++
++        /// <summary>
++        /// A path pointing to the location where the app is installed
++        /// </summary>
++        public static string InstallationDirectory =>
++            __installation_directory ??= ResolveInstallationDirectory(
++                NormalizeDirectoryPath(AppContext.BaseDirectory)
++            );
++
++        public static string? TEST_PortableDataDirectoryOverride { private get; set; }
++
++        /// <summary>
++        /// Whether UniGetUI stores its data next to the executable. False when the marker file is
++        /// absent, and also when it is present but the installation directory is not writable.
++        /// </summary>
++        public static bool IsPortable => PortableDataDirectory is not null;
++
++        /// <summary>
++        /// The portable data directory, or null when not running in portable mode.
++        /// </summary>
++        public static string? PortableDataDirectory =>
++            TEST_PortableDataDirectoryOverride ?? ResolvedPortableDataDirectory;
++
++        private static string? ResolvedPortableDataDirectory
++        {
++            get
++            {
++                if (__portable_mode_resolved)
++                    return __portable_data_directory;
++
++                if (__resolving_portable_mode)
++                    return null;
++
++                lock (PortableModeLock)
++                {
++                    if (__portable_mode_resolved)
++                        return __portable_data_directory;
++
++                    __resolving_portable_mode = true;
++                    try
++                    {
++                        __portable_data_directory = ResolvePortableDataDirectory(InstallationDirectory);
++                    }
++                    finally
++                    {
++                        __resolving_portable_mode = false;
++                        __portable_mode_resolved = true;
++                    }
++                }
++
++                return __portable_data_directory;
++            }
++        }
++
++        /// <summary>
++        /// Whether the portable folder has yet to complete a first run. Recorded in the folder
++        /// itself rather than in memory, so it survives a first launch that never reaches the UI
++        /// - a headless run, a pre-UI CLI command, or a crash - and travels with the folder.
++        /// </summary>
++        public static bool IsFirstPortableRun =>
++            PortableDataDirectory is { } directory
++            && File.Exists(Path.Join(directory, FirstRunMarkerFileName));
++
++        /// <summary>
++        /// Records that the portable folder has completed its first run.
++        /// </summary>
++        public static void ClearFirstPortableRun()
++        {
++            try
++            {
++                if (PortableDataDirectory is { } directory)
++                    File.Delete(Path.Join(directory, FirstRunMarkerFileName));
++            }
++            catch (Exception ex)
++            {
++                Logger.Warn("Could not clear the portable first-run marker");
++                Logger.Warn(ex);
++            }
++        }
++
++        /// <summary>
++        /// The directory for files that must not outlive an uninstall: the session log, the
++        /// WebView2 profile, per-attempt update logs, and the %TEMP% handed to elevated
++        /// subprocesses. Not created automatically; callers that write must ensure it exists.
++        /// </summary>
++        public static string ScratchDirectory =>
++            PortableDataDirectory is { } portableDirectory
++                ? Path.Join(portableDirectory, PortableScratchDirectoryName)
++                : Path.Join(Path.GetTempPath(), ScratchDirectoryName);
++
++        public static string ElevatedTempDirectory
++        {
++            get
++            {
++                string unresolved = Path.Join(ScratchDirectory, ElevatedTempDirectoryName);
++                if (__elevated_temp_directory is { } cached && cached.Unresolved == unresolved)
++                    return cached.Resolved;
++
++                if (!TryResolveLinkedDirectories(unresolved, out string resolved))
++                    return resolved;
++
++                __elevated_temp_directory = new ElevatedTempDirectoryCache(unresolved, resolved);
++                return resolved;
++            }
++        }
++
++        private sealed record ElevatedTempDirectoryCache(string Unresolved, string Resolved);
++
++        public static string RedirectTempToElevatedDirectory(ProcessStartInfo startInfo)
++        {
++            string directory = ElevatedTempDirectory;
++            try
++            {
++                Directory.CreateDirectory(directory);
++            }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
++            {
++                Logger.Warn($"Could not create the elevated temporary directory {directory}");
++                Logger.Warn(ex);
++            }
++
++            startInfo.Environment["TEMP"] = directory;
++            startInfo.Environment["TMP"] = directory;
++            return directory;
++        }
++
++        public static string ResolveLinkedDirectories(string path)
++        {
++            TryResolveLinkedDirectories(path, out string resolved);
++            return resolved;
++        }
++
++        private static bool TryResolveLinkedDirectories(string path, out string resolved)
++        {
++            string fullPath = Path.GetFullPath(path);
++            resolved = fullPath;
++            if (!OperatingSystem.IsWindows())
++                return true;
++
++            string existing = fullPath;
++            while (!Directory.Exists(existing))
++            {
++                string? parent = Path.GetDirectoryName(existing);
++                if (parent is null)
++                    return false;
++                existing = parent;
++            }
++
++            string? finalPath = GetFinalDirectoryPath(existing);
++            if (finalPath is null)
++            {
++                Logger.Warn($"Could not resolve the links in {existing}, using the path as-is");
++                return false;
++            }
++
++            resolved = Path.Join(finalPath, fullPath[existing.Length..]);
++            return true;
++        }
++
++        private static string? GetFinalDirectoryPath(string directory)
++        {
++            using SafeFileHandle handle = CreateFile(
++                directory,
++                FileReadAttributes,
++                FileShareAll,
++                0,
++                OpenExisting,
++                FileFlagBackupSemantics,
++                0
++            );
++            if (handle.IsInvalid)
++                return null;
++
++            if (GetFinalPathName(handle, FileNameNormalized) is { } dosPath)
++                return StripExtendedPathPrefix(dosPath);
++
++            if (
++                GetFinalPathName(handle, VolumeNameGuid) is not { } guidPath
++                || !guidPath.StartsWith(VolumeGuidPathPrefix, StringComparison.OrdinalIgnoreCase)
++            )
++                return null;
++
++            int volumeEnd = guidPath.IndexOf('\\', VolumeGuidPathPrefix.Length);
++            if (volumeEnd < 0)
++                return null;
++
++            string? mountPath = GetVolumeMountPath(guidPath[..(volumeEnd + 1)]);
++            return mountPath is null ? null : Path.Join(mountPath, guidPath[(volumeEnd + 1)..]);
++        }
++
++        private static string? GetFinalPathName(SafeFileHandle handle, uint flags)
++        {
++            char[] buffer = new char[PathBufferLength];
++            uint length = GetFinalPathNameByHandle(handle, ref buffer[0], (uint)buffer.Length, flags);
++            if (length >= buffer.Length)
++            {
++                buffer = new char[length];
++                length = GetFinalPathNameByHandle(handle, ref buffer[0], (uint)buffer.Length, flags);
++            }
++
++            return length is 0 || length >= buffer.Length ? null : new string(buffer, 0, (int)length);
++        }
++
++        private static string? GetVolumeMountPath(string volumeName)
++        {
++            char[] buffer = new char[PathBufferLength];
++            if (!GetVolumePathNamesForVolumeName(volumeName, ref buffer[0], (uint)buffer.Length, out uint required))
++            {
++                if (required <= buffer.Length)
++                    return null;
++
++                buffer = new char[required];
++                if (!GetVolumePathNamesForVolumeName(volumeName, ref buffer[0], (uint)buffer.Length, out _))
++                    return null;
++            }
++
++            int end = Array.IndexOf(buffer, '\0');
++            return end > 0 ? new string(buffer, 0, end) : null;
++        }
++
++        private static string StripExtendedPathPrefix(string path)
++        {
++            if (path.StartsWith(ExtendedUncPathPrefix, StringComparison.Ordinal))
++                return @"\\" + path[ExtendedUncPathPrefix.Length..];
++
++            return path.StartsWith(ExtendedPathPrefix, StringComparison.Ordinal)
++                ? path[ExtendedPathPrefix.Length..]
++                : path;
++        }
++
++        [LibraryImport(
++            "kernel32.dll",
++            EntryPoint = "CreateFileW",
++            SetLastError = true,
++            StringMarshalling = StringMarshalling.Utf16)]
++        private static partial SafeFileHandle CreateFile(
++            string fileName,
++            uint desiredAccess,
++            uint shareMode,
++            nint securityAttributes,
++            uint creationDisposition,
++            uint flagsAndAttributes,
++            nint templateFile);
++
++        [LibraryImport(
++            "kernel32.dll",
++            EntryPoint = "GetFinalPathNameByHandleW",
++            SetLastError = true,
++            StringMarshalling = StringMarshalling.Utf16)]
++        private static partial uint GetFinalPathNameByHandle(
++            SafeFileHandle file,
++            ref char filePath,
++            uint charCount,
++            uint flags);
++
++        [LibraryImport(
++            "kernel32.dll",
++            EntryPoint = "GetVolumePathNamesForVolumeNameW",
++            SetLastError = true,
++            StringMarshalling = StringMarshalling.Utf16)]
++        [return: MarshalAs(UnmanagedType.Bool)]
++        private static partial bool GetVolumePathNamesForVolumeName(
++            string volumeName,
++            ref char volumePathNames,
++            uint bufferLength,
++            out uint returnLength);
++
++        public static string ResolveInstallationDirectory(
++            string executableDirectory,
++            Func<string, bool>? fileExists = null,
++            Func<string, bool>? directoryExists = null
++        )
++        {
++            fileExists ??= File.Exists;
++            directoryExists ??= Directory.Exists;
++
++            string normalizedDirectory = NormalizeDirectoryPath(executableDirectory);
++            if (!string.Equals(
++                    Path.GetFileName(normalizedDirectory),
++                    BundledModernAppDirectoryName,
++                    StringComparison.OrdinalIgnoreCase
++                ))
++            {
++                return normalizedDirectory;
++            }
++
++            string? parentDirectory = Path.GetDirectoryName(normalizedDirectory);
++            if (string.IsNullOrEmpty(parentDirectory))
++            {
++                return normalizedDirectory;
++            }
++
++            parentDirectory = NormalizeDirectoryPath(parentDirectory);
++            return IsInstallRoot(parentDirectory, fileExists, directoryExists)
++                ? parentDirectory
++                : normalizedDirectory;
++        }
++
++        public static string? ResolvePortableDataDirectory(string installationDirectory)
++        {
++            if (!File.Exists(Path.Join(installationDirectory, PortableMarkerFileName)))
++            {
++                return null;
++            }
++
++            string path = Path.Join(installationDirectory, PortableDataDirectoryName);
++            try
++            {
++                bool created = !Directory.Exists(path);
++                if (created)
++                    Directory.CreateDirectory(path);
++
++                File.WriteAllText(
++                    Path.Join(path, PortablePermissionTestFileName),
++                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
++                );
++
++                if (created)
++                    File.WriteAllText(Path.Join(path, FirstRunMarkerFileName), "");
++
++                return path;
++            }
++            catch (Exception ex)
++            {
++                Logger.Error(
++                    $"Could not acces/write path {path}. UniGetUI will NOT be run in portable mode, and User settings will be used instead"
++                );
++                Logger.Error(ex);
++                return null;
++            }
++        }
++
++        private static string NormalizeDirectoryPath(string path)
++        {
++            return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
++        }
++
++        private static bool IsInstallRoot(
++            string directory,
++            Func<string, bool> fileExists,
++            Func<string, bool> directoryExists
++        )
++        {
++            return fileExists(Path.Join(directory, WindowsExecutableName))
++                   || fileExists(Path.Join(directory, BundledPingetExecutableName))
++                   || fileExists(Path.Join(directory, "IntegrityTree.json"))
++                   || directoryExists(Path.Join(directory, "Assets", "Utilities"))
++                   || directoryExists(Path.Join(directory, "Assets", "Data"));
++        }
++    }
++}
+diff --git a/src/UniGetUI.Core.Logger/UniGetUI.Core.Logging.csproj b/src/UniGetUI.Core.Logger/UniGetUI.Core.Logging.csproj
+index 3b1ea6e4212179f86b586027064568b1120f82ee..04b1d8e25ad6801bfc739d99dc3223a2f1daf7de 100644
+--- a/src/UniGetUI.Core.Logger/UniGetUI.Core.Logging.csproj
++++ b/src/UniGetUI.Core.Logger/UniGetUI.Core.Logging.csproj
+@@ -1,6 +1,7 @@
+ <Project Sdk="Microsoft.NET.Sdk">
+     <PropertyGroup>
+         <TargetFrameworks>$(SharedTargetFrameworks)</TargetFrameworks>
++        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+     </PropertyGroup>
+ 
+     <ItemGroup>
+diff --git a/src/UniGetUI.Core.Logging.Tests/AppPathsTests.cs b/src/UniGetUI.Core.Logging.Tests/AppPathsTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..85e0a5a25baacd3445e2d812e3fc564bae8da456
+--- /dev/null
++++ b/src/UniGetUI.Core.Logging.Tests/AppPathsTests.cs
+@@ -0,0 +1,246 @@
++using System.Diagnostics;
++
++[assembly: CollectionBehavior(DisableTestParallelization = true)]
++
++namespace UniGetUI.Core.Logging.Tests
++{
++    public sealed class AppPathsTests : IDisposable
++    {
++        private readonly string _testRoot;
++
++        public AppPathsTests()
++        {
++            _testRoot = Path.Combine(
++                Path.GetTempPath(),
++                $"UniGetUI-AppPathsTests-{Guid.NewGuid():N}"
++            );
++            Directory.CreateDirectory(_testRoot);
++        }
++
++        public void Dispose()
++        {
++            AppPaths.TEST_PortableDataDirectoryOverride = null;
++
++            if (Directory.Exists(_testRoot))
++            {
++                Directory.Delete(_testRoot, true);
++            }
++        }
++
++        [Fact]
++        public void ResolvePortableDataDirectoryReturnsNullWithoutTheMarkerFile()
++        {
++            Assert.Null(AppPaths.ResolvePortableDataDirectory(_testRoot));
++            Assert.False(Directory.Exists(Path.Combine(_testRoot, "Settings")));
++        }
++
++        [Fact]
++        public void ResolvePortableDataDirectoryReturnsSettingsFolderWhenMarked()
++        {
++            File.WriteAllText(Path.Combine(_testRoot, "ForceUniGetUIPortable"), string.Empty);
++
++            string? resolved = AppPaths.ResolvePortableDataDirectory(_testRoot);
++
++            Assert.Equal(Path.Join(_testRoot, "Settings"), resolved);
++            Assert.True(File.Exists(Path.Combine(_testRoot, "Settings", "PermissionTestFile")));
++        }
++
++        [Fact]
++        public void ResolvePortableDataDirectoryFallsBackWhenTheFolderIsNotWritable()
++        {
++            File.WriteAllText(Path.Combine(_testRoot, "ForceUniGetUIPortable"), string.Empty);
++            File.WriteAllText(Path.Combine(_testRoot, "Settings"), string.Empty);
++
++            Assert.Null(AppPaths.ResolvePortableDataDirectory(_testRoot));
++        }
++
++        [Fact]
++        public void ResolveInstallationDirectoryKeepsAVolumeRootIntact()
++        {
++            string root = Path.GetPathRoot(Path.GetFullPath("."))!;
++
++            Assert.Equal(
++                root,
++                AppPaths.ResolveInstallationDirectory(root, static _ => false, static _ => false));
++        }
++
++        [Fact]
++        public void ResolveInstallationDirectoryTrimsATrailingSeparator()
++        {
++            string directory = Path.Join(Path.GetFullPath("."), "UniGetUI");
++
++            Assert.Equal(
++                directory,
++                AppPaths.ResolveInstallationDirectory(
++                    directory + Path.DirectorySeparatorChar,
++                    static _ => false,
++                    static _ => false));
++        }
++
++        [Fact]
++        public void ResolvePortableDataDirectoryMarksAFirstRunOnlyWhenItCreatesTheFolder()
++        {
++            File.WriteAllText(Path.Combine(_testRoot, "ForceUniGetUIPortable"), string.Empty);
++
++            string? first = AppPaths.ResolvePortableDataDirectory(_testRoot);
++            Assert.NotNull(first);
++            Assert.True(File.Exists(Path.Combine(first!, "FirstRun.pending")));
++
++            File.Delete(Path.Combine(first!, "FirstRun.pending"));
++            AppPaths.ResolvePortableDataDirectory(_testRoot);
++            Assert.False(
++                File.Exists(Path.Combine(first!, "FirstRun.pending")),
++                "an established portable folder must not be marked as a first run again");
++        }
++
++        [Fact]
++        public void ClearFirstPortableRunRemovesTheMarker()
++        {
++            string portableDirectory = Path.Combine(_testRoot, "Settings");
++            Directory.CreateDirectory(portableDirectory);
++            File.WriteAllText(Path.Combine(portableDirectory, "FirstRun.pending"), string.Empty);
++            AppPaths.TEST_PortableDataDirectoryOverride = portableDirectory;
++
++            Assert.True(AppPaths.IsFirstPortableRun);
++
++            AppPaths.ClearFirstPortableRun();
++
++            Assert.False(AppPaths.IsFirstPortableRun);
++        }
++
++        [Fact]
++        public void ScratchDirectoryStaysOutsideTheInstallFolderWhenNotPortable()
++        {
++            AppPaths.TEST_PortableDataDirectoryOverride = null;
++
++            Assert.False(AppPaths.IsPortable);
++            Assert.Equal(Path.Join(Path.GetTempPath(), "UniGetUI"), AppPaths.ScratchDirectory);
++        }
++
++        [Fact]
++        public void ScratchDirectoryMovesIntoThePortableFolderWhenPortable()
++        {
++            string portableDirectory = Path.Combine(_testRoot, "Settings");
++            AppPaths.TEST_PortableDataDirectoryOverride = portableDirectory;
++
++            Assert.True(AppPaths.IsPortable);
++            Assert.Equal(Path.Join(portableDirectory, "Temp"), AppPaths.ScratchDirectory);
++        }
++
++        [Fact]
++        public void ResolveLinkedDirectoriesKeepsTheMissingTailOfAPlainPath()
++        {
++            Directory.CreateDirectory(Path.Join(_testRoot, "Settings"));
++            string root = AppPaths.ResolveLinkedDirectories(_testRoot);
++
++            Assert.Equal(
++                Path.Join(root, "Settings", "Temp", "ElevatedWinGetTemp"),
++                AppPaths.ResolveLinkedDirectories(Path.Join(_testRoot, "Settings", "Temp", "ElevatedWinGetTemp")));
++        }
++
++        [Fact]
++        public void ResolveLinkedDirectoriesFollowsScoopJunctions()
++        {
++            if (!OperatingSystem.IsWindows())
++                return;
++
++            string persisted = Path.Join(_testRoot, "persist", "unigetui", "Settings");
++            string version = Path.Join(_testRoot, "apps", "unigetui", "2026.3.1");
++            Directory.CreateDirectory(Path.Join(persisted, "Temp"));
++            Directory.CreateDirectory(version);
++            string settingsJunction = Path.Join(version, "Settings");
++            string currentJunction = Path.Join(_testRoot, "apps", "unigetui", "current");
++            try
++            {
++                CreateJunction(settingsJunction, persisted);
++                CreateJunction(currentJunction, version);
++
++                string resolved = AppPaths.ResolveLinkedDirectories(
++                    Path.Join(currentJunction, "Settings", "Temp", "ElevatedWinGetTemp"));
++
++                Assert.Equal(
++                    Path.Join(AppPaths.ResolveLinkedDirectories(persisted), "Temp", "ElevatedWinGetTemp"),
++                    resolved);
++            }
++            finally
++            {
++                foreach (string junction in new[] { currentJunction, settingsJunction })
++                {
++                    if (Directory.Exists(junction))
++                        Directory.Delete(junction);
++                }
++            }
++        }
++
++        [Fact]
++        public void ResolveLinkedDirectoriesFollowsSymbolicLinks()
++        {
++            if (!OperatingSystem.IsWindows())
++                return;
++
++            string persisted = Path.Join(_testRoot, "persist", "unigetui", "Settings");
++            string version = Path.Join(_testRoot, "apps", "unigetui", "2026.3.1");
++            Directory.CreateDirectory(Path.Join(persisted, "Temp"));
++            Directory.CreateDirectory(version);
++            try
++            {
++                Directory.CreateSymbolicLink(Path.Join(version, "Settings"), persisted);
++                Directory.CreateSymbolicLink(Path.Join(_testRoot, "apps", "unigetui", "current"), version);
++            }
++            catch (IOException ex) when (ex.HResult == ErrorPrivilegeNotHeld)
++            {
++                return;
++            }
++
++            string resolved = AppPaths.ResolveLinkedDirectories(
++                Path.Join(_testRoot, "apps", "unigetui", "current", "Settings", "Temp"));
++
++            Assert.Equal(Path.Join(AppPaths.ResolveLinkedDirectories(persisted), "Temp"), resolved);
++        }
++
++        [Fact]
++        public void RedirectTempToElevatedDirectorySetsTempAndTmp()
++        {
++            AppPaths.TEST_PortableDataDirectoryOverride = Path.Combine(_testRoot, "Settings");
++            ProcessStartInfo startInfo = new();
++
++            string directory = AppPaths.RedirectTempToElevatedDirectory(startInfo);
++
++            Assert.Equal(AppPaths.ElevatedTempDirectory, directory);
++            Assert.Equal(directory, startInfo.Environment["TEMP"]);
++            Assert.Equal(directory, startInfo.Environment["TMP"]);
++            Assert.EndsWith(Path.Join("Settings", "Temp", "ElevatedWinGetTemp"), directory);
++            Assert.True(Directory.Exists(directory));
++        }
++
++        private const int ErrorPrivilegeNotHeld = unchecked((int)0x80070522);
++
++        private static void CreateJunction(string link, string target)
++        {
++            ProcessStartInfo startInfo = new("cmd.exe")
++            {
++                UseShellExecute = false,
++                CreateNoWindow = true,
++                RedirectStandardOutput = true,
++            };
++            foreach (string argument in new[] { "/c", "mklink", "/J", link, target })
++                startInfo.ArgumentList.Add(argument);
++
++            using Process process = Process.Start(startInfo)!;
++            process.StandardOutput.ReadToEnd();
++            process.WaitForExit();
++            Assert.Equal(0, process.ExitCode);
++        }
++
++        [Fact]
++        public void SessionLogIsWrittenInsideThePortableFolderWhenPortable()
++        {
++            string portableDirectory = Path.Combine(_testRoot, "Settings");
++            AppPaths.TEST_PortableDataDirectoryOverride = portableDirectory;
++
++            Logger.Info($"Portable session log probe {Guid.NewGuid():N}");
++
++            Assert.True(File.Exists(Path.Join(portableDirectory, "Temp", "session.log")));
++        }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+index 49802bbce4901f0ee1496a6cfce427b5198ea9ff..20c30cfc306239d96daaa29444f841f877a2ec1a 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+@@ -216,12 +216,10 @@ internal sealed partial class PingetCliHelper : IWinGetManagerHelper
+ 
+         if (CoreTools.IsAdministrator())
+         {
+-            string winGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
++            string winGetTemp = AppPaths.RedirectTempToElevatedDirectory(process.StartInfo);
+             logger.AddToStdErr(
+                 $"[WARN] Redirecting %TEMP% folder to {winGetTemp}, since UniGetUI was run as admin"
+             );
+-            process.StartInfo.Environment["TEMP"] = winGetTemp;
+-            process.StartInfo.Environment["TMP"] = winGetTemp;
+         }
+ 
+         process.Start();
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
+index 63388e1796c1274f543012d96b58aac8b4c43c44..fbe1811fbcf12b47ce88d7a84f0bcd4c8d2a45fb 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetPackageDetailsProvider.cs
+@@ -180,12 +180,10 @@ internal sealed class PingetCliPackageDetailsProvider(string cliExecutablePath)
+ 
+         if (CoreTools.IsAdministrator())
+         {
+-            string winGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
++            string winGetTemp = AppPaths.RedirectTempToElevatedDirectory(process.StartInfo);
+             logger.Log(
+                 $"[WARN] Redirecting %TEMP% folder to {winGetTemp}, since UniGetUI was run as admin"
+             );
+-            process.StartInfo.Environment["TEMP"] = winGetTemp;
+-            process.StartInfo.Environment["TMP"] = winGetTemp;
+         }
+ 
+         process.Start();
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+index c01d9ffae9eab703077726d8e5843d91efd216be..15242a771e81122d239d54f962b34de0f42debf0 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+@@ -63,12 +63,10 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+         if (CoreTools.IsAdministrator())
+         {
+-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
++            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
+             logger.AddToStdErr(
+                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
+             );
+-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
+-            p.StartInfo.Environment["TMP"] = WinGetTemp;
+         }
+ 
+         p.Start();
+@@ -204,12 +202,10 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+         if (CoreTools.IsAdministrator())
+         {
+-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
++            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
+             logger.AddToStdErr(
+                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
+             );
+-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
+-            p.StartInfo.Environment["TMP"] = WinGetTemp;
+         }
+ 
+         p.Start();
+@@ -297,12 +293,10 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+ 
+         if (CoreTools.IsAdministrator())
+         {
+-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
++            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
+             logger.AddToStdErr(
+                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
+             );
+-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
+-            p.StartInfo.Environment["TMP"] = WinGetTemp;
+         }
+ 
+         p.Start();
+@@ -409,12 +403,10 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+         );
+         if (CoreTools.IsAdministrator())
+         {
+-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
++            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
+             Logger.Warn(
+                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
+             );
+-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
+-            p.StartInfo.Environment["TMP"] = WinGetTemp;
+         }
+         p.Start();
+ 
+@@ -467,12 +459,10 @@ internal sealed class WinGetCliHelper : IWinGetManagerHelper
+         IProcessTaskLogger logger = Manager.TaskLogger.CreateNew(LoggableTaskType.FindPackages, p);
+         if (CoreTools.IsAdministrator())
+         {
+-            string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
++            string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
+             Logger.Warn(
+                 $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
+             );
+-            p.StartInfo.Environment["TEMP"] = WinGetTemp;
+-            p.StartInfo.Environment["TMP"] = WinGetTemp;
+         }
+         p.Start();
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+index be5c22e78ee309b9246f366209246f6a78d70951..26ca7d28a3a46235b06eb983425cd829f1fc11fa 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+@@ -638,9 +638,7 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
+ 
+             if (CoreTools.IsAdministrator())
+             {
+-                string WinGetTemp = Path.Join(AppPaths.ScratchDirectory, "ElevatedWinGetTemp");
+-                startInfo.Environment["TEMP"] = WinGetTemp;
+-                startInfo.Environment["TMP"] = WinGetTemp;
++                AppPaths.RedirectTempToElevatedDirectory(startInfo);
+             }
+ 
+             return startInfo;
+@@ -1022,12 +1020,10 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
+ 
+             if (CoreTools.IsAdministrator())
+             {
+-                string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
++                string WinGetTemp = AppPaths.RedirectTempToElevatedDirectory(p.StartInfo);
+                 logger.AddToStdErr(
+                     $"[WARN] Redirecting %TEMP% folder to {WinGetTemp}, since UniGetUI was run as admin"
+                 );
+-                p.StartInfo.Environment["TEMP"] = WinGetTemp;
+-                p.StartInfo.Environment["TMP"] = WinGetTemp;
+             }
+ 
+             try
+-- 
+2.56.0
+

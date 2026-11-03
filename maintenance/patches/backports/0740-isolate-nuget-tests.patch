@@ -1,0 +1,45 @@
+From d92876821f6ceda13c813b8a36885bd7db6ff682 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 12:31:00 -0800
+Subject: [PATCH] test: isolate shared NuGet V3 cache fixtures
+
+Classic-Source-Commit: 9303ba87b3b6dd6b1c8404b622d800aa3514547e
+---
+ src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs  | 8 ++++++++
+ src/UniGetUI.PackageEngine.Tests/NuGetV3ManagerTests.cs | 1 +
+ 2 files changed, 9 insertions(+)
+
+diff --git a/src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs b/src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs
+index fe04249..d243396 100644
+--- a/src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/NuGetV3ClientTests.cs
+@@ -11,6 +11,14 @@ using UniGetUI.PackageEngine.Tests.Infrastructure.Helpers;
+ 
+ namespace UniGetUI.PackageEngine.Tests;
+ 
++// Both fixture classes reset process-wide NuGet caches.
++[CollectionDefinition("NuGet V3 shared cache tests", DisableParallelization = true)]
++public sealed class NuGetV3TestCollection
++{
++    public const string Name = "NuGet V3 shared cache tests";
++}
++
++[Collection(NuGetV3TestCollection.Name)]
+ public sealed class NuGetV3ClientTests
+ {
+     private static readonly string[] DefaultVersions =
+diff --git a/src/UniGetUI.PackageEngine.Tests/NuGetV3ManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/NuGetV3ManagerTests.cs
+index 9d2128a..7637195 100644
+--- a/src/UniGetUI.PackageEngine.Tests/NuGetV3ManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/NuGetV3ManagerTests.cs
+@@ -12,6 +12,7 @@ using UniGetUI.PackageEngine.Tests.Infrastructure.Helpers;
+ 
+ namespace UniGetUI.PackageEngine.Tests;
+ 
++[Collection(NuGetV3TestCollection.Name)]
+ public sealed class NuGetV3ManagerTests
+ {
+     [Fact]
+-- 
+2.51.1
+

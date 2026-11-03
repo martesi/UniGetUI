@@ -366,8 +366,8 @@ These keys are used by package-related endpoints such as install, update, uninst
 | `POST` | `/uniget/v1/packages/uninstall` | Yes | Package action query set | `package uninstall` | Uninstalls package. |
 | `POST` | `/uniget/v1/packages/uninstall-then-reinstall` | Yes | Package action query set | `package repair` | Repair flow. |
 | `POST` | `/uniget/v1/packages/show` | Yes | Query `packageId`, `packageSource` | `package show` | UI-oriented package-details flow. |
-| `POST` | `/uniget/v1/packages/update-all` | Yes | None | `package update-all` | Requires `OnUpgradeAll` handler to be wired. |
-| `POST` | `/uniget/v1/packages/update-manager` | Yes | Query `manager` | `package update-manager` | Requires `OnUpgradeAllForManager` handler to be wired. |
+| `POST` | `/uniget/v1/packages/update-all` | Yes | Optional query `manager` | `package update-all` | Queues updates and returns operation IDs. |
+| `POST` | `/uniget/v1/packages/update-manager` | Yes | Query `manager` | `package update-manager` | Queues updates for one manager. |
 
 ## Headless-specific limitations
 
@@ -375,8 +375,6 @@ In headless sessions:
 
 - `POST /uniget/v1/app/show` fails because there is no window to show.
 - `POST /uniget/v1/app/navigate` fails because there is no UI page stack to navigate.
-- `POST /uniget/v1/packages/update-all` fails unless a host wires `OnUpgradeAll`.
-- `POST /uniget/v1/packages/update-manager` fails unless a host wires `OnUpgradeAllForManager`.
 
 These failures are intentional and surfaced as HTTP `400` with a descriptive message.
 

@@ -1,0 +1,3019 @@
+From f7943a5ae01d30d8aa9411830c88aa0cb71f27e5 Mon Sep 17 00:00:00 2001
+From: UniGetUI Patch Stack <patch-stack@localhost>
+Date: Sun, 25 Oct 2026 23:36:07 +0800
+Subject: [PATCH] backport: operation cancellation, queue safety and download
+ progress
+
+Import the shared operation foundation required by serialized pip operations and managed Cargo.
+
+Upstream-Commit: 6ef60b4691e4e27eaedb8b0a83be98e6a5478826
+Upstream-PR: Devolutions/UniGetUI#5070
+
+Upstream-Commit: a1d3cfb8f6326b0fb6eb16618b00e6fd703946cd
+Upstream-PR: Devolutions/UniGetUI#5253
+
+Upstream-Commit: e24ef0ba6048c10588b759c2feecf59ba0e7aaa5
+Upstream-PR: Devolutions/UniGetUI#5297
+
+Upstream-Commit: c4878af96c6a336d9c49823a930eff3f9a91c1a4
+Upstream-PR: Devolutions/UniGetUI#5398
+
+Upstream-Commit: 8220a4b47b00ca98cd10af26636358cd2e3216ae
+Upstream-PR: Devolutions/UniGetUI#5402
+
+Upstream-Commit: e0ec8e2626c0b1f4f1a6965bf72413bed8ddebb7
+Upstream-PR: Devolutions/UniGetUI#5464
+
+Upstream-Commit: b37261ef486d79d06d2b9bbc32e09830605f2b67
+Upstream-PR: Devolutions/UniGetUI#5473
+
+Upstream-Commit: 09d4678d69938fa1b89a33071d6354a5d7d2b80f
+Upstream-PR: Devolutions/UniGetUI#5486
+
+Upstream-Commit: c4ee2f1dd76697501581ce084d6addaf91f0caff
+Upstream-PR: Devolutions/UniGetUI#5489
+
+Upstream-Commit: b1eb136a7af34babc511576d47235489c62f6596
+Upstream-PR: Devolutions/UniGetUI#5469
+Classic-Source-Commit: f7943a5ae01d30d8aa9411830c88aa0cb71f27e5
+
+---
+ .../OperationProgress.cs                      |  86 +++
+ .../AbstractOperation.cs                      | 608 +++++++++++++++---
+ .../AbstractOperation_Auxiliaries.cs          |   2 +
+ .../AbstractOperation_Progress.cs             | 410 ++++++++++++
+ .../AbstractProcessOperation.cs               | 166 +++--
+ .../DownloadOperation.cs                      | 249 +++++--
+ .../Classes/OperationPreconditionException.cs |   7 +
+ .../DownloadOperationProgressTests.cs         | 538 ++++++++++++++++
+ .../OperationProgressTests.cs                 | 434 +++++++++++++
+ 9 files changed, 2303 insertions(+), 197 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Enums/OperationProgress.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Operations/AbstractOperation_Progress.cs
+ create mode 100644 src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/OperationPreconditionException.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/DownloadOperationProgressTests.cs
+ create mode 100644 src/UniGetUI.PackageEngine.Tests/OperationProgressTests.cs
+
+diff --git a/src/UniGetUI.PackageEngine.Enums/OperationProgress.cs b/src/UniGetUI.PackageEngine.Enums/OperationProgress.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b462be21dc98db59e0a24b81ead6022f0e7933be
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Enums/OperationProgress.cs
+@@ -0,0 +1,86 @@
++namespace UniGetUI.PackageEngine.Enums
++{
++    /// <summary>
++    /// The phase a package operation is currently in. Manager-neutral: no WinGet, COM,
++    /// or CLI-specific concepts leak into this model.
++    /// </summary>
++    public enum OperationProgressStage
++    {
++        Unknown,
++        Downloading,
++        Installing,
++        Updating,
++        Uninstalling,
++    }
++
++    /// <summary>
++    /// Manager-neutral snapshot of package-operation progress.
++    ///
++    /// Unknown percentage is represented as a null <see cref="Percentage"/> (never zero):
++    /// the UI must render null as indeterminate and a known value as determinate.
++    /// Download and install phases are never merged into a synthetic overall total.
++    /// Instances are immutable; the operation layer enriches download reports with a
++    /// measured <see cref="BytesPerSecond"/> downstream.
++    /// </summary>
++    public sealed record OperationProgress(
++        OperationProgressStage Stage,
++        double? Percentage,
++        ulong? BytesDownloaded,
++        ulong? BytesTotal,
++        double? BytesPerSecond
++    )
++    {
++        /// <summary>Plain unknown: indeterminate UI, log-driven status text is kept.</summary>
++        public static readonly OperationProgress Unknown = new(
++            OperationProgressStage.Unknown,
++            null,
++            null,
++            null,
++            null
++        );
++
++        /// <summary>Unknown progress within a known stage (e.g. installing with no counters).</summary>
++        public static OperationProgress ForStage(OperationProgressStage stage) =>
++            new(stage, null, null, null, null);
++
++        /// <summary>
++        /// Download progress from real cumulative byte counters. Percentage is derived as
++        /// <c>downloaded / total</c> and clamped to 100 when counters overshoot; a zero
++        /// total yields indeterminate (unknown) progress rather than a fake zero.
++        /// </summary>
++        public static OperationProgress FromDownload(ulong downloaded, ulong total) =>
++            total == 0
++                ? new(OperationProgressStage.Downloading, null, downloaded, null, null)
++                : new(
++                    OperationProgressStage.Downloading,
++                    Math.Min(downloaded * 100.0 / total, 100.0),
++                    downloaded,
++                    total,
++                    null
++                );
++
++        /// <summary>
++        /// True only for a real, finite percentage. Unknown progress is never zero.
++        /// </summary>
++        public bool IsDeterminate =>
++            Percentage is { } value
++            && !double.IsNaN(value)
++            && !double.IsInfinity(value)
++            && value >= 0;
++
++        /// <summary>True when a usable measured throughput is attached.</summary>
++        public bool HasThroughput => NormalizeBytesPerSecond(BytesPerSecond) is not null;
++
++        /// <summary>
++        /// Accepts only positive finite speeds. NaN, Infinity, zero, negatives, and null
++        /// are rejected so they can never be displayed or averaged.
++        /// </summary>
++        public static double? NormalizeBytesPerSecond(double? bytesPerSecond) =>
++            bytesPerSecond is { } value
++            && !double.IsNaN(value)
++            && !double.IsInfinity(value)
++            && value > 0
++                ? value
++                : null;
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Operations/AbstractOperation.cs b/src/UniGetUI.PackageEngine.Operations/AbstractOperation.cs
+index 24bdf78b0df105f244c71eb006f0c90ec81c8c01..f97d23e182c6ccf5e5ce00fcfa678696088d369c 100644
+--- a/src/UniGetUI.PackageEngine.Operations/AbstractOperation.cs
++++ b/src/UniGetUI.PackageEngine.Operations/AbstractOperation.cs
+@@ -1,6 +1,7 @@
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.Tools;
++using UniGetUI.PackageEngine.Classes.Manager;
+ using UniGetUI.PackageEngine.Enums;
+ 
+ namespace UniGetUI.PackageOperations;
+@@ -20,11 +21,26 @@ public abstract partial class AbstractOperation : IDisposable
+     public event EventHandler<BadgeCollection>? BadgesChanged;
+ 
+     public bool Started { get; private set; }
++
++    /// <summary>
++    /// Operations UniGetUI started on its own (scheduled updates, <c>--updateapps</c>) rather than
++    /// in response to a user action. They queue behind every user-requested operation.
++    /// </summary>
++    public bool IsBackgroundOperation { get; set; }
+     protected bool QUEUE_ENABLED;
+     protected bool FORCE_HOLD_QUEUE;
+     private bool IsInnerOperation;
++    private readonly object CancellationLock = new();
++    private CancellationTokenSource? RunCancellationSource;
++    private AbstractOperation? ActiveInnerOperation;
++    private Task? ActiveRunTask;
++    private TaskCompletionSource? ScheduledRetryCompletionSource;
++    private bool ActiveRunIsStarting;
++    private volatile bool IsExecutingOperation;
++    private bool Disposed;
+ 
+     private readonly List<(string, LineType)> LogList = [];
++    private readonly object LogListLock = new();
+     private OperationStatus _status = OperationStatus.InQueue;
+     public OperationStatus Status
+     {
+@@ -36,12 +52,14 @@ public abstract partial class AbstractOperation : IDisposable
+         }
+     }
+ 
++    public bool SystemRestartRequired { get; private set; }
++
+     public void ApplyCapabilities(bool admin, bool interactive, bool skiphash, string? scope)
+     {
+         BadgesChanged?.Invoke(this, new BadgeCollection(admin, interactive, skiphash, scope));
+     }
+ 
+-    private readonly IReadOnlyList<InnerOperation> PreOperations = [];
++    private readonly List<InnerOperation> PreOperations = [];
+     private readonly IReadOnlyList<InnerOperation> PostOperations = [];
+ 
+     public AbstractOperation(
+@@ -52,7 +70,7 @@ public abstract partial class AbstractOperation : IDisposable
+     {
+         QUEUE_ENABLED = queue_enabled;
+         if (preOps is not null)
+-            PreOperations = preOps;
++            PreOperations.AddRange(preOps);
+         if (postOps is not null)
+             PostOperations = postOps;
+ 
+@@ -71,50 +89,172 @@ public abstract partial class AbstractOperation : IDisposable
+         }
+     }
+ 
++    protected void AddPreOperation(InnerOperation operation)
++    {
++        PreOperations.Add(operation);
++    }
++
+     public void Cancel()
+     {
+-        switch (_status)
++        AbstractOperation? activeInnerOperation;
++        bool wasRunning;
++        bool hasActiveWork;
++        lock (CancellationLock)
+         {
+-            case OperationStatus.Canceled:
+-                break;
+-            case OperationStatus.Failed:
+-                break;
+-            case OperationStatus.Running:
+-                Status = OperationStatus.Canceled;
+-                while (OperationQueue.Remove(this))
+-                    ;
+-                CancelRequested?.Invoke(this, EventArgs.Empty);
+-                Status = OperationStatus.Canceled;
+-                break;
+-            case OperationStatus.InQueue:
+-                Status = OperationStatus.Canceled;
+-                while (OperationQueue.Remove(this))
+-                    ;
+-                Status = OperationStatus.Canceled;
+-                break;
+-            case OperationStatus.Succeeded:
+-                break;
++            if (
++                _status
++                    is OperationStatus.Canceled
++                        or OperationStatus.Failed
++                        or OperationStatus.Succeeded
++                && !ActiveRunIsStarting
++            )
++                return;
++
++            wasRunning = _status is OperationStatus.Running;
++            hasActiveWork = IsExecutingOperation;
++            RunCancellationSource?.Cancel();
++            activeInnerOperation = ActiveInnerOperation;
++        }
++
++        Status = OperationStatus.Canceled;
++        activeInnerOperation?.Cancel();
++
++        if (wasRunning)
++            CancelRequested?.Invoke(this, EventArgs.Empty);
++
++        // A queued operation has no active work to clean up. A running operation stays on the
++        // queue until MainThread has awaited its task and completed its cleanup.
++        if (!hasActiveWork)
++        {
++            RemoveFromQueue(this);
++        }
++    }
++
++    protected CancellationToken CancellationToken
++    {
++        get
++        {
++            lock (CancellationLock)
++                return RunCancellationSource?.Token ?? global::System.Threading.CancellationToken.None;
++        }
++    }
++
++    /// <summary>
++    /// Test hook: installs the cancellation source that MainThread() would normally create,
++    /// so tests invoking PerformOperation() directly can exercise Cancel().
++    /// </summary>
++    internal void SetRunCancellationSourceForTests(CancellationTokenSource source)
++    {
++        lock (CancellationLock)
++            RunCancellationSource = source;
++    }
++
++    private bool TrySetActiveInnerOperation(AbstractOperation operation)
++    {
++        bool cancellationRequested;
++        lock (CancellationLock)
++        {
++            cancellationRequested =
++                RunCancellationSource?.IsCancellationRequested is true
++                || Status is OperationStatus.Canceled;
++            if (!cancellationRequested)
++                ActiveInnerOperation = operation;
++        }
++
++        if (cancellationRequested)
++            operation.Cancel();
++
++        return !cancellationRequested;
++    }
++
++    private void ClearActiveInnerOperation(AbstractOperation operation)
++    {
++        lock (CancellationLock)
++            if (ReferenceEquals(ActiveInnerOperation, operation))
++                ActiveInnerOperation = null;
++    }
++
++    private void EndRunCancellation(CancellationTokenSource cancellationSource)
++    {
++        lock (CancellationLock)
++        {
++            if (!ReferenceEquals(RunCancellationSource, cancellationSource))
++                return;
++            RunCancellationSource = null;
++            ActiveRunIsStarting = false;
+         }
++        cancellationSource.Dispose();
+     }
+ 
+     protected void Line(string line, LineType type)
+     {
+         // LogList stays raw: it is the source of truth for result parsing. Only display redacts.
+         if (type != LineType.ProgressIndicator)
+-            LogList.Add((line, type));
++        {
++            lock (LogListLock)
++                LogList.Add((line, type));
++        }
+         LogLineAdded?.Invoke(this, (Logger.Redact(line), type));
+     }
+ 
+-    protected IReadOnlyList<(string, LineType)> GetRawOutput() => LogList;
++    protected IReadOnlyList<(string, LineType)> GetRawOutput()
++    {
++        lock (LogListLock)
++            return LogList.ToArray();
++    }
+ 
+     public IReadOnlyList<(string, LineType)> GetOutput()
+     {
+-        if (!Logger.RedactUsername)
+-            return LogList;
+-        return LogList.Select(l => (Logger.Redact(l.Item1), l.Item2)).ToList();
++        lock (LogListLock)
++        {
++            if (!Logger.RedactUsername)
++                return LogList.ToArray();
++            return LogList.Select(l => (Logger.Redact(l.Item1), l.Item2)).ToArray();
++        }
++    }
++
++    public Task MainThread()
++    {
++        TaskCompletionSource completionSource;
++        CancellationTokenSource cancellationSource;
++        lock (CancellationLock)
++        {
++            ObjectDisposedException.ThrowIf(Disposed, this);
++
++            if (ActiveRunTask is { IsCompleted: false })
++                return ActiveRunTask;
++
++            if (ScheduledRetryCompletionSource is not null)
++                return ScheduledRetryCompletionSource.Task;
++
++            completionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
++            cancellationSource = new();
++            ActiveRunTask = completionSource.Task;
++            RunCancellationSource = cancellationSource;
++            ActiveRunIsStarting = true;
++        }
++
++        _ = ExecuteRunAsync(completionSource, cancellationSource);
++        return completionSource.Task;
++    }
++
++    private async Task ExecuteRunAsync(
++        TaskCompletionSource completionSource,
++        CancellationTokenSource cancellationSource
++    )
++    {
++        try
++        {
++            await MainThreadCore(cancellationSource).ConfigureAwait(false);
++            completionSource.SetResult();
++        }
++        catch (Exception ex)
++        {
++            completionSource.SetException(ex);
++        }
+     }
+ 
+-    public async Task MainThread()
++    private async Task MainThreadCore(CancellationTokenSource runCancellation)
+     {
+         try
+         {
+@@ -135,33 +275,58 @@ public abstract partial class AbstractOperation : IDisposable
+ 
+             Started = true;
+ 
+-            if (OperationQueue.Contains(this))
++            if (IndexInQueue(this) >= 0)
+                 throw new InvalidOperationException("This operation was already on the queue");
+ 
++            if (runCancellation.IsCancellationRequested)
++            {
++                MarkRunAsStarted(runCancellation);
++                CompleteCanceledRun();
++                return;
++            }
++
+             Status = OperationStatus.InQueue;
++            MarkRunAsStarted(runCancellation);
++            if (runCancellation.IsCancellationRequested)
++            {
++                CompleteCanceledRun();
++                return;
++            }
++
+             Line(Metadata.OperationInformation, LineType.VerboseDetails);
+             Line(Metadata.Status, LineType.ProgressIndicator);
+ 
+             Enqueued?.Invoke(this, EventArgs.Empty);
++            if (runCancellation.IsCancellationRequested)
++            {
++                CompleteCanceledRun();
++                return;
++            }
+ 
+             if (QUEUE_ENABLED && !IsInnerOperation)
+             {
+                 // QUEUE HANDLER
+                 SKIP_QUEUE = false;
+-                OperationQueue.Add(this);
++                EnqueueByPriority();
++                if (runCancellation.IsCancellationRequested)
++                {
++                    RemoveFromQueue(this);
++                    CompleteCanceledRun();
++                    return;
++                }
++
+                 int lastPos = -2;
+ 
+                 while (
+                     FORCE_HOLD_QUEUE
+-                    || (OperationQueue.IndexOf(this) >= MAX_OPERATIONS && !SKIP_QUEUE)
++                    || (SlotsTakenAhead(this) >= MAX_OPERATIONS && !SKIP_QUEUE)
+                 )
+                 {
+-                    int pos = OperationQueue.IndexOf(this) - MAX_OPERATIONS + 1;
+-
+-                    if (pos == -1)
++                    if (IndexInQueue(this) - MAX_OPERATIONS + 1 == -1)
+                         return;
+                     // In this case, operation was canceled;
+ 
++                    int pos = SlotsTakenAhead(this) - MAX_OPERATIONS + 1;
+                     if (pos != lastPos)
+                     {
+                         lastPos = pos;
+@@ -176,16 +341,33 @@ public abstract partial class AbstractOperation : IDisposable
+             }
+             // END QUEUE HANDLER
+ 
+-            var result = await _runOperation();
+-            while (OperationQueue.Remove(this))
+-                ;
++            IsExecutingOperation = true;
++            OperationVeredict result;
++            try
++            {
++                result = await _runOperation();
++            }
++            finally
++            {
++                IsExecutingOperation = false;
++            }
++            RemoveFromQueue(this);
++
++            SystemRestartRequired = result is OperationVeredict.RestartRequired;
+ 
+-            if (result == OperationVeredict.Success)
++            if (result is OperationVeredict.Success or OperationVeredict.RestartRequired)
+             {
+                 Status = OperationStatus.Succeeded;
+                 OperationSucceeded?.Invoke(this, EventArgs.Empty);
+                 OperationFinished?.Invoke(this, EventArgs.Empty);
+                 Line(Metadata.SuccessMessage, LineType.Information);
++                if (SystemRestartRequired)
++                    Line(
++                        CoreTools.Translate(
++                            "This operation finished, but the computer must be restarted before the changes take effect"
++                        ),
++                        LineType.Information
++                    );
+             }
+             else if (result == OperationVeredict.Failure)
+             {
+@@ -213,15 +395,22 @@ public abstract partial class AbstractOperation : IDisposable
+         }
+         catch (Exception ex)
+         {
+-            Line("An internal error occurred:", LineType.Error);
+-            foreach (var line in ex.ToString().Split("\n"))
++            if (ex is OperationPreconditionException)
++            {
++                Line(ex.Message, LineType.Error);
++            }
++            else
+             {
+-                Line(line, LineType.Error);
++                Line("An internal error occurred:", LineType.Error);
++                foreach (var line in ex.ToString().Split("\n"))
++                {
++                    Line(line, LineType.Error);
++                }
+             }
+ 
+-            while (OperationQueue.Remove(this))
+-                ;
++            RemoveFromQueue(this);
+ 
++            MarkRunAsStarted(runCancellation);
+             Status = OperationStatus.Failed;
+             try
+             {
+@@ -250,8 +439,32 @@ public abstract partial class AbstractOperation : IDisposable
+         }
+         finally
+         {
+-            if (OperationQueue.Count == 0)
+-                QueueDrained?.Invoke(null, EventArgs.Empty);
++            try
++            {
++                OnRunCompleted();
++            }
++            finally
++            {
++                EndRunCancellation(runCancellation);
++                if (QueueLength() == 0)
++                    QueueDrained?.Invoke(null, EventArgs.Empty);
++            }
++        }
++    }
++
++    private void CompleteCanceledRun()
++    {
++        Status = OperationStatus.Canceled;
++        OperationFinished?.Invoke(this, EventArgs.Empty);
++        Line(CoreTools.Translate("Operation canceled by user"), LineType.Error);
++    }
++
++    private void MarkRunAsStarted(CancellationTokenSource cancellationSource)
++    {
++        lock (CancellationLock)
++        {
++            if (ReferenceEquals(RunCancellationSource, cancellationSource))
++                ActiveRunIsStarting = false;
+         }
+     }
+ 
+@@ -259,20 +472,35 @@ public abstract partial class AbstractOperation : IDisposable
+     {
+         OperationVeredict result;
+ 
+-        // Process preoperations
++        var preOps = new List<InnerOperation>(PreOperations);
++        preOps.AddRange(GetAttemptPreOperations());
+         int i = 0,
+-            count = PreOperations.Count;
++            count = preOps.Count;
+         if (count > 0)
+             Line("", LineType.VerboseDetails);
+-        foreach (var preReq in PreOperations)
++        foreach (var preReq in preOps)
+         {
++            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
++                return OperationVeredict.Canceled;
++
+             i++;
+             Line(
+                     CoreTools.Translate("Running PreOperation ({0}/{1})...", i, count),
+                 LineType.Information
+             );
+             preReq.Operation.LogLineAdded += (_, line) => Line(line.Item1, line.Item2);
+-            await preReq.Operation.MainThread();
++            if (!TrySetActiveInnerOperation(preReq.Operation))
++                return OperationVeredict.Canceled;
++            try
++            {
++                await preReq.Operation.MainThread();
++            }
++            finally
++            {
++                ClearActiveInnerOperation(preReq.Operation);
++            }
++            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
++                return OperationVeredict.Canceled;
+             if (preReq.Operation.Status is not OperationStatus.Succeeded && preReq.MustSucceed)
+             {
+                 Line(
+@@ -305,38 +533,42 @@ public abstract partial class AbstractOperation : IDisposable
+ 
+         do
+         {
++            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
++            {
++                result = OperationVeredict.Canceled;
++                break;
++            }
++
+             OperationStarting?.Invoke(this, EventArgs.Empty);
+ 
+             try
+             {
+-                // Check if the operation was canceled
+-                if (Status is OperationStatus.Canceled)
+-                {
+-                    result = OperationVeredict.Canceled;
+-                    break;
+-                }
+-
+                 Task<OperationVeredict> op = PerformOperation();
+-                while (Status != OperationStatus.Canceled && !op.IsCompleted)
+-                    await Task.Delay(100);
+-
+-                if (Status is OperationStatus.Canceled)
++                result = await op.ConfigureAwait(false);
++                if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
+                     result = OperationVeredict.Canceled;
+-                else
+-                    result = op.GetAwaiter().GetResult();
+             }
+             catch (Exception e)
+             {
+-                result = OperationVeredict.Failure;
++                result = CancellationToken.IsCancellationRequested
++                    ? OperationVeredict.Canceled
++                    : OperationVeredict.Failure;
+                 Logger.Error(e);
+-                foreach (string l in e.ToString().Split("\n"))
++                if (e is OperationPreconditionException)
++                {
++                    Line(e.Message, LineType.Error);
++                }
++                else
+                 {
+-                    Line(l, LineType.Error);
++                    foreach (string l in e.ToString().Split("\n"))
++                    {
++                        Line(l, LineType.Error);
++                    }
+                 }
+             }
+         } while (result is OperationVeredict.AutoRetry);
+ 
+-        if (result is not OperationVeredict.Success)
++        if (result is not (OperationVeredict.Success or OperationVeredict.RestartRequired))
+             return result;
+ 
+         // Process postoperations
+@@ -351,8 +583,22 @@ public abstract partial class AbstractOperation : IDisposable
+                 CoreTools.Translate("Running PostOperation ({0}/{1})...", i, count),
+                 LineType.Information
+             );
++            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
++                return OperationVeredict.Canceled;
++
+             postReq.Operation.LogLineAdded += (_, line) => Line(line.Item1, line.Item2);
+-            await postReq.Operation.MainThread();
++            if (!TrySetActiveInnerOperation(postReq.Operation))
++                return OperationVeredict.Canceled;
++            try
++            {
++                await postReq.Operation.MainThread();
++            }
++            finally
++            {
++                ClearActiveInnerOperation(postReq.Operation);
++            }
++            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
++                return OperationVeredict.Canceled;
+             if (postReq.Operation.Status is not OperationStatus.Succeeded && postReq.MustSucceed)
+             {
+                 Line(
+@@ -379,14 +625,85 @@ public abstract partial class AbstractOperation : IDisposable
+         return result;
+     }
+ 
++    public static void RemoveFromQueue(AbstractOperation operation)
++    {
++        lock (QueueLock)
++        {
++            while (OperationQueue.Remove(operation))
++                ;
++        }
++    }
++
++    /// <summary>
++    /// The position of the operation in <see cref="OperationQueue"/>, or -1 when it is not queued.
++    /// Reading the queue without the queue lock can observe an insertion or a removal half-applied
++    /// and report -1 for an operation that is really still queued.
++    /// </summary>
++    public static int IndexInQueue(AbstractOperation operation)
++    {
++        lock (QueueLock)
++            return OperationQueue.IndexOf(operation);
++    }
++
++    internal bool IsWaitingForManager
++    {
++        get => _isWaitingForManager;
++        set => _isWaitingForManager = value;
++    }
++    private volatile bool _isWaitingForManager;
++
++    private static int SlotsTakenAhead(AbstractOperation operation)
++    {
++        lock (QueueLock)
++        {
++            int index = OperationQueue.IndexOf(operation);
++            if (index < 0)
++                return index;
++
++            int taken = 0;
++            for (int i = 0; i < index; i++)
++            {
++                if (!OperationQueue[i].IsWaitingForManager)
++                    taken++;
++            }
++            return taken;
++        }
++    }
++
++    public static int QueueLength()
++    {
++        lock (QueueLock)
++            return OperationQueue.Count;
++    }
++
++    private void EnqueueByPriority()
++    {
++        lock (QueueLock)
++        {
++            if (IsBackgroundOperation)
++            {
++                OperationQueue.Add(this);
++                return;
++            }
++
++            int position = Math.Min(MAX_OPERATIONS, OperationQueue.Count);
++            for (int i = position; i < OperationQueue.Count; i++)
++            {
++                if (!OperationQueue[i].IsBackgroundOperation)
++                    position = i + 1;
++            }
++
++            OperationQueue.Insert(position, this);
++        }
++    }
++
+     private bool SKIP_QUEUE;
+ 
+     public void SkipQueue()
+     {
+         if (Status != OperationStatus.InQueue)
+             return;
+-        while (OperationQueue.Remove(this))
+-            ;
++        RemoveFromQueue(this);
+         SKIP_QUEUE = true;
+     }
+ 
+@@ -394,13 +711,18 @@ public abstract partial class AbstractOperation : IDisposable
+     {
+         if (Status != OperationStatus.InQueue)
+             return;
+-        if (!OperationQueue.Contains(this))
+-            return;
+ 
+         FORCE_HOLD_QUEUE = true;
+-        while (OperationQueue.Remove(this))
+-            ;
+-        OperationQueue.Insert(Math.Min(MAX_OPERATIONS, OperationQueue.Count), this);
++        lock (QueueLock)
++        {
++            if (OperationQueue.Contains(this))
++            {
++                while (OperationQueue.Remove(this))
++                    ;
++                OperationQueue.Insert(Math.Min(MAX_OPERATIONS, OperationQueue.Count), this);
++                IsBackgroundOperation = false;
++            }
++        }
+         FORCE_HOLD_QUEUE = false;
+     }
+ 
+@@ -408,13 +730,17 @@ public abstract partial class AbstractOperation : IDisposable
+     {
+         if (Status != OperationStatus.InQueue)
+             return;
+-        if (!OperationQueue.Contains(this))
+-            return;
+ 
+         FORCE_HOLD_QUEUE = true;
+-        while (OperationQueue.Remove(this))
+-            ;
+-        OperationQueue.Add(this);
++        lock (QueueLock)
++        {
++            if (OperationQueue.Contains(this))
++            {
++                while (OperationQueue.Remove(this))
++                    ;
++                OperationQueue.Add(this);
++            }
++        }
+         FORCE_HOLD_QUEUE = false;
+     }
+ 
+@@ -423,23 +749,137 @@ public abstract partial class AbstractOperation : IDisposable
+         if (retryMode is RetryMode.NoRetry)
+             throw new InvalidOperationException("We weren't supposed to reach this, weren't we?");
+ 
++        IsBackgroundOperation = false;
++
++        Task? previousRun = null;
++        TaskCompletionSource? scheduledRetry = null;
++        bool applyImmediately = false;
++        lock (CancellationLock)
++        {
++            if (Disposed)
++                return;
++
++            if (Status is OperationStatus.Running)
++                return;
++
++            if (Status is OperationStatus.InQueue)
++            {
++                applyImmediately = true;
++            }
++            else
++            {
++                if (ScheduledRetryCompletionSource is not null)
++                    return;
++
++                scheduledRetry = new(TaskCreationOptions.RunContinuationsAsynchronously);
++                ScheduledRetryCompletionSource = scheduledRetry;
++                previousRun = ActiveRunTask ?? Task.CompletedTask;
++            }
++        }
++
++        if (applyImmediately)
++        {
++            ApplyRetryActionAndLog(retryMode);
++            return;
++        }
++
++        _ = RetryAfterRunAsync(previousRun!, scheduledRetry!, retryMode);
++    }
++
++    private async Task RetryAfterRunAsync(
++        Task previousRun,
++        TaskCompletionSource scheduledRetry,
++        string retryMode
++    )
++    {
++        CancellationTokenSource? cancellationSource = null;
++        try
++        {
++            await previousRun.ConfigureAwait(false);
++
++            lock (CancellationLock)
++            {
++                if (!ReferenceEquals(ScheduledRetryCompletionSource, scheduledRetry))
++                    return;
++
++                if (Disposed)
++                {
++                    ScheduledRetryCompletionSource = null;
++                    scheduledRetry.TrySetCanceled();
++                    return;
++                }
++
++                cancellationSource = new();
++                RunCancellationSource = cancellationSource;
++                ActiveRunTask = scheduledRetry.Task;
++                ScheduledRetryCompletionSource = null;
++                ActiveRunIsStarting = true;
++            }
++
++            ApplyRetryActionAndLog(retryMode);
++            await ExecuteRunAsync(scheduledRetry, cancellationSource).ConfigureAwait(false);
++        }
++        catch (Exception ex)
++        {
++            if (cancellationSource is not null)
++                EndRunCancellation(cancellationSource);
++
++            lock (CancellationLock)
++            {
++                if (ReferenceEquals(ScheduledRetryCompletionSource, scheduledRetry))
++                    ScheduledRetryCompletionSource = null;
++                if (ReferenceEquals(ActiveRunTask, scheduledRetry.Task))
++                    ActiveRunTask = null;
++            }
++            scheduledRetry.TrySetException(ex);
++            Logger.Error(ex);
++        }
++    }
++
++    private void ApplyRetryActionAndLog(string retryMode)
++    {
+         ApplyRetryAction(retryMode);
+         Line($"", LineType.VerboseDetails);
+         Line($"-----------------------", LineType.VerboseDetails);
+         Line($"Retrying operation with RetryMode={retryMode}", LineType.VerboseDetails);
+         Line($"", LineType.VerboseDetails);
+-        if (Status is OperationStatus.Running or OperationStatus.InQueue)
+-            return;
+-        _ = MainThread();
+     }
+ 
+     protected abstract void ApplyRetryAction(string retryMode);
++    protected virtual IReadOnlyList<InnerOperation> GetAttemptPreOperations() => [];
+     protected abstract Task<OperationVeredict> PerformOperation();
+     public abstract Task<Uri> GetOperationIcon();
+ 
++    protected virtual void OnRunCompleted() { }
++
+     public void Dispose()
+     {
+-        while (OperationQueue.Remove(this))
+-            ;
++        Dispose(true);
++        GC.SuppressFinalize(this);
++    }
++
++    protected virtual void Dispose(bool disposing)
++    {
++        if (!disposing)
++            return;
++
++        TaskCompletionSource? scheduledRetry;
++        lock (CancellationLock)
++        {
++            if (Disposed)
++                return;
++
++            Disposed = true;
++            scheduledRetry = ScheduledRetryCompletionSource;
++            ScheduledRetryCompletionSource = null;
++        }
++
++        scheduledRetry?.TrySetCanceled();
++        Cancel();
++        DisposeStaleSpeedTimer();
++        if (!IsExecutingOperation)
++        {
++            RemoveFromQueue(this);
++        }
+     }
+ }
+diff --git a/src/UniGetUI.PackageEngine.Operations/AbstractOperation_Auxiliaries.cs b/src/UniGetUI.PackageEngine.Operations/AbstractOperation_Auxiliaries.cs
+index 4ac19cc0a5e96ed27e4639f71cdf6798cb8dbcf9..e67374c32b79e31e80754843af42120265a19991 100644
+--- a/src/UniGetUI.PackageEngine.Operations/AbstractOperation_Auxiliaries.cs
++++ b/src/UniGetUI.PackageEngine.Operations/AbstractOperation_Auxiliaries.cs
+@@ -3,6 +3,7 @@ namespace UniGetUI.PackageOperations;
+ public abstract partial class AbstractOperation
+ {
+     public static readonly List<AbstractOperation> OperationQueue = [];
++    private static readonly object QueueLock = new();
+     public static int MAX_OPERATIONS;
+ 
+     /// <summary>
+@@ -18,6 +19,7 @@ public abstract partial class AbstractOperation
+         public const string Retry_AsAdmin = "RetryAsAdmin";
+         public const string Retry_Interactive = "RetryInteractive";
+         public const string Retry_SkipIntegrity = "RetryNoHashCheck";
++        public const string Retry_CloseRunningApp = "RetryCloseRunningApp";
+     }
+ 
+     public class OperationMetadata
+diff --git a/src/UniGetUI.PackageEngine.Operations/AbstractOperation_Progress.cs b/src/UniGetUI.PackageEngine.Operations/AbstractOperation_Progress.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf2680a306bc143f0f96f310b3db94485377032c
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Operations/AbstractOperation_Progress.cs
+@@ -0,0 +1,410 @@
++using System.Diagnostics;
++using UniGetUI.Core.Logging;
++using UniGetUI.PackageEngine.Enums;
++
++namespace UniGetUI.PackageOperations;
++
++// Progress reporting for AbstractOperation: structured, manager-neutral OperationProgress
++// snapshots flow side-car via ProgressChanged and never touch the log/history path.
++//
++// DESIGN NOTES (maintainer feedback on #5390):
++// - Structured progress callbacks and Line() logging are fully separated. ReportProgress
++//   never logs; existing CLI output, return codes, retry decisions, and history entries
++//   are unaffected by progress reporting.
++// - ONE monotonic clock source: _timestampProvider (default Stopwatch.GetTimestamp,
++//   injectable for tests) is the only time source used by progress logic. Elapsed
++//   intervals come from Stopwatch.GetElapsedTime so wall-clock adjustments never skew
++//   throughput. There is no time-based UI throttling, so there is no second clock.
++// - Speed is measured generically as deltaBytes / deltaTime from real cumulative byte
++//   samples. First sample, rewound counters, zero elapsed time, stage changes, and
++//   unknown progress never synthesize a speed. Light deterministic EMA smoothing
++//   (alpha 0.3) damps per-chunk network jitter.
++// - Stale speed expires: when no fresh byte movement is observed for StaleSpeedTimeout
++//   (default 2 s), the speed suffix is dropped rather than displayed indefinitely.
++//   A single one-shot timer exists only while a fresh speed is active; it is stopped
++//   on stage change/reset/completion/disposal and never affects execution.
++// - No ETA is computed.
++public abstract partial class AbstractOperation
++{
++    /// <summary>
++    /// Raised on the reporting thread whenever structured progress is reported or expired.
++    /// UI subscribers must marshal to the UI thread (as with LogLineAdded/StatusChanged).
++    /// Never raised from the log path; progress lines in the log do not raise this.
++    /// </summary>
++    public event EventHandler<OperationProgress>? ProgressChanged;
++
++    /// <summary>Latest structured progress snapshot. Unknown until first reported.</summary>
++    public OperationProgress CurrentProgress { get; private set; } = OperationProgress.Unknown;
++
++    private readonly object ProgressLock = new();
++    private Func<long> TimestampProvider = static () => Stopwatch.GetTimestamp();
++
++    // Throughput tracker state. All fields are guarded by ProgressLock.
++    private bool HasThroughputBaseline;
++    private ulong LastThroughputBytes;
++    private long LastThroughputTimestamp;
++    private long LastFreshTimestamp;
++    private double? SmoothedBytesPerSecond;
++
++    private const double ThroughputSmoothingAlpha = 0.3;
++
++    /// <summary>
++    /// Age after which a previously measured speed is considered stale and omitted
++    /// from display. Fresh byte movement restores it.
++    /// </summary>
++    internal TimeSpan StaleSpeedTimeout { get; set; } = TimeSpan.FromSeconds(2);
++
++    private Timer? StaleSpeedTimer;
++    private bool StaleTimerArmed;
++
++    /// <summary>
++    /// Test hook: replaces the single monotonic clock used by progress logic. Resets
++    /// tracker state so samples from different clocks are never mixed.
++    /// </summary>
++    internal void SetTimestampProviderForTests(Func<long> provider)
++    {
++        lock (ProgressLock)
++        {
++            TimestampProvider = provider;
++            ResetThroughputStateUnlocked();
++            DisarmStaleTimerUnlocked();
++        }
++    }
++
++    /// <summary>
++    /// Reports structured progress. Enriches download reports with measured throughput,
++    /// stores the snapshot as <see cref="CurrentProgress"/>, and raises
++    /// <see cref="ProgressChanged"/>. Never logs and never fails the operation:
++    /// each subscriber is isolated so a display-layer exception cannot fail package
++    /// execution nor block later subscribers.
++    /// Safe to call concurrently from output callbacks.
++    /// Callbacks run outside <c>ProgressLock</c> (holding a lock across subscriber
++    /// code invites deadlock), so callback ordering is only guaranteed for a single
++    /// reporting thread.
++    /// </summary>
++    protected void ReportProgress(OperationProgress progress)
++    {
++        OperationProgress enriched;
++        lock (ProgressLock)
++        {
++            enriched = EnrichWithThroughputUnlocked(progress);
++            CurrentProgress = enriched;
++        }
++        NotifyProgressSubscribers(enriched);
++    }
++
++    private void NotifyProgressSubscribers(OperationProgress enriched)
++    {
++        var handlers = ProgressChanged?.GetInvocationList();
++        if (handlers is null)
++        {
++            return;
++        }
++
++        foreach (EventHandler<OperationProgress> handler in handlers)
++        {
++            try
++            {
++                handler(this, enriched);
++            }
++            catch (Exception ex)
++            {
++                Logger.Warn(
++                    $"A progress subscriber threw; progress reporting is observational and will not fail the operation: {ex}"
++                );
++            }
++        }
++    }
++
++    private OperationProgress EnrichWithThroughputUnlocked(OperationProgress progress)
++    {
++        long now = TimestampProvider();
++
++        // Only the Downloading stage with full byte counters can carry a measured speed.
++        // Anything else (stage change away from Downloading, unknown progress) clears
++        // the tracker and strips any attached speed.
++        if (
++            progress.Stage is not OperationProgressStage.Downloading
++            || progress.BytesDownloaded is null
++            || progress.BytesTotal is null
++            || progress.BytesTotal == 0
++        )
++        {
++            ResetThroughputStateUnlocked();
++            DisarmStaleTimerUnlocked();
++            return progress.BytesPerSecond is null
++                ? progress
++                : progress with
++                {
++                    BytesPerSecond = null,
++                };
++        }
++
++        ulong bytes = progress.BytesDownloaded.Value;
++
++        if (!HasThroughputBaseline)
++        {
++            // First sample establishes the baseline; there is no speed yet.
++            HasThroughputBaseline = true;
++            LastThroughputBytes = bytes;
++            LastThroughputTimestamp = now;
++            LastFreshTimestamp = now;
++            SmoothedBytesPerSecond = null;
++            DisarmStaleTimerUnlocked();
++            return progress with { BytesPerSecond = null };
++        }
++
++        if (bytes < LastThroughputBytes)
++        {
++            // Counter rewound (retry/restart): the old baseline is meaningless.
++            // The rewound sample becomes the new baseline; no stale speed survives.
++            LastThroughputBytes = bytes;
++            LastThroughputTimestamp = now;
++            LastFreshTimestamp = now;
++            SmoothedBytesPerSecond = null;
++            DisarmStaleTimerUnlocked();
++            return progress with { BytesPerSecond = null };
++        }
++
++        if (bytes == LastThroughputBytes)
++        {
++            // Stalled counter carries no new information: move the delta baseline
++            // forward so the stalled interval does not dilute the next real delta,
++            // but do not refresh freshness. Past the stale timeout the previous
++            // speed is dropped rather than displayed indefinitely.
++            LastThroughputTimestamp = now;
++            if (SmoothedBytesPerSecond is null)
++            {
++                return progress with { BytesPerSecond = null };
++            }
++
++            if (IsStaleUnlocked(now))
++            {
++                DisarmStaleTimerUnlocked();
++                return progress with { BytesPerSecond = null };
++            }
++
++            return progress with { BytesPerSecond = SmoothedBytesPerSecond };
++        }
++
++        TimeSpan elapsed = Stopwatch.GetElapsedTime(LastThroughputTimestamp, now);
++        if (elapsed <= TimeSpan.Zero)
++        {
++            // No time elapsed: preserve the previous speed without dividing by zero.
++            return progress with { BytesPerSecond = SmoothedBytesPerSecond };
++        }
++
++        double instant = (bytes - LastThroughputBytes) / elapsed.TotalSeconds;
++        double smoothed =
++            SmoothedBytesPerSecond is { } previous
++                ? ThroughputSmoothingAlpha * instant + (1 - ThroughputSmoothingAlpha) * previous
++                : instant;
++
++        if (OperationProgress.NormalizeBytesPerSecond(smoothed) is null)
++        {
++            // Defensive: with a positive delta over positive time this cannot happen,
++            // but never let a non-usable speed leak downstream.
++            return progress with { BytesPerSecond = SmoothedBytesPerSecond };
++        }
++
++        SmoothedBytesPerSecond = smoothed;
++        LastThroughputBytes = bytes;
++        LastThroughputTimestamp = now;
++        LastFreshTimestamp = now;
++        ArmStaleTimerUnlocked();
++        return progress with { BytesPerSecond = smoothed };
++    }
++
++    private bool IsStaleUnlocked(long now) =>
++        Stopwatch.GetElapsedTime(LastFreshTimestamp, now) > StaleSpeedTimeout;
++
++    private void ArmStaleTimerUnlocked()
++    {
++        try
++        {
++            if (StaleSpeedTimer is null)
++            {
++                StaleSpeedTimer = new Timer(
++                    OnStaleSpeedTimer,
++                    null,
++                    StaleSpeedTimeout,
++                    Timeout.InfiniteTimeSpan
++                );
++            }
++            else
++            {
++                StaleSpeedTimer.Change(StaleSpeedTimeout, Timeout.InfiniteTimeSpan);
++            }
++
++            StaleTimerArmed = true;
++        }
++        catch (Exception ex)
++        {
++            // Timer creation must never affect package execution.
++            Logger.Warn($"Could not arm the stale-speed timer; speed expiry is disabled for this report: {ex}");
++            StaleTimerArmed = false;
++        }
++    }
++
++    private void DisarmStaleTimerUnlocked()
++    {
++        StaleTimerArmed = false;
++        try
++        {
++            StaleSpeedTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
++        }
++        catch (ObjectDisposedException)
++        {
++        }
++        catch (Exception ex)
++        {
++            Logger.Warn($"Could not disarm the stale-speed timer: {ex}");
++        }
++    }
++
++    private void OnStaleSpeedTimer(object? state)
++    {
++        OperationProgress? expired = null;
++        try
++        {
++            long now = TimestampProvider();
++            lock (ProgressLock)
++            {
++                if (StaleSpeedTimer is null || !StaleTimerArmed)
++                {
++                    return;
++                }
++
++                // Completion stops the freshness mechanism: terminal operations keep
++                // their final visuals and must not receive post-completion updates.
++                if (Status is not OperationStatus.Running)
++                {
++                    DisarmStaleTimerUnlocked();
++                    return;
++                }
++
++                if (!HasThroughputBaseline || SmoothedBytesPerSecond is null)
++                {
++                    DisarmStaleTimerUnlocked();
++                    return;
++                }
++
++                if (!IsStaleUnlocked(now))
++                {
++                    // Fired early (wall-clock vs monotonic skew or re-arm race):
++                    // re-arm for the remaining freshness window, no dispatcher spam.
++                    try
++                    {
++                        TimeSpan elapsed = Stopwatch.GetElapsedTime(LastFreshTimestamp, now);
++                        TimeSpan remaining = StaleSpeedTimeout - elapsed;
++                        if (remaining < TimeSpan.Zero)
++                        {
++                            remaining = TimeSpan.Zero;
++                        }
++
++                        StaleSpeedTimer.Change(remaining, Timeout.InfiniteTimeSpan);
++                    }
++                    catch (ObjectDisposedException)
++                    {
++                        StaleTimerArmed = false;
++                    }
++
++                    return;
++                }
++
++                if (CurrentProgress.BytesPerSecond is null)
++                {
++                    DisarmStaleTimerUnlocked();
++                    return;
++                }
++
++                expired = CurrentProgress with { BytesPerSecond = null };
++                CurrentProgress = expired;
++                DisarmStaleTimerUnlocked();
++            }
++        }
++        catch (Exception ex)
++        {
++            Logger.Warn($"Stale-speed expiry failed; keeping the last measured speed: {ex}");
++            return;
++        }
++
++        if (expired is not null)
++        {
++            NotifyProgressSubscribers(expired);
++        }
++    }
++
++    /// <summary>
++    /// Deterministic test hook for stale-speed expiry: runs the same staleness check
++    /// the timer performs, using the injected monotonic clock. Returns true when a
++    /// speed-less update was pushed.
++    /// </summary>
++    internal bool ExpireStaleSpeedForTests()
++    {
++        OperationProgress? expired = null;
++        long now = TimestampProvider();
++        lock (ProgressLock)
++        {
++            if (!HasThroughputBaseline || SmoothedBytesPerSecond is null)
++            {
++                return false;
++            }
++
++            if (!IsStaleUnlocked(now))
++            {
++                return false;
++            }
++
++            if (CurrentProgress.BytesPerSecond is null)
++            {
++                DisarmStaleTimerUnlocked();
++                return false;
++            }
++
++            expired = CurrentProgress with { BytesPerSecond = null };
++            CurrentProgress = expired;
++            DisarmStaleTimerUnlocked();
++        }
++
++        NotifyProgressSubscribers(expired);
++        return true;
++    }
++
++    internal bool IsStaleSpeedTimerArmedForTests()
++    {
++        lock (ProgressLock)
++        {
++            return StaleTimerArmed;
++        }
++    }
++
++    private void ResetThroughputStateUnlocked()
++    {
++        HasThroughputBaseline = false;
++        LastThroughputBytes = 0;
++        LastThroughputTimestamp = 0;
++        LastFreshTimestamp = 0;
++        SmoothedBytesPerSecond = null;
++    }
++
++    internal void DisposeStaleSpeedTimer()
++    {
++        Timer? timer;
++        lock (ProgressLock)
++        {
++            timer = StaleSpeedTimer;
++            StaleSpeedTimer = null;
++            StaleTimerArmed = false;
++        }
++
++        try
++        {
++            timer?.Dispose();
++        }
++        catch (Exception ex)
++        {
++            Logger.Warn($"Could not dispose the stale-speed timer: {ex}");
++        }
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Operations/AbstractProcessOperation.cs b/src/UniGetUI.PackageEngine.Operations/AbstractProcessOperation.cs
+index 00f9d86ed07012417fc422bb58f814192e46020c..e5d0241a89f6ce1bd1609d4e97523ae0caac04d7 100644
+--- a/src/UniGetUI.PackageEngine.Operations/AbstractProcessOperation.cs
++++ b/src/UniGetUI.PackageEngine.Operations/AbstractProcessOperation.cs
+@@ -1,5 +1,6 @@
+ using System.Diagnostics;
+ using System.Text;
++using UniGetUI.Core.Data;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.Tools;
+@@ -12,6 +13,9 @@ public abstract class AbstractProcessOperation : AbstractOperation
+     protected Process process { get; private set; }
+     private bool ProcessKilled;
+ 
++    /// <summary>Exit code of the most recent process run, or null if it never completed a run.</summary>
++    public int? LastReturnCode { get; private set; }
++
+     protected AbstractProcessOperation(
+         bool queue_enabled,
+         IReadOnlyList<InnerOperation>? preOps = null,
+@@ -20,24 +24,12 @@ public abstract class AbstractProcessOperation : AbstractOperation
+         : base(queue_enabled, preOps, postOps)
+     {
+         process = new();
+-        CancelRequested += (_, _) =>
+-        {
+-            try
+-            {
+-                process.Kill();
+-                ProcessKilled = true;
+-            }
+-            catch (InvalidOperationException e)
+-            {
+-                Line(
+-                    "Attempted to cancel a process that hasn't ben created yet: " + e.Message,
+-                    LineType.Error
+-                );
+-            }
+-        };
++        CancelRequested += (_, _) => StopProcess();
+         OperationStarting += (_, _) =>
+         {
++            DisposeProcess();
+             ProcessKilled = false;
++            LastReturnCode = null;
+             process = new();
+             process.StartInfo.UseShellExecute = false;
+             process.StartInfo.RedirectStandardOutput = true;
+@@ -56,12 +48,10 @@ public abstract class AbstractProcessOperation : AbstractOperation
+             {
+                 if (e.Data is null)
+                     return;
+-                string line = e.Data.ToString().Trim();
++                string line = e.Data.Trim();
+                 var lineType = LineType.Error;
+                 if (line.Length < 6 || line.Contains("Waiting for another install..."))
+-                {
+                     lineType = LineType.ProgressIndicator;
+-                }
+ 
+                 Line(line, lineType);
+             };
+@@ -100,9 +90,7 @@ public abstract class AbstractProcessOperation : AbstractOperation
+ 
+     protected void RedirectWinGetTempFolder()
+     {
+-        string WinGetTemp = Path.Join(Path.GetTempPath(), "UniGetUI", "ElevatedWinGetTemp");
+-        process.StartInfo.Environment["TEMP"] = WinGetTemp;
+-        process.StartInfo.Environment["TMP"] = WinGetTemp;
++        AppPaths.RedirectTempToElevatedDirectory(process.StartInfo);
+     }
+ 
+     protected override async Task<OperationVeredict> PerformOperation()
+@@ -120,7 +108,7 @@ public abstract class AbstractProcessOperation : AbstractOperation
+         if (process.StartInfo.Arguments == "lol" && process.StartInfo.ArgumentList.Count is 0)
+             throw new InvalidOperationException("StartInfo.Arguments has not been set");
+ 
+-        Line($"Executing process with StartInfo:", LineType.VerboseDetails);
++        Line("Executing process with StartInfo:", LineType.VerboseDetails);
+         Line($" - FileName: \"{process.StartInfo.FileName.Trim()}\"", LineType.VerboseDetails);
+         Line(
+             process.StartInfo.ArgumentList.Count > 0
+@@ -130,7 +118,6 @@ public abstract class AbstractProcessOperation : AbstractOperation
+         );
+         Line($"Start Time: \"{DateTime.Now}\"", LineType.VerboseDetails);
+ 
+-        // An empty FileName means elevation was required but no elevator (UniGetUI Elevator/GSudo) is available
+         if (string.IsNullOrWhiteSpace(process.StartInfo.FileName))
+         {
+             Line(
+@@ -148,10 +135,25 @@ public abstract class AbstractProcessOperation : AbstractOperation
+             await CoreTools.CacheUACForCurrentProcess();
+         }
+ 
++        CancellationToken.ThrowIfCancellationRequested();
++
++        // When admin-rights caching is disabled (or a cache miss), the elevator is launched
++        // directly here and the UAC prompt is raised at this Start() — delegate foreground
++        // rights here too, not just on the cached path (#5146).
++        if (process.StartInfo.FileName == CoreData.ElevatorPath)
++            CoreTools.PrepareForegroundForElevation();
++
+         process.Start();
++        if (CancellationToken.IsCancellationRequested)
++        {
++            StopProcess();
++            await process.WaitForExitAsync().ConfigureAwait(false);
++            return OperationVeredict.Canceled;
++        }
++
+         if (!Settings.Get(Settings.K.DisableNewProcessLineHandler))
+         {
+-            await process.StandardInput.WriteLineAsync("\r\n\r\n\r\n\r\n");
++            await process.StandardInput.WriteLineAsync("\r\n\r\n\r\n\r\n".AsMemory(), CancellationToken);
+         }
+ 
+         process.StandardInput.Close();
+@@ -159,7 +161,7 @@ public abstract class AbstractProcessOperation : AbstractOperation
+         {
+             process.BeginErrorReadLine();
+         }
+-        catch (Exception ex)
++        catch (InvalidOperationException ex)
+         {
+             Logger.Error(ex);
+         }
+@@ -167,52 +169,67 @@ public abstract class AbstractProcessOperation : AbstractOperation
+         StringBuilder currentLine = new();
+         char[] buffer = new char[1];
+         string? lastStringBeforeLF = null;
+-
+-        while ((await process.StandardOutput.ReadBlockAsync(buffer)) > 0)
++        try
+         {
+-            char c = buffer[0];
+-            if (c == '\n')
++            while ((await process.StandardOutput.ReadAsync(buffer.AsMemory(), CancellationToken)) > 0)
+             {
+-                if (currentLine.Length == 0)
++                char c = buffer[0];
++                if (c == 10)
+                 {
+-                    if (lastStringBeforeLF is not null)
++                    if (currentLine.Length == 0)
+                     {
+-                        Line(lastStringBeforeLF, LineType.Information);
+-                        lastStringBeforeLF = null;
++                        if (lastStringBeforeLF is not null)
++                        {
++                            Line(lastStringBeforeLF, LineType.Information);
++                            lastStringBeforeLF = null;
++                        }
++                        continue;
+                     }
+-                    continue;
+-                }
+ 
+-                string line = currentLine.ToString();
+-                Line(line, LineType.Information);
+-                currentLine.Clear();
+-            }
+-            else if (c == '\r')
+-            {
+-                if (currentLine.Length == 0)
+-                    continue;
+-                lastStringBeforeLF = currentLine.ToString();
+-                Line(lastStringBeforeLF, LineType.ProgressIndicator);
+-                currentLine.Clear();
+-            }
+-            else
+-            {
+-                currentLine.Append(c);
++                    string line = currentLine.ToString();
++                    Line(line, LineType.Information);
++                    currentLine.Clear();
++                }
++                else if (c == 13)
++                {
++                    if (currentLine.Length == 0)
++                        continue;
++                    lastStringBeforeLF = currentLine.ToString();
++                    Line(lastStringBeforeLF, LineType.ProgressIndicator);
++                    currentLine.Clear();
++                }
++                else
++                {
++                    currentLine.Append(c);
++                }
+             }
+         }
++        catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
++        {
++            await process.WaitForExitAsync().ConfigureAwait(false);
++            return OperationVeredict.Canceled;
++        }
+ 
+-        await process.WaitForExitAsync();
++        try
++        {
++            await process.WaitForExitAsync(CancellationToken).ConfigureAwait(false);
++        }
++        catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
++        {
++            await process.WaitForExitAsync().ConfigureAwait(false);
++            return OperationVeredict.Canceled;
++        }
+ 
++        LastReturnCode = process.ExitCode;
+         Line($"End Time: \"{DateTime.Now}\"", LineType.VerboseDetails);
+         Line(
+             $"Process return value: \"{process.ExitCode}\" (0x{process.ExitCode:X})",
+             LineType.VerboseDetails
+         );
+ 
+-        if (ProcessKilled)
++        if (ProcessKilled || CancellationToken.IsCancellationRequested)
+             return OperationVeredict.Canceled;
+ 
+-        // Raw output: redacting here would corrupt the phrases result detection matches on.
+         List<string> output = new();
+         foreach (var line in GetRawOutput())
+         {
+@@ -225,6 +242,49 @@ public abstract class AbstractProcessOperation : AbstractOperation
+         return await GetProcessVeredict(process.ExitCode, output);
+     }
+ 
++    protected override void OnRunCompleted()
++    {
++        DisposeProcess();
++    }
++
++    protected override void Dispose(bool disposing)
++    {
++        base.Dispose(disposing);
++        if (disposing)
++            DisposeProcess();
++    }
++
++    private void StopProcess()
++    {
++        try
++        {
++            if (!process.HasExited)
++            {
++                process.Kill(entireProcessTree: true);
++                ProcessKilled = true;
++            }
++        }
++        catch (InvalidOperationException) { }
++    }
++
++    private void DisposeProcess()
++    {
++        try
++        {
++            if (!process.HasExited)
++            {
++                process.Kill(entireProcessTree: true);
++                ProcessKilled = true;
++                process.WaitForExit();
++            }
++        }
++        catch (InvalidOperationException) { }
++        finally
++        {
++            process.Dispose();
++        }
++    }
++
+     protected abstract Task<OperationVeredict> GetProcessVeredict(
+         int ReturnCode,
+         List<string> Output
+diff --git a/src/UniGetUI.PackageEngine.Operations/DownloadOperation.cs b/src/UniGetUI.PackageEngine.Operations/DownloadOperation.cs
+index e139f391c40d50e7a346b869d487d17c8c8eaffd..e226f649fe8d5767c6c2481fce99d20b8d76c653 100644
+--- a/src/UniGetUI.PackageEngine.Operations/DownloadOperation.cs
++++ b/src/UniGetUI.PackageEngine.Operations/DownloadOperation.cs
+@@ -10,11 +10,7 @@ public class DownloadOperation : AbstractOperation
+     private readonly IPackage _package;
+     public IPackage Package => _package;
+     private string downloadLocation;
+-    public string DownloadLocation
+-    {
+-        get => downloadLocation;
+-    }
+-    private bool canceled;
++    public string DownloadLocation => downloadLocation;
+ 
+     public DownloadOperation(IPackage package, string downloadPath)
+         : base(true, null)
+@@ -23,10 +19,7 @@ public class DownloadOperation : AbstractOperation
+         _package = package;
+ 
+         Metadata.OperationInformation =
+-            "Downloading installer for Package="
+-            + _package.Id
+-            + " with Manager="
+-            + _package.Manager.Name;
++            "Downloading installer for Package=" + _package.Id + " with Manager=" + _package.Manager.Name;
+         Metadata.Title = CoreTools.Translate(
+             "{package} installer download",
+             new Dictionary<string, object?> { { "package", _package.Name } }
+@@ -45,11 +38,6 @@ public class DownloadOperation : AbstractOperation
+             "{package} installer could not be downloaded",
+             new Dictionary<string, object?> { { "package", _package.Name } }
+         );
+-
+-        CancelRequested += (_, _) =>
+-        {
+-            canceled = true;
+-        };
+     }
+ 
+     public override Task<Uri> GetOperationIcon()
+@@ -57,27 +45,91 @@ public class DownloadOperation : AbstractOperation
+         return Task.Run(_package.GetIconUrl);
+     }
+ 
+-    protected override void ApplyRetryAction(string retryMode)
++    protected override void ApplyRetryAction(string retryMode) { }
++
++    /// <summary>
++    /// Creates the HTTP client for the download. Virtual so tests can serve an
++    /// in-memory payload without standing up a loopback server.
++    /// </summary>
++    protected virtual HttpClient CreateHttpClient() =>
++        new(CoreTools.GenericHttpClientParameters);
++
++    internal static bool ComesFromTheSourceFolder(Uri installerUrl, IManagerSource source)
+     {
+-        // Do nothing
++        if (source.Url is not { IsAbsoluteUri: true, IsFile: true } sourceUrl)
++            return false;
++
++        try
++        {
++            string root = Path.GetFullPath(sourceUrl.LocalPath);
++            if (!root.EndsWith(Path.DirectorySeparatorChar))
++                root += Path.DirectorySeparatorChar;
++
++            return Path.GetFullPath(installerUrl.LocalPath)
++                .StartsWith(
++                    root,
++                    OperatingSystem.IsWindows()
++                        ? StringComparison.OrdinalIgnoreCase
++                        : StringComparison.Ordinal
++                );
++        }
++        catch (Exception)
++        {
++            return false;
++        }
++    }
++
++    private async Task<bool> AlreadyDownloaded(string path, PublishedInstallerHash expectedHash)
++    {
++        try
++        {
++            return await expectedHash.MatchesAsync(path, CancellationToken);
++        }
++        catch (Exception ex) when (ex is not OperationCanceledException)
++        {
++            Line(
++                $"The existing file {path} could not be checked against the published hash: {ex.Message}",
++                LineType.Information
++            );
++            return false;
++        }
++    }
++
++    internal static bool IsSameFile(string source, string destination)
++    {
++        try
++        {
++            return string.Equals(
++                Path.GetFullPath(source),
++                Path.GetFullPath(destination),
++                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal
++            );
++        }
++        catch (Exception)
++        {
++            return false;
++        }
+     }
+ 
+     protected override async Task<OperationVeredict> PerformOperation()
+     {
+-        canceled = false;
++        bool downloadFileCreated = false;
+         try
+         {
++            CancellationToken.ThrowIfCancellationRequested();
++            ReportProgress(OperationProgress.ForStage(OperationProgressStage.Downloading));
+             Line(
+                 $"Fetching download url for package {_package.Name} from {_package.Manager.DisplayName}...",
+                 LineType.Information
+             );
+             await _package.Details.Load();
++            CancellationToken.ThrowIfCancellationRequested();
+             Uri? downloadUrl = _package.Details.InstallerUrl;
+             if (downloadUrl is null)
+             {
+                 Line(
+                     $"UniGetUI was not able to find any installer for this package. "
+-                        + $"Please check that this package has an applicable installer and try again later",
++                        + "Please check that this package has an applicable installer and try again later",
+                     LineType.Error
+                 );
+                 return OperationVeredict.Failure;
+@@ -86,6 +138,7 @@ public class DownloadOperation : AbstractOperation
+             if (Directory.Exists(downloadLocation))
+             {
+                 string? fileName = await _package.GetInstallerFileName();
++                CancellationToken.ThrowIfCancellationRequested();
+                 if (fileName is null)
+                 {
+                     Line(
+@@ -97,67 +150,143 @@ public class DownloadOperation : AbstractOperation
+                 downloadLocation = Path.Join(downloadLocation, fileName);
+             }
+ 
++            if (downloadUrl.IsFile && !ComesFromTheSourceFolder(downloadUrl, _package.Source))
++            {
++                Line(
++                    $"The installer address {downloadUrl} points at the file system, but the "
++                        + $"source {_package.Source.Name} is not a local folder holding it. "
++                        + "Refusing to read it",
++                    LineType.Error
++                );
++                return OperationVeredict.Failure;
++            }
++
++            if (downloadUrl.IsFile && IsSameFile(downloadUrl.LocalPath, downloadLocation))
++            {
++                Line(
++                    $"The chosen location {downloadLocation} is the package file itself, "
++                        + "please choose a different destination",
++                    LineType.Error
++                );
++                return OperationVeredict.Failure;
++            }
++
++            if (File.Exists(downloadLocation)
++                && PublishedInstallerHash.TryParse(
++                    _package.Details.InstallerHash,
++                    out PublishedInstallerHash expectedHash
++                ))
++            {
++                Line(
++                    $"A file already exists at {downloadLocation}, checking whether it is this installer...",
++                    LineType.Information
++                );
++                if (await AlreadyDownloaded(downloadLocation, expectedHash))
++                {
++                    long existingSize = new FileInfo(downloadLocation).Length;
++                    ReportProgress(
++                        OperationProgress.FromDownload((ulong)existingSize, (ulong)existingSize)
++                    );
++                    Line(
++                        $"The file {downloadLocation} matches the {expectedHash.Algorithm} hash "
++                            + "published for this installer, the download was skipped",
++                        LineType.Information
++                    );
++                    return OperationVeredict.Success;
++                }
++
++                Line(
++                    $"The file {downloadLocation} does not match the {expectedHash.Algorithm} hash "
++                        + "published for this installer, it will be downloaded again",
++                    LineType.Information
++                );
++            }
++
+             Line($"Download URL found at {downloadUrl} ", LineType.Information);
+-            using var httpClient = new HttpClient(CoreTools.GenericHttpClientParameters);
+-            using var response = await httpClient.GetAsync(
+-                downloadUrl,
+-                HttpCompletionOption.ResponseHeadersRead
+-            );
++            using HttpClient? httpClient = downloadUrl.IsFile ? null : CreateHttpClient();
++            using HttpResponseMessage? response =
++                httpClient is null
++                    ? null
++                    : await httpClient.GetAsync(
++                        downloadUrl,
++                        HttpCompletionOption.ResponseHeadersRead,
++                        CancellationToken
++                    );
++            response?.EnsureSuccessStatusCode();
+ 
+-            response.EnsureSuccessStatusCode();
++            long totalBytes;
++            Stream sourceStream;
++            if (response is null)
++            {
++                FileInfo sourceFile = new(downloadUrl.LocalPath);
++                totalBytes = sourceFile.Length;
++                sourceStream = sourceFile.OpenRead();
++            }
++            else
++            {
++                totalBytes = response.Content.Headers.ContentLength ?? -1L;
++                sourceStream = await response.Content.ReadAsStreamAsync(CancellationToken);
++            }
+ 
+-            var totalBytes = response.Content.Headers.ContentLength ?? -1L;
+             var canReportProgress = totalBytes > 0;
+-
+-            using var contentStream = await response.Content.ReadAsStreamAsync();
+-            using var fileStream = new FileStream(
++            await using (var contentStream = sourceStream)
++            await using (var fileStream = new FileStream(
+                 downloadLocation,
+                 FileMode.Create,
+                 FileAccess.Write,
+                 FileShare.None,
+                 8192,
+-                true
+-            );
+-
+-            var buffer = new byte[4 * 1024 * 1024];
+-            long totalRead = 0;
+-            int bytesRead;
+-
+-            int oldProgress = -1;
+-            while ((bytesRead = await contentStream.ReadAsync(buffer)) > 0)
++                useAsync: true
++            ))
+             {
+-                await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead));
+-                totalRead += bytesRead;
+-
+-                if (canReportProgress)
++                downloadFileCreated = true;
++                var buffer = new byte[4 * 1024 * 1024];
++                long totalRead = 0;
++                int oldProgress = -1;
++                int bytesRead;
++                while (
++                    (bytesRead = await contentStream.ReadAsync(buffer.AsMemory(), CancellationToken)) > 0
++                )
+                 {
+-                    var progress = (int)((totalRead * 100L) / totalBytes);
+-                    if (progress != oldProgress)
++                    await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), CancellationToken);
++                    totalRead += bytesRead;
++
++                    if (canReportProgress)
+                     {
+-                        oldProgress = progress;
+-                        Line(
+-                            CoreTools.TextProgressGenerator(
+-                                30,
+-                                progress,
+-                                $"{CoreTools.FormatAsSize(totalRead)}/{CoreTools.FormatAsSize(totalBytes)}"
+-                            ),
+-                            LineType.ProgressIndicator
+-                        );
++                        var progress = (int)((totalRead * 100L) / totalBytes);
++                        if (progress != oldProgress)
++                        {
++                            oldProgress = progress;
++                            ReportProgress(
++                                OperationProgress.FromDownload(
++                                    (ulong)totalRead,
++                                    (ulong)totalBytes
++                                )
++                            );
++                            Line(
++                                CoreTools.TextProgressGenerator(
++                                    30,
++                                    progress,
++                                    $"{CoreTools.FormatAsSize(totalRead)}/{CoreTools.FormatAsSize(totalBytes)}"
++                                ),
++                                LineType.ProgressIndicator
++                            );
++                        }
+                     }
+                 }
+-
+-                if (canceled)
+-                {
+-                    fileStream.Close();
+-                    File.Delete(downloadLocation);
+-                    Line("User has canceled the operation", LineType.Error);
+-                    return OperationVeredict.Canceled;
+-                }
+             }
+ 
++            CancellationToken.ThrowIfCancellationRequested();
+             Line($"The file was saved to {downloadLocation}", LineType.Information);
+             return OperationVeredict.Success;
+         }
++        catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
++        {
++            if (downloadFileCreated)
++                File.Delete(downloadLocation);
++            Line("User has canceled the operation", LineType.Error);
++            return OperationVeredict.Canceled;
++        }
+         catch (Exception ex)
+         {
+             Line($"{ex.GetType()}: {ex.Message}", LineType.Error);
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/OperationPreconditionException.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/OperationPreconditionException.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5dc48fba1541e13fb91f5ea640492dc6ede9df4f
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/Classes/OperationPreconditionException.cs
+@@ -0,0 +1,7 @@
++namespace UniGetUI.PackageEngine.Classes.Manager;
++
++public sealed class OperationPreconditionException : Exception
++{
++    public OperationPreconditionException(string message)
++        : base(message) { }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/DownloadOperationProgressTests.cs b/src/UniGetUI.PackageEngine.Tests/DownloadOperationProgressTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5fa635b090809fb8a3e4daa0d4a055cb841b7972
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/DownloadOperationProgressTests.cs
+@@ -0,0 +1,538 @@
++using System.Diagnostics;
++using System.Net;
++using System.Security.Cryptography;
++using UniGetUI.PackageEngine.Enums;
++using UniGetUI.PackageEngine.Interfaces;
++using UniGetUI.PackageEngine.Operations;
++using UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
++using UniGetUI.PackageOperations;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++/// <summary>
++/// Proves <see cref="DownloadOperation"/> reports bounded determinate progress:
++/// one structured report per integer percent (not per socket read), with 0→100
++/// propagation and usable throughput under the reduced sampling rate.
++/// Uses an in-memory HTTP handler so no loopback server is needed.
++/// </summary>
++public sealed class DownloadOperationProgressTests
++{
++    private sealed class ManualTimestampClock
++    {
++        private long _ticks;
++
++        public long Now() => _ticks;
++
++        public void Advance(TimeSpan delta) =>
++            _ticks += (long)(delta.TotalSeconds * Stopwatch.Frequency);
++    }
++
++    private sealed class FragmentedReadStream(byte[] payload, int maxChunk, ManualTimestampClock? clock, TimeSpan perRead)
++        : MemoryStream(payload, writable: false)
++    {
++        private readonly ManualTimestampClock? _clock = clock;
++        public int ReadCalls;
++
++        public override async ValueTask<int> ReadAsync(
++            Memory<byte> buffer,
++            CancellationToken cancellationToken = default
++        )
++        {
++            int count = await base.ReadAsync(
++                buffer[..Math.Min(buffer.Length, maxChunk)],
++                cancellationToken
++            );
++            if (count > 0)
++            {
++                ReadCalls++;
++                _clock?.Advance(perRead);
++            }
++
++            return count;
++        }
++    }
++
++    private sealed class FakeDownloadHandler(
++        byte[] payload,
++        int maxChunk,
++        ManualTimestampClock? clock,
++        TimeSpan perRead,
++        FragmentedReadStream? streamSink
++    ) : HttpMessageHandler
++    {
++        public int StreamReadCalls => _stream?.ReadCalls ?? 0;
++        private FragmentedReadStream? _stream = streamSink;
++
++        protected override Task<HttpResponseMessage> SendAsync(
++            HttpRequestMessage request,
++            CancellationToken cancellationToken
++        )
++        {
++            var stream = new FragmentedReadStream(payload, maxChunk, clock, perRead);
++            _stream = stream;
++            var content = new StreamContent(stream);
++            content.Headers.ContentLength = payload.Length;
++            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
++            return Task.FromResult(response);
++        }
++    }
++
++    private sealed class ProbeDownloadOperation(
++        IPackage package,
++        string downloadPath,
++        HttpMessageHandler handler
++    ) : DownloadOperation(package, downloadPath)
++    {
++        private readonly HttpMessageHandler _handler = handler;
++
++        protected override HttpClient CreateHttpClient() =>
++            new(_handler, disposeHandler: false);
++
++        public Task<OperationVeredict> InvokePerformOperationForTests() =>
++            PerformOperation();
++    }
++
++    private static (IPackage Package, ManualTimestampClock Clock) CreatePackage(
++        out ManualTimestampClock clock
++    )
++    {
++        clock = new ManualTimestampClock();
++        var manager = new PackageManagerBuilder()
++            .ConfigureDetails(helper =>
++            {
++                helper.PopulateDetails = details =>
++                {
++                    details.InstallerUrl = new Uri("http://127.0.0.1/payload.bin");
++                    details.InstallerType = "exe";
++                };
++            })
++            .Build();
++        IPackage package = new PackageBuilder().WithManager(manager).Build();
++        return (package, clock);
++    }
++
++    [Fact]
++    public async Task ProgressEvents_BoundedByIntegerPercent_NotPerRead()
++    {
++        const int TotalBytes = 1024 * 1024;
++        const int ChunkBytes = 1024;
++        byte[] payload = new byte[TotalBytes];
++        new Random(42).NextBytes(payload);
++
++        var (package, clock) = CreatePackage(out _);
++        var handler = new FakeDownloadHandler(payload, ChunkBytes, clock, TimeSpan.FromMilliseconds(5), null);
++        string downloadPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-bounded-{Guid.NewGuid():N}.bin"
++        );
++        try
++        {
++            using var operation = new ProbeDownloadOperation(package, downloadPath, handler);
++            operation.SetTimestampProviderForTests(clock.Now);
++            var seen = new List<OperationProgress>();
++            operation.ProgressChanged += (_, p) => seen.Add(p);
++
++            OperationVeredict verdict = await operation.InvokePerformOperationForTests();
++
++            Assert.Equal(OperationVeredict.Success, verdict);
++            int readCalls = handler.StreamReadCalls;
++            Assert.True(readCalls > 500, $"expected many small reads, got {readCalls}");
++
++            // One stage marker + at most one report per integer percent.
++            var determinate = seen.Where(static p => p.IsDeterminate).ToArray();
++            Assert.True(seen.Count <= 102, $"expected bounded reports, got {seen.Count}");
++            Assert.True(seen.Count < readCalls);
++            Assert.Equal(
++                determinate.Select(static p => Math.Round(p.Percentage!.Value)).Distinct().Count(),
++                determinate.Length
++            );
++        }
++        finally
++        {
++            if (File.Exists(downloadPath))
++                File.Delete(downloadPath);
++        }
++    }
++
++    [Fact]
++    public async Task ProgressEvents_PropagateZeroAndHundred()
++    {
++        const int TotalBytes = 1024 * 1024;
++        byte[] payload = new byte[TotalBytes];
++        new Random(7).NextBytes(payload);
++
++        var (package, clock) = CreatePackage(out _);
++        var handler = new FakeDownloadHandler(payload, 1024, clock, TimeSpan.FromMilliseconds(5), null);
++        string downloadPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-zero-hundred-{Guid.NewGuid():N}.bin"
++        );
++        try
++        {
++            using var operation = new ProbeDownloadOperation(package, downloadPath, handler);
++            operation.SetTimestampProviderForTests(clock.Now);
++            var seen = new List<OperationProgress>();
++            operation.ProgressChanged += (_, p) => seen.Add(p);
++
++            Assert.Equal(
++                OperationVeredict.Success,
++                await operation.InvokePerformOperationForTests()
++            );
++
++            var determinate = seen.Where(static p => p.IsDeterminate).ToArray();
++            Assert.NotEmpty(determinate);
++            Assert.Equal(0, Math.Round(determinate.First().Percentage!.Value));
++            Assert.Equal(100, Math.Round(determinate.Last().Percentage!.Value));
++            Assert.Equal(100, Math.Round(operation.CurrentProgress.Percentage!.Value));
++        }
++        finally
++        {
++            if (File.Exists(downloadPath))
++                File.Delete(downloadPath);
++        }
++    }
++
++    [Fact]
++    public async Task Throughput_RemainsUsable_UnderReducedSampling()
++    {
++        const int TotalBytes = 1024 * 1024;
++        byte[] payload = new byte[TotalBytes];
++        new Random(11).NextBytes(payload);
++
++        var (package, clock) = CreatePackage(out _);
++        var handler = new FakeDownloadHandler(payload, 1024, clock, TimeSpan.FromMilliseconds(5), null);
++        string downloadPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-throughput-{Guid.NewGuid():N}.bin"
++        );
++        try
++        {
++            using var operation = new ProbeDownloadOperation(package, downloadPath, handler);
++            operation.SetTimestampProviderForTests(clock.Now);
++
++            Assert.Equal(
++                OperationVeredict.Success,
++                await operation.InvokePerformOperationForTests()
++            );
++
++            Assert.True(operation.CurrentProgress.HasThroughput);
++            Assert.Contains("/s", OperationProgressFormatter.Format(operation.CurrentProgress));
++        }
++        finally
++        {
++            if (File.Exists(downloadPath))
++                File.Delete(downloadPath);
++        }
++    }
++
++    [Fact]
++    public async Task LocalFeedInstallers_AreCopiedFromDiskWithoutHttp()
++    {
++        byte[] payload = new byte[64 * 1024];
++        new Random(23).NextBytes(payload);
++
++        string sourcePath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-local-source-{Guid.NewGuid():N}.nupkg"
++        );
++        string downloadPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-local-copy-{Guid.NewGuid():N}.nupkg"
++        );
++        File.WriteAllBytes(sourcePath, payload);
++
++        var manager = new PackageManagerBuilder()
++            .ConfigureDetails(helper =>
++            {
++                helper.PopulateDetails = details =>
++                {
++                    details.InstallerUrl = new Uri(sourcePath);
++                    details.InstallerType = "nupkg";
++                };
++            })
++            .Build();
++        IPackage package = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(
++                new SourceBuilder()
++                    .WithManager(manager)
++                    .WithUrl(new Uri(Path.GetDirectoryName(sourcePath)!).AbsoluteUri)
++                    .Build()
++            )
++            .Build();
++
++        try
++        {
++            using var operation = new ProbeDownloadOperation(
++                package,
++                downloadPath,
++                new UnreachableHandler()
++            );
++
++            Assert.Equal(
++                OperationVeredict.Success,
++                await operation.InvokePerformOperationForTests()
++            );
++            Assert.Equal(payload, File.ReadAllBytes(downloadPath));
++            Assert.Equal(100, Math.Round(operation.CurrentProgress.Percentage!.Value));
++        }
++        finally
++        {
++            File.Delete(sourcePath);
++            if (File.Exists(downloadPath))
++                File.Delete(downloadPath);
++        }
++    }
++
++    [Fact]
++    public async Task LocalFeedInstallers_RefuseToOverwriteTheSourceFile()
++    {
++        byte[] payload = new byte[2048];
++        new Random(31).NextBytes(payload);
++
++        string sourcePath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-same-file-{Guid.NewGuid():N}.nupkg"
++        );
++        File.WriteAllBytes(sourcePath, payload);
++
++        var manager = new PackageManagerBuilder()
++            .ConfigureDetails(helper =>
++            {
++                helper.PopulateDetails = details =>
++                {
++                    details.InstallerUrl = new Uri(sourcePath);
++                    details.InstallerType = "nupkg";
++                };
++            })
++            .Build();
++        IPackage package = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(
++                new SourceBuilder()
++                    .WithManager(manager)
++                    .WithUrl(new Uri(Path.GetDirectoryName(sourcePath)!).AbsoluteUri)
++                    .Build()
++            )
++            .Build();
++
++        try
++        {
++            using var operation = new ProbeDownloadOperation(
++                package,
++                sourcePath,
++                new UnreachableHandler()
++            );
++
++            Assert.Equal(
++                OperationVeredict.Failure,
++                await operation.InvokePerformOperationForTests()
++            );
++            Assert.Equal(payload, File.ReadAllBytes(sourcePath));
++            Assert.Contains(
++                operation.GetOutput(),
++                line => line.Item1.Contains("is the package file itself")
++            );
++            Assert.DoesNotContain(
++                operation.GetOutput(),
++                line => line.Item1.Contains("System.IO.IOException")
++            );
++        }
++        finally
++        {
++            File.Delete(sourcePath);
++        }
++    }
++
++    [Fact]
++    public async Task AFileInstallerUrlIsRefusedWhenTheSourceIsNotTheFolderHoldingIt()
++    {
++        string secretPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-secret-{Guid.NewGuid():N}.bin"
++        );
++        string downloadPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-stolen-{Guid.NewGuid():N}.bin"
++        );
++        File.WriteAllBytes(secretPath, [1, 2, 3, 4]);
++
++        var manager = new PackageManagerBuilder()
++            .ConfigureDetails(helper =>
++            {
++                helper.PopulateDetails = details =>
++                {
++                    details.InstallerUrl = new Uri(secretPath);
++                    details.InstallerType = "exe";
++                };
++            })
++            .Build();
++        var remoteSource = new SourceBuilder()
++            .WithManager(manager)
++            .WithUrl("https://packages.example.test/api/v2/")
++            .Build();
++        IPackage package = new PackageBuilder()
++            .WithManager(manager)
++            .WithSource(remoteSource)
++            .Build();
++
++        try
++        {
++            using var operation = new ProbeDownloadOperation(
++                package,
++                downloadPath,
++                new UnreachableHandler()
++            );
++
++            Assert.Equal(
++                OperationVeredict.Failure,
++                await operation.InvokePerformOperationForTests()
++            );
++            Assert.False(File.Exists(downloadPath));
++            Assert.Contains(
++                operation.GetOutput(),
++                line => line.Item1.Contains("is not a local folder holding it")
++            );
++        }
++        finally
++        {
++            File.Delete(secretPath);
++            if (File.Exists(downloadPath))
++                File.Delete(downloadPath);
++        }
++    }
++
++    private static IPackage CreatePackageWithHash(string installerHash)
++    {
++        var manager = new PackageManagerBuilder()
++            .ConfigureDetails(helper =>
++            {
++                helper.PopulateDetails = details =>
++                {
++                    details.InstallerUrl = new Uri("http://127.0.0.1/payload.bin");
++                    details.InstallerType = "exe";
++                    details.InstallerHash = installerHash;
++                };
++            })
++            .Build();
++        return new PackageBuilder().WithManager(manager).Build();
++    }
++
++    [Fact]
++    public async Task AnExistingFileMatchingThePublishedHashIsNotDownloadedAgain()
++    {
++        byte[] payload = new byte[64 * 1024];
++        new Random(53).NextBytes(payload);
++
++        IPackage package = CreatePackageWithHash(
++            Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant()
++        );
++        string downloadPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-already-there-{Guid.NewGuid():N}.bin"
++        );
++        File.WriteAllBytes(downloadPath, payload);
++
++        try
++        {
++            using var operation = new ProbeDownloadOperation(
++                package,
++                downloadPath,
++                new UnreachableHandler()
++            );
++
++            Assert.Equal(
++                OperationVeredict.Success,
++                await operation.InvokePerformOperationForTests()
++            );
++            Assert.Equal(payload, File.ReadAllBytes(downloadPath));
++            Assert.Contains(
++                operation.GetOutput(),
++                line => line.Item1.Contains("the download was skipped")
++            );
++            Assert.Equal(100, Math.Round(operation.CurrentProgress.Percentage!.Value));
++        }
++        finally
++        {
++            File.Delete(downloadPath);
++        }
++    }
++
++    [Fact]
++    public async Task AnExistingFileThatDoesNotMatchThePublishedHashIsDownloadedAgain()
++    {
++        byte[] payload = new byte[64 * 1024];
++        new Random(59).NextBytes(payload);
++        byte[] stale = new byte[64 * 1024];
++        new Random(61).NextBytes(stale);
++
++        IPackage package = CreatePackageWithHash(Convert.ToHexString(SHA256.HashData(payload)));
++        var handler = new FakeDownloadHandler(payload, 4096, null, TimeSpan.Zero, null);
++        string downloadPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-stale-{Guid.NewGuid():N}.bin"
++        );
++        File.WriteAllBytes(downloadPath, stale);
++
++        try
++        {
++            using var operation = new ProbeDownloadOperation(package, downloadPath, handler);
++
++            Assert.Equal(
++                OperationVeredict.Success,
++                await operation.InvokePerformOperationForTests()
++            );
++            Assert.Equal(payload, File.ReadAllBytes(downloadPath));
++        }
++        finally
++        {
++            File.Delete(downloadPath);
++        }
++    }
++
++    [Fact]
++    public async Task AnIntegrityHashFromANonSha256ManagerAlsoSkipsTheDownload()
++    {
++        byte[] payload = new byte[64 * 1024];
++        new Random(67).NextBytes(payload);
++
++        IPackage package = CreatePackageWithHash(
++            "sha512-" + Convert.ToBase64String(SHA512.HashData(payload))
++        );
++        string downloadPath = Path.Join(
++            Path.GetTempPath(),
++            $"unigetui-integrity-{Guid.NewGuid():N}.bin"
++        );
++        File.WriteAllBytes(downloadPath, payload);
++
++        try
++        {
++            using var operation = new ProbeDownloadOperation(
++                package,
++                downloadPath,
++                new UnreachableHandler()
++            );
++
++            Assert.Equal(
++                OperationVeredict.Success,
++                await operation.InvokePerformOperationForTests()
++            );
++            Assert.Contains(
++                operation.GetOutput(),
++                line => line.Item1.Contains("the download was skipped")
++            );
++        }
++        finally
++        {
++            File.Delete(downloadPath);
++        }
++    }
++
++    private sealed class UnreachableHandler : HttpMessageHandler
++    {
++        protected override Task<HttpResponseMessage> SendAsync(
++            HttpRequestMessage request,
++            CancellationToken cancellationToken
++        ) => throw new InvalidOperationException("No HTTP request was expected");
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Tests/OperationProgressTests.cs b/src/UniGetUI.PackageEngine.Tests/OperationProgressTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..059a47e51fd063885a455e39403d3331f81e5d47
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Tests/OperationProgressTests.cs
+@@ -0,0 +1,434 @@
++using System.Diagnostics;
++using UniGetUI.PackageEngine.Enums;
++using UniGetUI.PackageOperations;
++using LineType = UniGetUI.PackageOperations.AbstractOperation.LineType;
++
++namespace UniGetUI.PackageEngine.Tests;
++
++/// <summary>
++/// Covers the manager-neutral <see cref="OperationProgress"/> model, the generic
++/// monotonic throughput tracker, stale-speed expiry, and subscriber isolation.
++/// Download throttling lives in <see cref="DownloadOperation"/> and is covered by
++/// <c>DownloadOperationProgressTests</c>; card visuals by
++/// <c>OperationCardProgressStateTests</c> and <c>OperationCardControllerTests</c>.
++/// </summary>
++public sealed class OperationProgressTests
++{
++    private sealed class ProgressProbeOperation : AbstractOperation
++    {
++        public ProgressProbeOperation()
++            : base(queue_enabled: false)
++        {
++            Metadata.Status = "probe status";
++            Metadata.Title = "probe title";
++            Metadata.OperationInformation = "probe info";
++            Metadata.SuccessTitle = "probe success";
++            Metadata.SuccessMessage = "probe success";
++            Metadata.FailureTitle = "probe failure";
++            Metadata.FailureMessage = "probe failure";
++        }
++
++        public void ReportForTests(OperationProgress progress) => ReportProgress(progress);
++
++        public void EmitForTests(string line, LineType type) => Line(line, type);
++
++        public void SetClockForTests(Func<long> provider) =>
++            SetTimestampProviderForTests(provider);
++
++        protected override void ApplyRetryAction(string retryMode) { }
++
++        protected override Task<OperationVeredict> PerformOperation() =>
++            Task.FromResult(OperationVeredict.Success);
++
++        public override Task<Uri> GetOperationIcon() =>
++            Task.FromResult(new Uri("avares://UniGetUI/Assets/package_color.png"));
++    }
++
++    /// <summary>
++    /// Deterministic monotonic clock. Production uses Stopwatch.GetTimestamp();
++    /// tests advance explicitly by Stopwatch frequency ticks.
++    /// </summary>
++    private sealed class ManualTimestampClock
++    {
++        private long _ticks;
++
++        public long Now() => _ticks;
++
++        public void Advance(TimeSpan delta) =>
++            _ticks += (long)(delta.TotalSeconds * Stopwatch.Frequency);
++    }
++
++    private const ulong OneMiB = 1024UL * 1024;
++    private const ulong TenMiB = 10UL * 1024 * 1024;
++
++    private static (ProgressProbeOperation Op, ManualTimestampClock Clock) CreateClockedProbe()
++    {
++        var op = new ProgressProbeOperation();
++        var clock = new ManualTimestampClock();
++        op.SetClockForTests(clock.Now);
++        return (op, clock);
++    }
++
++    private static void ReportDownload(
++        ProgressProbeOperation op,
++        ulong downloaded,
++        ulong total = TenMiB
++    ) => op.ReportForTests(OperationProgress.FromDownload(downloaded, total));
++
++    // ── Model: determinate vs unknown ──────────────────────────────────────
++
++    [Fact]
++    public void Unknown_IsIndeterminate()
++    {
++        Assert.False(OperationProgress.Unknown.IsDeterminate);
++        Assert.Null(OperationProgress.Unknown.Percentage);
++        Assert.False(OperationProgress.Unknown.HasThroughput);
++    }
++
++    [Fact]
++    public void FromDownload_Mid_IsDeterminateWithDerivedPercentage()
++    {
++        var progress = OperationProgress.FromDownload(326, 624);
++
++        Assert.True(progress.IsDeterminate);
++        Assert.Equal(326UL, progress.BytesDownloaded);
++        Assert.Equal(624UL, progress.BytesTotal);
++        Assert.Equal(52, Math.Round(progress.Percentage!.Value));
++    }
++
++    [Fact]
++    public void FromDownload_ZeroTotal_IsIndeterminate_NotFakeZero()
++    {
++        var progress = OperationProgress.FromDownload(1234, 0);
++
++        Assert.False(progress.IsDeterminate);
++        Assert.Null(progress.Percentage);
++    }
++
++    [Fact]
++    public void FromDownload_Overshoot_ClampsPercentageKeepsRealBytes()
++    {
++        var progress = OperationProgress.FromDownload(150, 100);
++
++        Assert.True(progress.IsDeterminate);
++        Assert.Equal(100, progress.Percentage);
++        Assert.Equal(150UL, progress.BytesDownloaded);
++    }
++
++    // ── Throughput: monotonic clock, real bytes over real time ─────────────
++
++    [Fact]
++    public void FirstDownloadSample_HasNoSpeed()
++    {
++        var (op, _) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, OneMiB);
++
++            Assert.True(op.CurrentProgress.IsDeterminate);
++            Assert.Null(op.CurrentProgress.BytesPerSecond);
++        }
++    }
++
++    [Fact]
++    public void SecondValidSample_CalculatesDeltaBytesOverDeltaTime()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, 0);
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, OneMiB);
++
++            Assert.Equal((double)OneMiB, op.CurrentProgress.BytesPerSecond);
++        }
++    }
++
++    [Fact]
++    public void ZeroTimeDelta_PreservesPreviousSpeedWithoutNaN()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, 0);
++            ReportDownload(op, OneMiB);
++            Assert.Null(op.CurrentProgress.BytesPerSecond);
++
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, 2 * OneMiB);
++            double? speed = op.CurrentProgress.BytesPerSecond;
++            Assert.NotNull(speed);
++
++            ReportDownload(op, 3 * OneMiB);
++            Assert.Equal(speed, op.CurrentProgress.BytesPerSecond);
++        }
++    }
++
++    [Fact]
++    public void BackwardByteCounter_ResetsSpeedAndStartsNewBaseline()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, 0);
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, 2 * OneMiB);
++            Assert.NotNull(op.CurrentProgress.BytesPerSecond);
++
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, 512);
++            Assert.Null(op.CurrentProgress.BytesPerSecond);
++
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, 512 + OneMiB);
++            Assert.Equal((double)OneMiB, op.CurrentProgress.BytesPerSecond);
++        }
++    }
++
++    [Fact]
++    public void Smoothing_IsDeterministicExponentialMovingAverage()
++    {
++        static double? RunSequence()
++        {
++            var (op, clock) = CreateClockedProbe();
++            using (op)
++            {
++                ReportDownload(op, 0);
++                clock.Advance(TimeSpan.FromSeconds(1));
++                ReportDownload(op, OneMiB);
++                clock.Advance(TimeSpan.FromSeconds(1));
++                ReportDownload(op, 3 * OneMiB);
++                return op.CurrentProgress.BytesPerSecond;
++            }
++        }
++
++        double? first = RunSequence();
++        double? second = RunSequence();
++
++        Assert.NotNull(first);
++        Assert.Equal(first, second);
++        Assert.InRange(first!.Value, 1.3 * OneMiB - 1, 1.3 * OneMiB + 1);
++    }
++
++    [Fact]
++    public void StageTransition_ResetsSpeed()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, 0);
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, OneMiB);
++            Assert.NotNull(op.CurrentProgress.BytesPerSecond);
++
++            op.ReportForTests(OperationProgress.ForStage(OperationProgressStage.Installing));
++            Assert.Null(op.CurrentProgress.BytesPerSecond);
++
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, 2 * OneMiB);
++            Assert.Null(op.CurrentProgress.BytesPerSecond);
++        }
++    }
++
++    // ── Stale speed expiry ─────────────────────────────────────────────────
++
++    [Fact]
++    public void FreshSpeed_IsVisible_AndArmsExpiryTimer()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, 0);
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, OneMiB);
++
++            Assert.NotNull(op.CurrentProgress.BytesPerSecond);
++            Assert.True(op.IsStaleSpeedTimerArmedForTests());
++        }
++    }
++
++    [Fact]
++    public void StaleSpeed_Disappears_AfterTimeout()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            var seen = new List<OperationProgress>();
++            op.ProgressChanged += (_, p) => seen.Add(p);
++
++            ReportDownload(op, 0);
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, OneMiB);
++            Assert.NotNull(op.CurrentProgress.BytesPerSecond);
++
++            clock.Advance(TimeSpan.FromSeconds(3));
++            Assert.True(op.ExpireStaleSpeedForTests());
++            Assert.Null(op.CurrentProgress.BytesPerSecond);
++            Assert.Contains(seen, static p => p.BytesPerSecond is null);
++        }
++    }
++
++    [Fact]
++    public void FreshSample_AfterStale_RestoresSpeed()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, 0);
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, OneMiB);
++
++            clock.Advance(TimeSpan.FromSeconds(3));
++            Assert.True(op.ExpireStaleSpeedForTests());
++            Assert.Null(op.CurrentProgress.BytesPerSecond);
++
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, 2 * OneMiB);
++            Assert.NotNull(op.CurrentProgress.BytesPerSecond);
++        }
++    }
++
++    [Fact]
++    public void RepeatedCounter_WhenStale_DoesNotFabricateSpeed()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, 0);
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, OneMiB);
++            double? speed = op.CurrentProgress.BytesPerSecond;
++            Assert.NotNull(speed);
++
++            // Fresh repeated counter preserves the previous speed.
++            clock.Advance(TimeSpan.FromMilliseconds(500));
++            ReportDownload(op, OneMiB);
++            Assert.Equal(speed, op.CurrentProgress.BytesPerSecond);
++
++            // Stalled past the timeout drops the speed instead of preserving it.
++            clock.Advance(TimeSpan.FromSeconds(3));
++            ReportDownload(op, OneMiB);
++            Assert.Null(op.CurrentProgress.BytesPerSecond);
++        }
++    }
++
++    [Fact]
++    public void StageReset_StopsExpiryMechanism()
++    {
++        var (op, clock) = CreateClockedProbe();
++        using (op)
++        {
++            ReportDownload(op, 0);
++            clock.Advance(TimeSpan.FromSeconds(1));
++            ReportDownload(op, OneMiB);
++            Assert.True(op.IsStaleSpeedTimerArmedForTests());
++
++            op.ReportForTests(OperationProgress.ForStage(OperationProgressStage.Installing));
++            Assert.False(op.IsStaleSpeedTimerArmedForTests());
++            Assert.False(op.ExpireStaleSpeedForTests());
++        }
++    }
++
++    // ── Subscriber isolation: progress never fails the operation ───────────
++
++    [Fact]
++    public void ThrowingSubscriber_DoesNotEscape_AndLaterSubscriberStillReceives()
++    {
++        using var op = new ProgressProbeOperation();
++        bool secondReceived = false;
++        op.ProgressChanged += (_, _) => throw new InvalidOperationException("display bug");
++        op.ProgressChanged += (_, _) => secondReceived = true;
++
++        var progress = OperationProgress.FromDownload(50, 100);
++        var ex = Record.Exception(() => op.ReportForTests(progress));
++
++        Assert.Null(ex);
++        Assert.True(secondReceived);
++        Assert.Equal(50, op.CurrentProgress.Percentage);
++    }
++
++    [Fact]
++    public void ThrowingSubscriber_DoesNotTurnSuccessfulOperationIntoFailure()
++    {
++        using var op = new ProgressProbeOperation();
++        op.ProgressChanged += (_, _) => throw new InvalidOperationException("display bug");
++
++        var ex = Record.Exception(() =>
++            op.ReportForTests(OperationProgress.FromDownload(10, 100))
++        );
++
++        Assert.Null(ex);
++        Assert.True(op.CurrentProgress.IsDeterminate);
++    }
++
++    // ── Separation: progress never touches log/history ─────────────────────
++
++    [Fact]
++    public void ReportProgress_DoesNotWriteToOperationOutput()
++    {
++        using var op = new ProgressProbeOperation();
++        var clock = new ManualTimestampClock();
++        op.SetClockForTests(clock.Now);
++
++        op.ReportForTests(OperationProgress.ForStage(OperationProgressStage.Downloading));
++        ReportDownload(op, OneMiB);
++        clock.Advance(TimeSpan.FromSeconds(1));
++        ReportDownload(op, 2 * OneMiB);
++        op.ReportForTests(OperationProgress.Unknown);
++
++        Assert.Empty(op.GetOutput());
++    }
++
++    [Fact]
++    public void ProgressIndicatorLogLines_DoNotCreateStructuredProgress()
++    {
++        using var op = new ProgressProbeOperation();
++        int progressEvents = 0;
++        op.ProgressChanged += (_, _) => progressEvents++;
++
++        op.EmitForTests("[###.....] 30% (3.0 MB/10.0 MB)", LineType.ProgressIndicator);
++        op.EmitForTests("Fetching download url...", LineType.Information);
++
++        Assert.Equal(0, progressEvents);
++        Assert.Equal(OperationProgress.Unknown, op.CurrentProgress);
++        Assert.Single(op.GetOutput());
++    }
++
++    // ── Formatter (small representative set) ───────────────────────────────
++
++    [Fact]
++    public void Formatter_DeterminateDownload_IncludesPercentAndByteCounters()
++    {
++        string text = OperationProgressFormatter.Format(
++            OperationProgress.FromDownload(21 * OneMiB, 100 * OneMiB)
++        );
++
++        Assert.Contains("21%", text);
++        Assert.Contains("/", text);
++        Assert.DoesNotContain("/s", text);
++    }
++
++    [Fact]
++    public void Formatter_DownloadWithSpeed_AppendsThroughput()
++    {
++        var progress =
++            OperationProgress.FromDownload(21 * OneMiB, 100 * OneMiB)
++            with
++            {
++                BytesPerSecond = 1.2 * OneMiB,
++            };
++
++        string text = OperationProgressFormatter.Format(progress);
++
++        Assert.Contains("21%", text);
++        Assert.Contains("/s", text);
++    }
++
++    [Fact]
++    public void Formatter_StaleSpeed_IsOmitted()
++    {
++        var progress = OperationProgress.FromDownload(50, 100) with { BytesPerSecond = (double?)null };
++
++        Assert.DoesNotContain("/s", OperationProgressFormatter.Format(progress));
++    }
++}
+-- 
+2.56.0
+

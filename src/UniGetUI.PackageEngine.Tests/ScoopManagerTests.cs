@@ -1,4 +1,5 @@
 #if WINDOWS
+using System.Diagnostics;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.PackageEngine.Enums;
@@ -8,6 +9,7 @@ using UniGetUI.PackageEngine.Serializable;
 using UniGetUI.PackageEngine.Structs;
 using UniGetUI.PackageEngine.Tests.Infrastructure.Assertions;
 using UniGetUI.PackageEngine.Tests.Infrastructure.Builders;
+using UniGetUI.PackageEngine.Tests.Infrastructure.Fakes;
 using UniGetUI.PackageEngine.Tests.Infrastructure.Helpers;
 using Architecture = UniGetUI.PackageEngine.Enums.Architecture;
 
@@ -22,6 +24,11 @@ public sealed class ScoopManagerTestCollection
 [Collection(ScoopManagerTestCollection.Name)]
 public sealed class ScoopManagerTests : IDisposable
 {
+    private const string LongId =
+        "a-scoop-package-whose-manifest-name-is-long-enough-to-overflow-the-default-console-width-by-far";
+    private const string LongVersion = "20260727133500-nightly";
+    private const string LongNewVersion = "20260820144900-nightly";
+
     private readonly string _testRoot = Path.Combine(
         AppContext.BaseDirectory,
         nameof(ScoopManagerTests),
@@ -133,6 +140,33 @@ public sealed class ScoopManagerTests : IDisposable
     }
 
     [Fact]
+    public void ParseSourcesKeepsLocalBucketsWhosePathContainsSpaces()
+    {
+        var manager = new Scoop();
+        var helper = Assert.IsType<ScoopSourceHelper>(manager.SourcesHelper);
+
+        var sources = helper.ParseSources(ReadFixtureLines(@"Scoop\bucket-list-output-spaced-path.txt"));
+
+        Assert.Collection(
+            sources,
+            source =>
+            {
+                Assert.Equal("main", source.Name);
+                Assert.Equal(SpacedBucketUrl("main"), source.Url);
+                Assert.Equal(2, source.PackageCount);
+                Assert.Equal("2026-09-22 3:46:27", source.UpdateDate);
+            },
+            source =>
+            {
+                Assert.Equal("extras", source.Name);
+                Assert.Equal(SpacedBucketUrl("extras"), source.Url);
+                Assert.Equal(3, source.PackageCount);
+                Assert.Equal("2026-09-22 3:46:27", source.UpdateDate);
+            }
+        );
+    }
+
+    [Fact]
     public void ParseSourcesNormalizesGitUrlsAndLocalBuckets()
     {
         var manager = new Scoop();
@@ -152,17 +186,7 @@ public sealed class ScoopManagerTests : IDisposable
             source =>
             {
                 Assert.Equal("extras", source.Name);
-                Assert.Equal(
-                    new Uri(
-                        Path.Join(
-                            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                            "scoop",
-                            "buckets",
-                            "extras"
-                        )
-                    ),
-                    source.Url
-                );
+                Assert.Equal(new Uri(@"C:\Users\fixture\scoop\buckets\extras"), source.Url);
                 Assert.Equal(321, source.PackageCount);
                 Assert.Equal("2024-02-02 09:08:07", source.UpdateDate);
             }
@@ -227,6 +251,187 @@ public sealed class ScoopManagerTests : IDisposable
         );
         Assert.True(package.OverridenOptions.RunAsAdministrator);
     }
+
+    [Fact]
+    public void InstallParametersAppendRequestedVersionToSpec()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithSource(manager.SourcesHelper.Factory.GetSourceOrDefault("main"))
+            .WithId("jq")
+            .Build();
+
+        var install = manager.OperationHelper.GetParameters(
+            package,
+            new InstallOptions { Version = "1.7.1" },
+            OperationType.Install
+        );
+        var update = manager.OperationHelper.GetParameters(
+            package,
+            new InstallOptions { Version = "1.7.1" },
+            OperationType.Update
+        );
+
+        OperationAssert.HasParameters(install, "install", "main/jq@1.7.1");
+        OperationAssert.HasParameters(update, "update", "main/jq");
+    }
+
+    [Fact]
+    public void InstallParametersRefuseVersionsAShellWouldReinterpret()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithSource(manager.SourcesHelper.Factory.GetSourceOrDefault("main"))
+            .WithId("jq")
+            .Build();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            manager.OperationHelper.GetParameters(
+                package,
+                new InstallOptions { Version = "1.7.1;calc" },
+                OperationType.Install
+            )
+        );
+    }
+
+    [Fact]
+    public void PinnedInstallsResolveTheirBucketAndUpdateWithForce()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+        manager.FindBucketManifest = id => id == "jq" ? ("main", "1.8.2") : null;
+
+        var installed = manager.ParseInstalledPackages(PinnedListLines);
+        var updates = manager.ParseAvailableUpdates(EmptyStatusLines, installed, includePinnedInstalls: true);
+
+        Assert.Collection(
+            installed,
+            package =>
+            {
+                PackageAssert.Matches(package, "Jq", "jq", "1.7.1");
+                PackageAssert.BelongsTo(package, manager, manager.SourcesHelper.Factory.GetSourceOrDefault("main"));
+            },
+            package => Assert.Equal(Scoop.GeneratedManifestSource, package.Source.Name)
+        );
+        var update = Assert.Single(updates);
+        PackageAssert.Matches(update, "Jq", "jq", "1.7.1", "1.8.2");
+        OperationAssert.HasParameters(
+            manager.OperationHelper.GetParameters(update, new InstallOptions(), OperationType.Update),
+            "update",
+            "main/jq",
+            "--force"
+        );
+        OperationAssert.HasParameters(
+            manager.OperationHelper.GetParameters(installed[1], new InstallOptions(), OperationType.Uninstall),
+            "uninstall",
+            "orphan"
+        );
+    }
+
+    [Fact]
+    public void PinnedInstallsResolveToTheBucketScoopWouldPick()
+    {
+        string scoopRoot = Path.Combine(_testRoot, "scoop");
+        WriteBucketManifest(scoopRoot, "aaa", nested: false, "jq", "9.9.9");
+        WriteBucketManifest(scoopRoot, "main", nested: true, "jq", "1.8.2");
+        WriteBucketManifest(scoopRoot, "zzz", nested: false, "orphan", "0.2.0");
+        string? previousRoot = Environment.GetEnvironmentVariable("SCOOP");
+        Environment.SetEnvironmentVariable("SCOOP", scoopRoot);
+        try
+        {
+            var manager = CreateManagerWithKnownSources("main", "zzz");
+
+            var installed = manager.ParseInstalledPackages(PinnedListLines);
+            var updates = manager.ParseAvailableUpdates(EmptyStatusLines, installed, includePinnedInstalls: true);
+
+            Assert.Equal(["main", "zzz"], installed.Select(package => package.Source.Name));
+            Assert.Equal(
+                [("jq", "1.8.2"), ("orphan", "0.2.0")],
+                updates.Select(package => (package.Id, package.NewVersionString))
+            );
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SCOOP", previousRoot);
+        }
+    }
+
+    private static void WriteBucketManifest(string scoopRoot, string bucket, bool nested, string id, string version)
+    {
+        string directory = Path.Combine(scoopRoot, "buckets", bucket, nested ? "bucket" : "");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, id + ".json"), $$"""{ "version": "{{version}}" }""");
+    }
+
+    [Fact]
+    public void PinnedInstallIsFoundWhenTheOtherScopeHasTheSameVersionUnpinned()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+        manager.FindBucketManifest = id => id == "jq" ? ("main", "1.8.2") : null;
+
+        var installed = manager.ParseInstalledPackages(
+        [
+            "Name Version Source           Updated             Info",
+            "---- ------- ------           -------             ----",
+            "jq   1.7.1   main             2026-10-27 15:35:44 64bit",
+            "jq   1.7.1   <auto-generated> 2026-10-27 15:35:44 Global install",
+        ]);
+        var updates = manager.ParseAvailableUpdates(EmptyStatusLines, installed, includePinnedInstalls: true);
+
+        var update = Assert.Single(updates);
+        PackageAssert.Matches(update, "Jq", "jq", "1.7.1", "1.8.2");
+        Assert.Equal(PackageScope.Global, update.OverridenOptions.Scope);
+    }
+
+    [Fact]
+    public void PinnedInstallsAreNotOfferedAsUpdatesOnOlderScoop()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+        manager.FindBucketManifest = id => id == "jq" ? ("main", "1.8.2") : null;
+
+        var installed = manager.ParseInstalledPackages(PinnedListLines);
+
+        Assert.Empty(manager.ParseAvailableUpdates(EmptyStatusLines, installed));
+    }
+
+    [Fact]
+    public void PinnedInstallsAtOrAboveBucketVersionAreNotOfferedAsUpdates()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+        manager.FindBucketManifest = id => id == "jq" ? ("main", "1.7.1") : null;
+
+        var installed = manager.ParseInstalledPackages(PinnedListLines);
+
+        Assert.Empty(manager.ParseAvailableUpdates(EmptyStatusLines, installed, includePinnedInstalls: true));
+    }
+
+    [Theory]
+    [InlineData("Current Scoop version:\nv0.6.0 - Released at 2026-09-30\n", true)]
+    [InlineData("Current Scoop version:\nv0.10.1 - Released at 2027-01-01\n", true)]
+    [InlineData("Current Scoop version:\nv0.5.3 - Released at 2025-08-11\n", false)]
+    [InlineData("Current Scoop version:\ne6aa3b36 (HEAD -> develop) fix something\n", false)]
+    [InlineData("Unknown", false)]
+    public void PinnedUpdatesRequireScoopWithForcedPinUpgrade(string versionOutput, bool expected)
+    {
+        Assert.Equal(expected, Scoop.UpdatesPinnedInstalls(versionOutput));
+    }
+
+    private static readonly string[] PinnedListLines =
+    [
+        "Installed apps:",
+        "",
+        "Name   Version Source           Updated             Info",
+        "----   ------- ------           -------             ----",
+        "jq     1.7.1   <auto-generated> 2026-10-27 15:35:44 64bit",
+        "orphan 0.1.0   <auto-generated> 2026-10-27 15:35:44 64bit",
+    ];
+
+    private static readonly string[] EmptyStatusLines =
+    [
+        "Name Installed Version Latest Version Missing Dependencies Info",
+        "---- ----------------- -------------- -------------------- ----",
+    ];
 
     [Fact]
     public void UninstallParametersOmitLocalSourcePrefixAndAppendPurge()
@@ -366,6 +571,132 @@ public sealed class ScoopManagerTests : IDisposable
         OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
         Assert.False(package.OverridenOptions.RunAsAdministrator);
     }
+
+    [Fact]
+    public void ParseInstalledPackagesReadsSourcesThatAreEmptyOrContainSpaces()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+
+        var packages = manager.ParseInstalledPackages(
+            ReadFixtureLines(@"Scoop\list-output-edge-cases.txt")
+        );
+
+        Assert.Collection(
+            packages,
+            package =>
+            {
+                PackageAssert.Matches(package, "Normal App", "normal-app", "3.0.0");
+                Assert.Equal("main", package.Source.Name);
+            },
+            package =>
+            {
+                PackageAssert.Matches(package, "Orphan App", "orphan-app", "1.0.0");
+                Assert.Same(manager.DefaultSource, package.Source);
+            },
+            package =>
+            {
+                PackageAssert.Matches(package, "Spaced App", "spaced-app", "2.0.0");
+                Assert.Equal(
+                    @"C:\Users\Jane Doe\git\Extras\bucket\spaced-app.json",
+                    package.Source.Name
+                );
+            }
+        );
+    }
+
+    [Fact]
+    public void ParseAvailableUpdatesReadsColumnsThroughAnsiColourCodes()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+        var installedPackages = manager.ParseInstalledPackages(
+            ReadFixtureLines(@"Scoop\list-output-not-outdated.txt")
+        );
+
+        var packages = manager.ParseAvailableUpdates(
+            ReadFixtureLines(@"Scoop\status-output-ansi.txt"),
+            installedPackages
+        );
+
+        var package = Assert.Single(packages);
+        PackageAssert.Matches(package, "Outdated App", "outdated-app", "1.0.0", "2.0.0");
+    }
+
+    [Fact]
+    public void ParseAvailableUpdatesSkipsRowsListedWithoutANewerVersion()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+        var installedPackages = manager.ParseInstalledPackages(
+            ReadFixtureLines(@"Scoop\list-output-not-outdated.txt")
+        );
+
+        var packages = manager.ParseAvailableUpdates(
+            ReadFixtureLines(@"Scoop\status-output-not-outdated.txt"),
+            installedPackages
+        );
+
+        var package = Assert.Single(packages);
+        PackageAssert.Matches(package, "Outdated App", "outdated-app", "1.0.0", "2.0.0");
+    }
+
+    [Fact]
+    public void ParseAvailableUpdatesKeepsRowsThatOverflowTheDefaultConsoleWidth()
+    {
+        var manager = CreateManagerWithKnownSources("main");
+
+        var installedPackages = manager.ParseInstalledPackages(
+            RunPowerShellTable(
+                $"@(@('{LongId}','{LongVersion}'),@('7zip','26.03')) "
+                    + "| ForEach-Object { [PSCustomObject][ordered]@{ Name = $_[0]; "
+                    + "Version = $_[1]; Source = 'main' } }"
+            )
+        );
+
+        var packages = manager.ParseAvailableUpdates(
+            RunPowerShellTable(
+                $"@(@('{LongId}','{LongVersion}','{LongNewVersion}'),@('7zip','26.03','26.04')) "
+                    + "| ForEach-Object { [PSCustomObject][ordered]@{ Name = $_[0]; "
+                    + "'Installed Version' = $_[1]; 'Latest Version' = $_[2] } }"
+            ),
+            installedPackages
+        );
+
+        var package = Assert.Single(packages, package => package.Id == LongId);
+        Assert.Equal(LongVersion, package.VersionString);
+        Assert.Equal(LongNewVersion, package.NewVersionString);
+    }
+
+    private static string[] RunPowerShellTable(string script)
+    {
+        using Process p = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments =
+                    "-NoProfile -ExecutionPolicy Bypass -Command \""
+                    + script
+                    + Scoop.UntruncatedTableOutput
+                    + "\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+            },
+        };
+
+        p.Start();
+        return [.. ScoopProcess.ReadLines(p, new TestProcessTaskLogger())];
+    }
+
+    private static Uri SpacedBucketUrl(string bucket) =>
+        new(
+            Path.Join(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                @"AppData\Local\Temp\My Scoop\buckets",
+                bucket
+            )
+        );
 
     private static Scoop CreateManagerWithKnownSources(params string[] sourceNames)
     {

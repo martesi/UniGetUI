@@ -1,0 +1,64 @@
+From 366ae3d428ea534c40295eb802c4c1d2783609b9 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 17:39:25 +0200
+Subject: [PATCH] test: select actual tray switches in WinUI automation
+
+Classic-Source-Commit: a9fd4e37a63e066de0a32f33a05836e65aa44964
+---
+ testing/automation/run-winui-ui-e2e.ps1 | 32 +++++++++++++++++++++++--
+ 1 file changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
+index e1392e0..4c7e549 100644
+--- a/testing/automation/run-winui-ui-e2e.ps1
++++ b/testing/automation/run-winui-ui-e2e.ps1
+@@ -86,6 +86,34 @@ function Invoke-Element {
+     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+ }
+ 
++function Find-ToggleByAutomationId {
++    param(
++        [System.Windows.Automation.AutomationElement] $Root,
++        [string] $AutomationId,
++        [int] $TimeoutSeconds = 30
++    )
++
++    $condition = [System.Windows.Automation.AndCondition]::new(
++        [System.Windows.Automation.PropertyCondition]::new(
++            [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
++            $AutomationId
++        ),
++        [System.Windows.Automation.PropertyCondition]::new(
++            [System.Windows.Automation.AutomationElement]::IsTogglePatternAvailableProperty,
++            $true
++        )
++    )
++    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
++    do {
++        $element = $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
++        if ($element) {
++            return $element
++        }
++        Start-Sleep -Milliseconds 250
++    } while ((Get-Date) -lt $deadline)
++    throw "UI toggle '$AutomationId' was not found."
++}
++
+ function Ensure-ToggleOn {
+     param([System.Windows.Automation.AutomationElement] $Element)
+ 
+@@ -149,9 +177,9 @@ try {
+     Write-Host 'Opening interface settings'
+     Invoke-Element (Find-ElementByAutomationId $window 'InterfaceSettingsEntry')
+     Write-Host 'Enabling background mode'
+-    Ensure-ToggleOn (Find-ElementByAutomationId $window 'DisableSystemTray')
++    Ensure-ToggleOn (Find-ToggleByAutomationId $window 'DisableSystemTray')
+     Write-Host 'Checking tray icon toggle'
+-    $trayIcon = Find-ElementByAutomationId $window 'HideSystemTrayIcon'
++    $trayIcon = Find-ToggleByAutomationId $window 'HideSystemTrayIcon'
+     $deadline = (Get-Date).AddSeconds(15)
+     while (-not $trayIcon.Current.IsEnabled -and (Get-Date) -lt $deadline) {
+         Start-Sleep -Milliseconds 250
+-- 
+2.51.1
+

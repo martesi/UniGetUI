@@ -1,0 +1,26 @@
+From 2184178fa84cd878f2b255a9e48f956e0f24d919 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 12:37:40 -0800
+Subject: [PATCH] test: allow more time for WinUI startup
+
+Classic-Source-Commit: 59e25304d9f3d460d24d1883d3f249297da347ac
+---
+ testing/automation/run-winui-ui-e2e.ps1 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
+index 4c7e549..6da9708 100644
+--- a/testing/automation/run-winui-ui-e2e.ps1
++++ b/testing/automation/run-winui-ui-e2e.ps1
+@@ -169,7 +169,7 @@ try {
+         throw 'UniGetUI main window was not found.'
+     }
+ 
+-    Invoke-Element (Find-ElementByAutomationId $window 'OperationsSettingsEntry')
++    Invoke-Element (Find-ElementByAutomationId $window 'OperationsSettingsEntry' -TimeoutSeconds 120)
+     [void](Find-ElementByAutomationId $window 'InstallerFileNameScheme')
+     [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
+ 
+-- 
+2.51.1
+

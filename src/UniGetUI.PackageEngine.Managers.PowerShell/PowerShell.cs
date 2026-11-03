@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
-using System.Text.RegularExpressions;
 using UniGetUI.Core.Data;
+using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
 using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine.Classes.Manager;
@@ -16,6 +16,8 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
 {
     public class PowerShell : BaseNuGet
     {
+        public override bool CommandLineIsShellInterpreted => true;
+
         public PowerShell()
         {
             Capabilities = new ManagerCapabilities
@@ -88,7 +90,9 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = Status.ExecutablePath,
-                    Arguments = Status.ExecutableCallArgs + " Get-InstalledModule",
+                    Arguments =
+                        Status.ExecutableCallArgs
+                        + " \"Get-InstalledModule | ForEach-Object { $_.Name + [char]9 + $_.Version + [char]9 + $_.Repository }\"",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     RedirectStandardInput = true,
@@ -119,6 +123,8 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
             return ParseInstalledPackages(outputLines, this);
         }
 
+        protected override bool UseSubstringSearch => true;
+
         public override List<string> FindCandidateExecutableFiles()
         {
             var candidates = CoreTools.WhichMultiple("powershell.exe");
@@ -137,6 +143,26 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
             found = _found;
             path = _path;
             callArguments = " -NoProfile -Command";
+        }
+
+        protected override IReadOnlyList<string> _getOperationCallArgs(
+            string executablePath,
+            string callArguments
+        )
+        {
+            // Degrade to the concatenated -Command form when the launcher cannot run: operations
+            // keep working exactly as they did before, and the parameter validation in
+            // BasePkgOperationHelper still rejects anything a shell could reinterpret.
+            string launcher = CoreData.PowerShellOperationLauncher;
+            if (!CoreTools.PowerShellLauncherWorks(executablePath, launcher))
+            {
+                Logger.Warn(
+                    $"Not using the PowerShell operation launcher at {launcher}; falling back to -Command"
+                );
+                return [];
+            }
+
+            return ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcher, "tls12"];
         }
 
         protected override void _loadManagerVersion(out string version)
@@ -164,36 +190,24 @@ namespace UniGetUI.PackageEngine.Managers.PowerShellManager
         )
         {
             List<Package> packages = [];
-            bool dashesPassed = false;
 
-            foreach (string rawLine in outputLines)
+            foreach (string line in outputLines)
             {
-                if (!dashesPassed)
-                {
-                    if (rawLine.Contains("-----"))
-                    {
-                        dashesPassed = true;
-                    }
-
-                    continue;
-                }
-
-                string[] elements = Regex.Replace(rawLine, " {2,}", " ").Split(' ');
+                string[] elements = line.Split('\t');
                 if (elements.Length < 3)
-                {
                     continue;
-                }
 
                 for (int i = 0; i < elements.Length; i++)
-                {
                     elements[i] = elements[i].Trim();
-                }
+
+                if (elements[0].Length == 0)
+                    continue;
 
                 packages.Add(
                     new Package(
-                        CoreTools.FormatAsName(elements[1]),
-                        elements[1],
+                        CoreTools.FormatAsName(elements[0]),
                         elements[0],
+                        elements[1],
                         manager.SourcesHelper.Factory.GetSourceOrDefault(elements[2]),
                         manager
                     )

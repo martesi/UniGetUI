@@ -1,6 +1,7 @@
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using Microsoft.Management.Deployment;
+using Microsoft.Win32;
 using UniGetUI.Core.Classes;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
@@ -24,6 +25,9 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
     private readonly Func<WinGet, IWinGetManagerHelper> _systemCliHelperFactory;
     private readonly Func<IReadOnlyList<CatalogPackage>>? _localPackagesProvider;
     private readonly IPingetPackageDetailsProvider _pingetPackageDetailsProvider;
+    private const string UserUninstallKeyPath =
+        @"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+    private const string InstalledIndexInvalidationValueName = "UniGetUI.InstalledIndexInvalidation";
     private int _activeLocalPackageQueries;
     private ExceptionDispatchInfo? _lastActivationException;
 
@@ -179,6 +183,22 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
         Logger.Info($"WinGet activation mode selected: {ActivationMode} | Source: {ActivationSource}");
     }
 
+    internal readonly record struct NativeSearchRequest(
+        PackageMatchField Field,
+        bool IsSelector,
+        uint? ResultLimit
+    );
+
+    internal static IReadOnlyList<NativeSearchRequest> GetSearchRequests(string query) =>
+        query.Length == 0
+            ? [new(PackageMatchField.CatalogDefault, true, (uint)SearchLimits.MaxEmptyQueryResultsPerSource)]
+            :
+            [
+                new(PackageMatchField.Name, false, null),
+                new(PackageMatchField.Id, false, null),
+                new(PackageMatchField.Moniker, false, null),
+            ];
+
     public IReadOnlyList<Package> FindPackages_UnSafe(string query)
     {
         List<Package> packages = [];
@@ -203,24 +223,29 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
             ConnectResult result = CatalogReference.Connect();
             if (result.Status == ConnectResultStatus.Ok)
             {
-                foreach (
-                    var filter_type in new[]
-                    {
-                        PackageMatchField.Name,
-                        PackageMatchField.Id,
-                        PackageMatchField.Moniker,
-                    }
-                )
+                foreach (NativeSearchRequest request in GetSearchRequests(query))
                 {
                     FindPackagesOptions PackageFilters = Factory.CreateFindPackagesOptions();
 
                     logger.Log("Generating filters...");
                     // Name filter
                     PackageMatchFilter FilterName = Factory.CreatePackageMatchFilter();
-                    FilterName.Field = filter_type;
+                    FilterName.Field = request.Field;
                     FilterName.Value = query;
                     FilterName.Option = PackageFieldMatchOption.ContainsCaseInsensitive;
-                    PackageFilters.Filters.Add(FilterName);
+                    if (request.IsSelector)
+                    {
+                        PackageFilters.Selectors.Add(FilterName);
+                    }
+                    else
+                    {
+                        PackageFilters.Filters.Add(FilterName);
+                    }
+
+                    if (request.ResultLimit is { } limit)
+                    {
+                        PackageFilters.ResultLimit = limit;
+                    }
 
                     try
                     {
@@ -231,7 +256,7 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                         task.Start();
 
                         // Add task to list
-                        FindPackageTasks.Add((CatalogReference, filter_type), task);
+                        FindPackageTasks.Add((CatalogReference, request.Field), task);
                     }
                     catch (Exception e)
                     {
@@ -347,9 +372,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     nativePackage.DefaultInstallVersion.PackageCatalog.Info.Name
                 );
 
+                string? reportedVersion = nativePackage.InstalledVersion.Version;
                 string version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(
                     nativePackage.Id,
-                    nativePackage.InstalledVersion.Version
+                    reportedVersion
                 );
 
                 var UniGetUIPackage = new Package(
@@ -359,7 +385,12 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     nativePackage.DefaultInstallVersion.Version,
                     source,
                     Manager
-                );
+                )
+                {
+                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
+                        reportedVersion
+                    ),
+                };
 
                 // Suppress an update that repeatedly fails to stick (#5158); the COM path still avoids
                 // the one-shot "already upgraded" cache (#5042).
@@ -367,6 +398,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     continue;
 
                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
+                NativePackageHandler.AddLocalIdentifier(
+                    UniGetUIPackage,
+                    nativePackage.InstalledVersion?.Id
+                );
                 packages.Add(UniGetUIPackage);
                 logger.Log(
                     $"Found package {nativePackage.Name} {nativePackage.Id} on source {source.Name}, from version {version} to version {nativePackage.DefaultInstallVersion.Version}"
@@ -414,9 +449,10 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     source = Manager.GetLocalSource(nativePackage.Id);
                 }
 
+                string? reportedVersion = nativePackage.InstalledVersion.Version;
                 string version = WinGetPkgOperationHelper.ResolveReportedInstalledVersion(
                     nativePackage.Id,
-                    nativePackage.InstalledVersion.Version
+                    reportedVersion
                 );
 
                 logger.Log(
@@ -428,8 +464,17 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
                     version,
                     source,
                     Manager
-                );
+                )
+                {
+                    InstalledVersionIsUnverified = WinGetPkgOperationHelper.IsUnknownVersion(
+                        reportedVersion
+                    ),
+                };
                 NativePackageHandler.AddPackage(UniGetUIPackage, nativePackage);
+                NativePackageHandler.AddLocalIdentifier(
+                    UniGetUIPackage,
+                    nativePackage.InstalledVersion?.Id
+                );
                 packages.Add(UniGetUIPackage);
             }
             catch (Exception ex)
@@ -443,17 +488,28 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
 
     private IReadOnlyList<CatalogPackage> GetCachedLocalWinGetPackages(int? cacheSeconds = null)
     {
-        if (_localPackagesProvider is not null)
-        {
-            return _localPackagesProvider();
-        }
+        (long, long) generations = (
+            WinGet.SourceIndexGeneration,
+            Manager.InstalledPackagesGeneration
+        );
 
         return cacheSeconds is null
-            ? TaskRecycler<IReadOnlyList<CatalogPackage>>.RunOrAttach(GetLocalWinGetPackages)
+            ? TaskRecycler<IReadOnlyList<CatalogPackage>>.RunOrAttach(
+                EnumerateLocalWinGetPackages,
+                generations
+            )
             : TaskRecycler<IReadOnlyList<CatalogPackage>>.RunOrAttach(
-                GetLocalWinGetPackages,
+                EnumerateLocalWinGetPackages,
+                generations,
                 cacheSeconds.Value
             );
+    }
+
+    private IReadOnlyList<CatalogPackage> EnumerateLocalWinGetPackages((long, long) generations)
+    {
+        return _localPackagesProvider is not null
+            ? _localPackagesProvider()
+            : GetLocalWinGetPackages();
     }
 
     private IReadOnlyList<Package> GetAvailableUpdatesFromSystemCli(Exception ex)
@@ -554,6 +610,7 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
         try
         {
             logger.Log("OtherTask: GetWinGetLocalPackages");
+            InvalidateInstalledIndexCache(logger);
             var availableCatalogs = GetReachableLocalCatalogReferences(logger);
             PackageCatalogReference installedSearchCatalogRef = CreateLocalCompositeCatalog(
                 availableCatalogs,
@@ -599,6 +656,30 @@ internal sealed class NativeWinGetHelper : IWinGetManagerHelper
         finally
         {
             Interlocked.Decrement(ref _activeLocalPackageQueries);
+        }
+    }
+
+    private static void InvalidateInstalledIndexCache(INativeTaskLogger logger)
+    {
+        try
+        {
+            using RegistryKey? uninstallKey = Registry.CurrentUser.OpenSubKey(
+                UserUninstallKeyPath,
+                writable: true
+            );
+            if (uninstallKey is null)
+            {
+                logger.Log("No per-user uninstall key found; skipping WinGet installed index invalidation");
+                return;
+            }
+
+            uninstallKey.SetValue(InstalledIndexInvalidationValueName, Environment.ProcessId);
+            uninstallKey.DeleteValue(InstalledIndexInvalidationValueName, throwOnMissingValue: false);
+        }
+        catch (Exception ex)
+        {
+            logger.Error($"Could not invalidate the WinGet installed index: {ex.Message}");
+            Logger.Warn($"Could not invalidate the WinGet installed index: {ex.Message}");
         }
     }
 

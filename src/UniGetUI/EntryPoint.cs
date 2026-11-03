@@ -15,6 +15,9 @@ namespace UniGetUI
         [STAThread]
         private static void Main(string[] args)
         {
+            args = SharedPreUiCommandDispatcher.IgnoreArgumentsInjectedIntoProtocolLaunch(args);
+            CoreData.SetSanitizedProcessArguments(args);
+
             // Having an async main method breaks WebView2
             try
             {
@@ -106,7 +109,7 @@ namespace UniGetUI
                 Logger.ImportantInfo($"Runtime: {RuntimeInformation.FrameworkDescription}");
                 Logger.ImportantInfo($"Elevated: {CoreTools.IsAdministrator()}");
                 Logger.ImportantInfo($"Packaged (MSIX): {CoreTools.IsPackagedApp()}");
-                string[] cmdArgs = Environment.GetCommandLineArgs();
+                string[] cmdArgs = UniGetUI.Core.Data.CoreData.GetProcessArguments();
                 Logger.ImportantInfo($"Args: {(cmdArgs.Length > 1 ? string.Join(" ", cmdArgs.Skip(1)) : "(none)")}");
 
                 // WinRT single-instance fancy stuff

@@ -187,8 +187,8 @@ Available keys live in:
 | `package ignored list` | None | None | Lists ignored-update rules tracked by UniGetUI. |
 | `package ignored add` | `--id <package-id>` | `--manager <id>`, `--version <version>`, `--source <source>` | Adds an ignored-update rule. |
 | `package ignored remove` | `--id <package-id>` | `--manager <id>`, `--version <version>`, `--source <source>` | Removes an ignored-update rule. |
-| `package update-all` | None | None | Queues updates for all currently upgradable packages. |
-| `package update-manager` | `--manager <id>` | None | Queues updates for all upgradable packages handled by one manager. |
+| `package update-all` | None | `--manager <id>`, `--wait true\|false`, `--timeout <seconds>`, `--delay <seconds>` | Queues an update for every available update and returns their operation ids. With `--wait true`, waits for all of them (default timeout 3600 seconds) and exits with `1` if any did not succeed or the wait timed out. Works in headless sessions. |
+| `package update-manager` | `--manager <id>` | `--wait true\|false`, `--timeout <seconds>`, `--delay <seconds>` | Same as `package update-all --manager <id>`. |
 
 ## Headless behavior
 
@@ -200,7 +200,7 @@ When UniGetUI is started with `--headless`, it exposes the same automation API w
 | `app show` | Fails with “the current UniGetUI session is running headless and has no window to show.” |
 | `app navigate` | Fails with “the current UniGetUI session is running headless and cannot navigate UI pages.” |
 | `package show` | UI-oriented; may fail or be meaningless in pure headless sessions. |
-| `package update-all`, `package update-manager` | Require GUI-side upgrade handlers. Headless sessions may return “cannot update all packages” or “cannot update manager packages.” |
+| `package update-all`, `package update-manager` | Fully supported. The headless session queues the updates itself. |
 
 ## Headless IPC options
 
@@ -240,11 +240,13 @@ UniGetUI also accepts the following `unigetui://` links:
 
 | Deep link | Meaning |
 | --- | --- |
-| `unigetui://showPackage?id={id}&managerName={manager}&sourceName={source}` | Opens package details for the specified package. |
+| `unigetui://package?id={id}&manager={manager}&source={source}&version={version}` | Finds the package and opens its details. Only `id` is required. |
 | `unigetui://showUniGetUI` | Shows UniGetUI and brings the window to the front. |
 | `unigetui://showDiscoverPage` | Opens the Discover page. |
 | `unigetui://showUpdatesPage` | Opens the Updates page. |
 | `unigetui://showInstalledPage` | Opens the Installed page. |
+
+Use **Copy link** in a package's context menu to share it. A link opens package details; it does not install the package. The optional `version` selects a version when the manager supports it. The recipient must have the package manager enabled and its source available.
 
 ## Installer parameters
 

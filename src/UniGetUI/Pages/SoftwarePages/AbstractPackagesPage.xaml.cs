@@ -8,6 +8,7 @@ using ExternalLibraries.Pickers;
 using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -213,6 +214,128 @@ namespace UniGetUI.Interface
         private readonly ObservableCollection<PackageWrapper> WrappedPackages = [];
         private IEnumerable<PackageWrapper>? LastQueryResult;
 
+        private static readonly (string Key, string Label)[] ListColumns =
+        [
+            ("Name", "Package Name"), ("Id", "Package ID"), ("Version", "Version"),
+            ("NewVersion", "New version"), ("Source", "Source"),
+            ("InstallerHost", "Installer host"), ("DownloadSize", "Download size"),
+            ("ReleaseDate", "Release date"),
+        ];
+        private static event Action? ColumnVisibilityChanged;
+        private readonly List<(string Key, ToggleMenuFlyoutItem Item)> _columnMenuItems = [];
+        private bool _optionalSortPending;
+
+        private bool ColumnIsAvailable(string column) => column switch
+        {
+            "NewVersion" => RoleIsUpdateLike,
+            "InstallerHost" or "DownloadSize" or "ReleaseDate" => PAGE_ROLE != OperationType.Uninstall,
+            _ => true,
+        };
+
+        private static bool ColumnSettingVisible(string column) => column switch
+        {
+            "InstallerHost" => Settings.Get(Settings.K.ShowInstallerHostColumn),
+            "DownloadSize" => Settings.Get(Settings.K.ShowDownloadSizeColumn),
+            "ReleaseDate" => Settings.Get(Settings.K.ShowReleaseDateColumn),
+            _ => !Settings.GetDictionaryItem<string, bool>(Settings.K.HiddenPackageListColumns, column),
+        };
+
+        public bool IsColumnVisible(string column)
+        {
+            if (!ColumnIsAvailable(column)) return false;
+            if (ColumnSettingVisible(column)) return true;
+            return column == "Name" && !ListColumns.Any(item => item.Key != "Name"
+                && ColumnIsAvailable(item.Key) && ColumnSettingVisible(item.Key));
+        }
+
+        public bool OptionalColumnsVisible => IsColumnVisible("InstallerHost")
+            || IsColumnVisible("DownloadSize") || IsColumnVisible("ReleaseDate");
+
+        private static void SetColumnVisible(string column, bool visible)
+        {
+            switch (column)
+            {
+                case "InstallerHost": Settings.Set(Settings.K.ShowInstallerHostColumn, visible); break;
+                case "DownloadSize": Settings.Set(Settings.K.ShowDownloadSizeColumn, visible); break;
+                case "ReleaseDate": Settings.Set(Settings.K.ShowReleaseDateColumn, visible); break;
+                default:
+                    Settings.SetDictionaryItem(Settings.K.HiddenPackageListColumns, column, !visible);
+                    break;
+            }
+            ColumnVisibilityChanged?.Invoke();
+        }
+
+        private void SetupColumnMenus()
+        {
+            MenuFlyout headerMenu = new();
+            ColumnsHeader.ContextFlyout = headerMenu;
+            ColumnsMenu.Text = CoreTools.Translate("Columns");
+            foreach ((string key, string label) in ListColumns.Where(item => ColumnIsAvailable(item.Key)))
+            {
+                AddColumnItem(headerMenu.Items, key, label);
+                AddColumnItem(ColumnsMenu.Items, key, label);
+            }
+            Loaded += (_, _) =>
+            {
+                ColumnVisibilityChanged -= RefreshColumnVisibility;
+                ColumnVisibilityChanged += RefreshColumnVisibility;
+                RefreshColumnVisibility();
+            };
+            Unloaded += (_, _) => ColumnVisibilityChanged -= RefreshColumnVisibility;
+            RefreshColumnVisibility();
+        }
+
+        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label)
+        {
+            ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
+            AutomationProperties.SetAutomationId(item, "Column" + key);
+            item.Click += (_, _) => SetColumnVisible(key, item.IsChecked);
+            items.Add(item);
+            _columnMenuItems.Add((key, item));
+        }
+
+        private void RefreshColumnVisibility()
+        {
+            static GridLength Star(bool visible) => new(visible ? 1 : 0, GridUnitType.Star);
+            static GridLength Icon(bool visible) => new(visible ? 32 : 0);
+            bool name = IsColumnVisible("Name"), id = IsColumnVisible("Id");
+            bool version = IsColumnVisible("Version"), next = IsColumnVisible("NewVersion");
+            bool source = IsColumnVisible("Source"), host = IsColumnVisible("InstallerHost");
+            bool size = IsColumnVisible("DownloadSize"), date = IsColumnVisible("ReleaseDate");
+            NameHeaderWidth.MinWidth = name ? 100 : 0;
+            IdHeaderWidth.MinWidth = id ? 100 : 0;
+            NameHeaderWidth.Width = Star(name);
+            IdHeaderIconWidth.Width = Icon(id); IdHeaderWidth.Width = Star(id);
+            VersionHeaderIconWidth.Width = Icon(version); VersionHeaderWidth.Width = Star(version);
+            NewVersionHeaderIconWidth.Width = Icon(next); NewVersionHeaderWidth.Width = Star(next);
+            SourceHeaderIconWidth.Width = Icon(source); SourceHeaderWidth.Width = Star(source);
+            InstallerHostHeaderWidth.Width = Star(host);
+            DownloadSizeHeaderWidth.Width = Star(size);
+            ReleaseDateHeaderWidth.Width = Star(date);
+            NameHeader.Visibility = name ? Visibility.Visible : Visibility.Collapsed;
+            IdHeader.Visibility = id ? Visibility.Visible : Visibility.Collapsed;
+            VersionHeader.Visibility = version ? Visibility.Visible : Visibility.Collapsed;
+            NewVersionHeader.Visibility = next ? Visibility.Visible : Visibility.Collapsed;
+            SourceHeader.Visibility = source ? Visibility.Visible : Visibility.Collapsed;
+            InstallerHostHeader.Visibility = host ? Visibility.Visible : Visibility.Collapsed;
+            DownloadSizeHeader.Visibility = size ? Visibility.Visible : Visibility.Collapsed;
+            ReleaseDateHeader.Visibility = date ? Visibility.Visible : Visibility.Collapsed;
+            OrderBySize_Menu.Visibility = size ? Visibility.Visible : Visibility.Collapsed;
+            OrderByDate_Menu.Visibility = date ? Visibility.Visible : Visibility.Collapsed;
+
+            int visibleCount = ListColumns.Count(item => IsColumnVisible(item.Key));
+            foreach ((string key, ToggleMenuFlyoutItem item) in _columnMenuItems)
+            {
+                item.IsChecked = IsColumnVisible(key);
+                item.IsEnabled = !item.IsChecked || visibleCount > 1;
+            }
+            foreach (PackageWrapper wrapper in WrappedPackages)
+                wrapper.NotifyColumnVisibilityChanged();
+            if ((!size && FilteredPackages.CurrentSorter == ObservablePackageCollection.Sorter.DownloadSize)
+                || (!date && FilteredPackages.CurrentSorter == ObservablePackageCollection.Sorter.ReleaseDate))
+                SortPackagesBy(ObservablePackageCollection.Sorter.Name);
+        }
+
         protected List<IPackageManager> UsedManagers = [];
         protected ConcurrentDictionary<
             IPackageManager,
@@ -229,6 +352,39 @@ namespace UniGetUI.Interface
         protected abstract void WhenPackagesLoaded(ReloadReason reason);
         protected abstract void WhenPackageCountUpdated();
         protected abstract void WhenShowingContextMenu(IPackage package);
+
+        protected BetterMenuItem CreateCopyLinkMenuItem()
+        {
+            BetterMenuItem item = new()
+            {
+                Text = CoreTools.AutoTranslated("Copy link"),
+                IconName = IconType.Info_Round,
+            };
+            item.Click += (_, _) =>
+            {
+                if (SelectedItem is not { } package || !PackageLink.CanLinkTo(package))
+                    return;
+                try
+                {
+                    var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                    data.SetText(PackageLink.FromPackage(package).ToUri());
+                    Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
+                    DialogHelper.ShowDismissableBalloon(
+                        CoreTools.Translate("Copy link"),
+                        CoreTools.Translate("A link to {0} was copied to the clipboard.", package.Name)
+                    );
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex);
+                    DialogHelper.ShowDismissableBalloon(
+                        CoreTools.Translate("Copy link"),
+                        CoreTools.Translate("The package link could not be copied.")
+                    );
+                }
+            };
+            return item;
+        }
         public abstract void GenerateToolBar();
         public abstract BetterMenu GenerateContextMenu();
 
@@ -287,6 +443,7 @@ namespace UniGetUI.Interface
 
             // Load UI
             InitializeComponent();
+            SetupColumnMenus();
 
             // Selection of grid view mode
             int viewMode = Settings.GetDictionaryItem<string, int>(
@@ -417,6 +574,10 @@ namespace UniGetUI.Interface
                 SortPackagesBy(ObservablePackageCollection.Sorter.NewVersion);
             SourceHeader.Click += (_, _) =>
                 SortPackagesBy(ObservablePackageCollection.Sorter.Source);
+            DownloadSizeHeader.Click += (_, _) =>
+                SortPackagesBy(ObservablePackageCollection.Sorter.DownloadSize);
+            ReleaseDateHeader.Click += (_, _) =>
+                SortPackagesBy(ObservablePackageCollection.Sorter.ReleaseDate);
 
             OrderByName_Menu.Click += (_, _) =>
                 SortPackagesBy(ObservablePackageCollection.Sorter.Name);
@@ -427,6 +588,10 @@ namespace UniGetUI.Interface
                 SortPackagesBy(ObservablePackageCollection.Sorter.NewVersion);
             OrderBySrc_Menu.Click += (_, _) =>
                 SortPackagesBy(ObservablePackageCollection.Sorter.Source);
+            OrderBySize_Menu.Click += (_, _) =>
+                SortPackagesBy(ObservablePackageCollection.Sorter.DownloadSize);
+            OrderByDate_Menu.Click += (_, _) =>
+                SortPackagesBy(ObservablePackageCollection.Sorter.ReleaseDate);
 
             OrderAsc_Menu.Click += (_, _) => SortPackagesBy(ascendent: true);
             OrderDesc_Menu.Click += (_, _) => SortPackagesBy(ascendent: false);
@@ -456,6 +621,9 @@ namespace UniGetUI.Interface
                 VersionHeader.Content = CoreTools.Translate("Version");
                 NewVersionHeader.Content = CoreTools.Translate("New version");
                 SourceHeader.Content = CoreTools.Translate("Source");
+                InstallerHostHeader.Content = CoreTools.Translate("Installer host");
+                DownloadSizeHeader.Content = CoreTools.Translate("Download size");
+                ReleaseDateHeader.Content = CoreTools.Translate("Release date");
             }
             else
             {
@@ -464,6 +632,9 @@ namespace UniGetUI.Interface
                 VersionHeader.Content = "";
                 NewVersionHeader.Content = "";
                 SourceHeader.Content = "";
+                InstallerHostHeader.Content = "";
+                DownloadSizeHeader.Content = "";
+                ReleaseDateHeader.Content = "";
             }
         }
 
@@ -1041,6 +1212,9 @@ namespace UniGetUI.Interface
             }
 
             FilteredPackages.FromRange(matchingList_selectedSources);
+            if (FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.DownloadSize
+                or ObservablePackageCollection.Sorter.ReleaseDate)
+                _ = LoadDetailsAndSortAsync(FilteredPackages.CurrentSorter);
             UpdatePackageCount();
 
             if (previousSelection is not null)
@@ -1159,6 +1333,33 @@ namespace UniGetUI.Interface
             FilteredPackages.SetSorter(sorter);
             FilteredPackages.Sort();
             UpdateSortingMenu();
+            if (sorter is ObservablePackageCollection.Sorter.DownloadSize or ObservablePackageCollection.Sorter.ReleaseDate)
+                _ = LoadDetailsAndSortAsync(sorter);
+        }
+
+        private async Task LoadDetailsAndSortAsync(ObservablePackageCollection.Sorter sorter)
+        {
+            await Task.WhenAll(FilteredPackages.ToArray().Select(item => item.EnsureOptionalDetailsLoadedAsync()));
+            if (FilteredPackages.CurrentSorter == sorter)
+                FilteredPackages.Sort();
+        }
+
+        public void NotifyOptionalDetailsLoaded()
+        {
+            if (_optionalSortPending || FilteredPackages.CurrentSorter is not
+                (ObservablePackageCollection.Sorter.DownloadSize or ObservablePackageCollection.Sorter.ReleaseDate))
+                return;
+            _optionalSortPending = true;
+            _ = RefreshOptionalSortAsync();
+        }
+
+        private async Task RefreshOptionalSortAsync()
+        {
+            await Task.Delay(250);
+            _optionalSortPending = false;
+            if (FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.DownloadSize
+                or ObservablePackageCollection.Sorter.ReleaseDate)
+                FilteredPackages.Sort();
         }
 
         public void SortPackagesBy(bool ascendent)
@@ -1180,6 +1381,10 @@ namespace UniGetUI.Interface
                 FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.NewVersion;
             OrderBySrc_Menu.IsChecked =
                 FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.Source;
+            OrderBySize_Menu.IsChecked =
+                FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.DownloadSize;
+            OrderByDate_Menu.IsChecked =
+                FilteredPackages.CurrentSorter is ObservablePackageCollection.Sorter.ReleaseDate;
 
             OrderAsc_Menu.IsChecked = !FilteredPackages.Descending;
             OrderDesc_Menu.IsChecked = FilteredPackages.Descending;
@@ -1191,6 +1396,8 @@ namespace UniGetUI.Interface
                 ObservablePackageCollection.Sorter.Version => CoreTools.Translate("Version"),
                 ObservablePackageCollection.Sorter.NewVersion => CoreTools.Translate("New version"),
                 ObservablePackageCollection.Sorter.Source => CoreTools.Translate("Source"),
+                ObservablePackageCollection.Sorter.DownloadSize => CoreTools.Translate("Download size"),
+                ObservablePackageCollection.Sorter.ReleaseDate => CoreTools.Translate("Release date"),
                 _ => throw new InvalidDataException(),
             };
         }

@@ -1,0 +1,155 @@
+From 986e689f553b5ed398547986865b2a47eb1cc933 Mon Sep 17 00:00:00 2001
+From: Classic maintenance <classic-maintenance@example.invalid>
+Date: Mon, 2 Nov 2026 12:16:03 -0800
+Subject: [PATCH] fix: guard ignored-update operations and test formatting
+
+Classic-Source-Commit: 91046bb109d44b16621ff76c6bc064649af0b7bf
+---
+ .../PackageOperationsTests.cs                 |  5 ++-
+ src/UniGetUI/AppOperationHelper.cs            |  2 +
+ .../Pages/DialogPages/IgnoredUpdates.xaml.cs  | 38 +++++++++++++++++--
+ 3 files changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+index 3cb29e3..bf2cedb 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PackageOperationsTests.cs
+@@ -809,7 +809,10 @@ public sealed class PackageOperationsTests
+             UpgradablePackagesLoader.Instance.IgnoredPackages[update.Id] = update;
+             using var operation = new SimulatedUpdatePackageOperation(
+                 update, new InstallOptions(), OperationVeredict.Success
+-            ) { KeepUpdatesPaused = true };
++            )
++            {
++                KeepUpdatesPaused = true,
++            };
+ 
+             await operation.MainThread();
+             await operation.SuccessHandled;
+diff --git a/src/UniGetUI/AppOperationHelper.cs b/src/UniGetUI/AppOperationHelper.cs
+index a80d60a..d495781 100644
+--- a/src/UniGetUI/AppOperationHelper.cs
++++ b/src/UniGetUI/AppOperationHelper.cs
+@@ -357,6 +357,8 @@ public partial class MainApp
+                 interactive,
+                 no_integrity
+             );
++            if (keepUpdatesPaused && AlreadyBeingUpdated(package))
++                return null;
+             var operation = new UpdatePackageOperation(package, options, ignoreParallel, req)
+             {
+                 KeepUpdatesPaused = keepUpdatesPaused,
+diff --git a/src/UniGetUI/Pages/DialogPages/IgnoredUpdates.xaml.cs b/src/UniGetUI/Pages/DialogPages/IgnoredUpdates.xaml.cs
+index 88141dc..f82d929 100644
+--- a/src/UniGetUI/Pages/DialogPages/IgnoredUpdates.xaml.cs
++++ b/src/UniGetUI/Pages/DialogPages/IgnoredUpdates.xaml.cs
+@@ -30,6 +30,11 @@ namespace UniGetUI.Interface
+         {
+             InitializeComponent();
+             IgnoredUpdatesList.ItemsSource = ignoredPackages;
++            Unloaded += (_, _) =>
++            {
++                foreach (var entry in ignoredPackages)
++                    entry.Detach();
++            };
+             UpdateData();
+         }
+ 
+@@ -42,6 +47,8 @@ namespace UniGetUI.Interface
+                 ManagerNameReference.Add(Manager.Name.ToLower(), Manager);
+             }
+ 
++            foreach (var entry in ignoredPackages)
++                entry.Detach();
+             ignoredPackages.Clear();
+ 
+             var rawIgnoredPackages = IgnoredUpdatesDatabase.GetDatabase();
+@@ -82,6 +89,8 @@ namespace UniGetUI.Interface
+ 
+         private void CloseButton_Click(object sender, RoutedEventArgs e)
+         {
++            foreach (var entry in ignoredPackages)
++                entry.Detach();
+             Close?.Invoke(this, EventArgs.Empty);
+         }
+ 
+@@ -121,6 +130,7 @@ namespace UniGetUI.Interface
+         private readonly Action _refresh;
+         private UpdatePackageOperation? _operation;
+         private bool _isUpdating;
++        private bool _detached;
+         private int _operationFinished;
+         private ObservableCollection<IgnoredPackageEntry> List { get; }
+ 
+@@ -201,7 +211,7 @@ namespace UniGetUI.Interface
+ 
+             if (IgnoredUpdatesDatabase.GetAvailableUpdate(_ignoredId) is not { } package)
+             {
+-                _refresh();
++                RequestRefresh();
+                 return;
+             }
+ 
+@@ -212,18 +222,20 @@ namespace UniGetUI.Interface
+                 if (await MainApp.Operations.Update(package, keepUpdatesPaused: true) is UpdatePackageOperation operation)
+                     Track(operation);
+                 else
+-                    _refresh();
++                    RequestRefresh();
+             }
+             catch (Exception ex)
+             {
+                 Logger.Error("Could not update the ignored package:");
+                 Logger.Error(ex);
+-                _refresh();
++                RequestRefresh();
+             }
+         }
+ 
+         private void Track(UpdatePackageOperation operation)
+         {
++            if (_detached)
++                return;
+             _operation = operation;
+             _operationFinished = 0;
+             _isUpdating = true;
+@@ -248,9 +260,28 @@ namespace UniGetUI.Interface
+                 Logger.Warn(ex);
+             }
+             if (ReferenceEquals(_operation, operation))
++            {
++                _operation = null;
++                RequestRefresh();
++            }
++        }
++
++        private void RequestRefresh()
++        {
++            if (!_detached)
+                 _refresh();
+         }
+ 
++        public void Detach()
++        {
++            _detached = true;
++            var operation = _operation;
++            _operation = null;
++            if (operation is null)
++                return;
++            operation.OperationFinished -= OnOperationFinished;
++        }
++
+         public void RemoveFromIgnoredUpdates() => _ = RemoveFromIgnoredUpdatesAsync();
+ 
+         public async Task RemoveFromIgnoredUpdatesAsync()
+@@ -278,6 +309,7 @@ namespace UniGetUI.Interface
+                 }
+             }
+ 
++            Detach();
+             List.Remove(this);
+         }
+     }
+-- 
+2.51.1
+
