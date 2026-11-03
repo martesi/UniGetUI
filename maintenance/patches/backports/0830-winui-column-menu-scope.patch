@@ -1,10 +1,10 @@
-From 0154df7cff850bb7eb5881f307eb66cb06e1c9cf Mon Sep 17 00:00:00 2001
+From f1a46b704a38915bd354e120807889acc95ea5f2 Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 13:18:00 +0900
-Subject: [PATCH] test: scope WinUI column toggles to the columns menu
+Date: Tue, 3 Nov 2026 13:24:00 +0900
+Subject: [PATCH] test: use the unique column item automation id
 
 Upstream-PR: Devolutions/UniGetUI#5632
-Classic-Source-Commit: 0154df7cff850bb7eb5881f307eb66cb06e1c9cf
+Classic-Source-Commit: f1a46b704a38915bd354e120807889acc95ea5f2
 ---
  testing/automation/run-winui-ui-e2e.ps1 | 842 ++++++++++++++++++++++++++++++++
  1 file changed, 421 insertions(+), 421 deletions(-)
@@ -542,7 +542,7 @@ diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-wi
 +        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
 +    }
 +
-+    $item = Find-ToggleByAutomationId $columnsMenu "Column$Column" -TimeoutSeconds $TimeoutSeconds
++    $item = Find-ToggleByAutomationId $Root "Column$Column" -TimeoutSeconds $TimeoutSeconds
 +    $toggle = [System.Windows.Automation.TogglePattern]$item.GetCurrentPattern(
 +        [System.Windows.Automation.TogglePattern]::Pattern
 +    )
