@@ -83,3 +83,4 @@ backports/0780-package-columns.patch
 backports/0790-column-refinements.patch
 backports/0795-winui-column-test.patch
 backports/0800-column-menu-toggle.patch
+backports/0810-column-automation-id.patch
