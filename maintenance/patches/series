@@ -81,3 +81,4 @@ backports/0760-avoid-ci-test-rebuild.patch
 backports/0770-package-links.patch
 backports/0780-package-columns.patch
 backports/0790-column-refinements.patch
+backports/0795-winui-column-test.patch
