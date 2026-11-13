@@ -9,6 +9,7 @@
   xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
   xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
   xmlns:pkgClasses="using:UniGetUI.PackageEngine.PackageClasses"
+  xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
   xmlns:widgets="using:UniGetUI.Interface.Widgets"
   Name="ABSTRACT_PAGE"
   NavigationCacheMode="Required"
@@ -21,6 +22,25 @@
   </animations:Implicit.ShowAnimations>
 
   <Page.Resources>
+    <Style x:Key="ColumnResizeHandleStyle" TargetType="primitives:Thumb">
+      <Setter Property="Width" Value="10" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="primitives:Thumb">
+            <Grid Background="{TemplateBinding Background}">
+              <Border
+                Width="2"
+                Height="16"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Background="{ThemeResource CardStrokeColorDefaultBrush}"
+              />
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <DataTemplate x:Key="PackageTemplate_List" x:DataType="pkgClasses:PackageWrapper">
       <widgets:PackageItemContainer
         AutomationProperties.Name="{x:Bind Package.AutomationName}"
@@ -33,7 +53,7 @@
         RightTapped="{x:Bind PackageItemContainer_RightTapped}"
         Wrapper="{x:Bind Self}"
       >
-        <Grid Padding="12,3,8,3" ColumnSpacing="4" Opacity="{x:Bind ListedOpacity, Mode=OneWay}">
+        <Grid Padding="12,3,8,3" ColumnSpacing="4" MinWidth="{x:Bind ListColumnMinWidth, Mode=OneWay}" Opacity="{x:Bind ListedOpacity, Mode=OneWay}">
           <Grid.RowDefinitions>
             <RowDefinition Height="30" />
           </Grid.RowDefinitions>
@@ -41,12 +61,12 @@
             <ColumnDefinition Width="24" />
             <ColumnDefinition Width="{x:Bind NameColumnWidth, Mode=OneWay}" MinWidth="{x:Bind NameColumnMinWidth, Mode=OneWay}" />
             <ColumnDefinition Width="{x:Bind IdColumnWidth, Mode=OneWay}" MinWidth="{x:Bind IdColumnMinWidth, Mode=OneWay}" />
-            <ColumnDefinition Width="{x:Bind VersionColumnWidth, Mode=OneWay}" MaxWidth="150" />
-            <ColumnDefinition Width="{x:Bind NewVersionColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind NewVersionLabelWidth}" />
-            <ColumnDefinition Width="{x:Bind SourceColumnWidth, Mode=OneWay}" MaxWidth="175" />
-            <ColumnDefinition Width="{x:Bind InstallerHostColumnWidth, Mode=OneWay}" MaxWidth="175" />
-            <ColumnDefinition Width="{x:Bind DownloadSizeColumnWidth, Mode=OneWay}" MaxWidth="125" />
-            <ColumnDefinition Width="{x:Bind ReleaseDateColumnWidth, Mode=OneWay}" MaxWidth="125" />
+            <ColumnDefinition Width="{x:Bind VersionColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind VersionColumnMaxWidth, Mode=OneWay}" />
+            <ColumnDefinition Width="{x:Bind NewVersionColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind NewVersionColumnMaxWidth, Mode=OneWay}" />
+            <ColumnDefinition Width="{x:Bind SourceColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind SourceColumnMaxWidth, Mode=OneWay}" />
+            <ColumnDefinition Width="{x:Bind InstallerHostColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind InstallerHostColumnMaxWidth, Mode=OneWay}" />
+            <ColumnDefinition Width="{x:Bind DownloadSizeColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind DownloadSizeColumnMaxWidth, Mode=OneWay}" />
+            <ColumnDefinition Width="{x:Bind ReleaseDateColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind ReleaseDateColumnMaxWidth, Mode=OneWay}" />
           </Grid.ColumnDefinitions>
           <CheckBox
             Grid.Row="0"
@@ -1003,7 +1023,6 @@
 
         <!--  ACTUAL PACKAGE LIST  -->
         <Grid
-          Padding="4,6,4,6"
           HorizontalAlignment="Stretch"
           VerticalAlignment="Stretch"
           Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}"
@@ -1012,6 +1031,20 @@
           CornerRadius="8"
         >
           <Grid.RowDefinitions>
+            <RowDefinition Height="37" />
+            <RowDefinition Height="*" />
+          </Grid.RowDefinitions>
+          <ScrollViewer
+            x:Name="PackageListScrollViewer"
+            Grid.RowSpan="2"
+            HorizontalScrollBarVisibility="Disabled"
+            HorizontalScrollMode="Disabled"
+            VerticalScrollBarVisibility="Disabled"
+            VerticalScrollMode="Disabled"
+            ZoomMode="Disabled"
+          >
+            <Grid x:Name="PackageListContent" Padding="4,6,4,6" MinWidth="{x:Bind ListColumnMinWidth, Mode=OneWay}">
+              <Grid.RowDefinitions>
             <RowDefinition Height="37" />
             <RowDefinition Height="*" />
           </Grid.RowDefinitions>
@@ -1027,14 +1060,14 @@
               <ColumnDefinition x:Name="IdHeaderIconWidth" Width="32" />
               <ColumnDefinition x:Name="IdHeaderWidth" Width="*" MinWidth="100" />
               <ColumnDefinition x:Name="VersionHeaderIconWidth" Width="32" />
-              <ColumnDefinition x:Name="VersionHeaderWidth" Width="*" MaxWidth="125" />
-              <ColumnDefinition x:Name="NewVersionHeaderIconWidth" Width="32" MaxWidth="{x:Bind NewVersionIconWidth}" />
-              <ColumnDefinition x:Name="NewVersionHeaderWidth" Width="*" MaxWidth="{x:Bind NewVersionLabelWidth}" />
+              <ColumnDefinition x:Name="VersionHeaderWidth" Width="*" MaxWidth="{x:Bind VersionHeaderMaxWidth}" />
+              <ColumnDefinition x:Name="NewVersionHeaderIconWidth" Width="32" MaxWidth="{x:Bind NewVersionHeaderIconMaxWidth}" />
+              <ColumnDefinition x:Name="NewVersionHeaderWidth" Width="*" MaxWidth="{x:Bind NewVersionHeaderMaxWidth}" />
               <ColumnDefinition x:Name="SourceHeaderIconWidth" Width="32" />
-              <ColumnDefinition x:Name="SourceHeaderWidth" Width="*" MaxWidth="150" />
-              <ColumnDefinition x:Name="InstallerHostHeaderWidth" Width="0" MaxWidth="175" />
-              <ColumnDefinition x:Name="DownloadSizeHeaderWidth" Width="0" MaxWidth="125" />
-              <ColumnDefinition x:Name="ReleaseDateHeaderWidth" Width="0" MaxWidth="125" />
+              <ColumnDefinition x:Name="SourceHeaderWidth" Width="*" MaxWidth="{x:Bind SourceHeaderMaxWidth}" />
+              <ColumnDefinition x:Name="InstallerHostHeaderWidth" Width="0" MaxWidth="{x:Bind InstallerHostHeaderMaxWidth}" />
+              <ColumnDefinition x:Name="DownloadSizeHeaderWidth" Width="0" MaxWidth="{x:Bind DownloadSizeHeaderMaxWidth}" />
+              <ColumnDefinition x:Name="ReleaseDateHeaderWidth" Width="0" MaxWidth="{x:Bind ReleaseDateHeaderMaxWidth}" />
               <ColumnDefinition Width="11" />
             </Grid.ColumnDefinitions>
             <Button
@@ -1106,6 +1139,110 @@
             <Button x:Name="InstallerHostHeader" Grid.Column="12" BorderThickness="0" CornerRadius="0" />
             <Button x:Name="DownloadSizeHeader" Grid.Column="13" BorderThickness="0" CornerRadius="0" />
             <Button x:Name="ReleaseDateHeader" AutomationProperties.AutomationId="ReleaseDateHeader" Grid.Column="14" BorderThickness="0" CornerRadius="0" />
+                        <primitives:Thumb
+              x:Name="NameColumnResizeHandle"
+              Grid.Column="3"
+              Tag="Name"
+              Style="{StaticResource ColumnResizeHandleStyle}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Visibility="Collapsed"
+              ToolTipService.ToolTip="Resize column"
+              AutomationProperties.Name="Resize column"
+              DragDelta="ColumnResizeHandle_DragDelta"
+              DragCompleted="ColumnResizeHandle_DragCompleted"
+            />
+                        <primitives:Thumb
+              x:Name="IdColumnResizeHandle"
+              Grid.Column="5"
+              Tag="Id"
+              Style="{StaticResource ColumnResizeHandleStyle}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Visibility="Collapsed"
+              ToolTipService.ToolTip="Resize column"
+              AutomationProperties.Name="Resize column"
+              DragDelta="ColumnResizeHandle_DragDelta"
+              DragCompleted="ColumnResizeHandle_DragCompleted"
+            />
+                        <primitives:Thumb
+              x:Name="VersionColumnResizeHandle"
+              Grid.Column="7"
+              Tag="Version"
+              Style="{StaticResource ColumnResizeHandleStyle}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Visibility="Collapsed"
+              ToolTipService.ToolTip="Resize column"
+              AutomationProperties.Name="Resize column"
+              DragDelta="ColumnResizeHandle_DragDelta"
+              DragCompleted="ColumnResizeHandle_DragCompleted"
+            />
+                        <primitives:Thumb
+              x:Name="NewVersionColumnResizeHandle"
+              Grid.Column="9"
+              Tag="NewVersion"
+              Style="{StaticResource ColumnResizeHandleStyle}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Visibility="Collapsed"
+              ToolTipService.ToolTip="Resize column"
+              AutomationProperties.Name="Resize column"
+              DragDelta="ColumnResizeHandle_DragDelta"
+              DragCompleted="ColumnResizeHandle_DragCompleted"
+            />
+                        <primitives:Thumb
+              x:Name="SourceColumnResizeHandle"
+              Grid.Column="11"
+              Tag="Source"
+              Style="{StaticResource ColumnResizeHandleStyle}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Visibility="Collapsed"
+              ToolTipService.ToolTip="Resize column"
+              AutomationProperties.Name="Resize column"
+              DragDelta="ColumnResizeHandle_DragDelta"
+              DragCompleted="ColumnResizeHandle_DragCompleted"
+            />
+                        <primitives:Thumb
+              x:Name="InstallerHostColumnResizeHandle"
+              Grid.Column="12"
+              Tag="InstallerHost"
+              Style="{StaticResource ColumnResizeHandleStyle}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Visibility="Collapsed"
+              ToolTipService.ToolTip="Resize column"
+              AutomationProperties.Name="Resize column"
+              DragDelta="ColumnResizeHandle_DragDelta"
+              DragCompleted="ColumnResizeHandle_DragCompleted"
+            />
+                        <primitives:Thumb
+              x:Name="DownloadSizeColumnResizeHandle"
+              Grid.Column="13"
+              Tag="DownloadSize"
+              Style="{StaticResource ColumnResizeHandleStyle}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Visibility="Collapsed"
+              ToolTipService.ToolTip="Resize column"
+              AutomationProperties.Name="Resize column"
+              DragDelta="ColumnResizeHandle_DragDelta"
+              DragCompleted="ColumnResizeHandle_DragCompleted"
+            />
+                        <primitives:Thumb
+              x:Name="ReleaseDateColumnResizeHandle"
+              Grid.Column="14"
+              Tag="ReleaseDate"
+              Style="{StaticResource ColumnResizeHandleStyle}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Visibility="Collapsed"
+              ToolTipService.ToolTip="Resize column"
+              AutomationProperties.Name="Resize column"
+              DragDelta="ColumnResizeHandle_DragDelta"
+              DragCompleted="ColumnResizeHandle_DragCompleted"
+            />
           </Grid>
 
           <Toolkit:SwitchPresenter
@@ -1180,6 +1317,8 @@
               TextWrapping="Wrap"
             />
           </Grid>
+            </Grid>
+          </ScrollViewer>
         </Grid>
 
         <!--  Filters/Packages Splitter  -->
