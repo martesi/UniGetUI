@@ -109,5 +109,6 @@ The appended patches retain the individual upstream references.
 ### November 2026 backports
 
 - #5666: show a distinct offered version on the WinUI grid and icon cards.
+- #5668: add saved package-list column widths, resize handles, horizontal scrolling, and a fit-to-window mode to WinUI.
 - #5669: link unavailable manager status pages to their upstream setup guide sections.
 - #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
