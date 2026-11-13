@@ -49,6 +49,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
         public bool ShowCustomPackageIcon;
         public bool ShowDefaultPackageIcon = true;
         public string VersionComboString;
+        public string CardVersionString = "";
         public IconType MainIconId = IconType.Id;
         public IconType AlternateIconId = IconType.Id;
         public ImageSource? MainIconSource;
@@ -209,6 +210,11 @@ namespace UniGetUI.PackageEngine.PackageClasses
             UpdatePackageIcon();
             VersionComboString = package.IsUpgradable
                 ? $"{package.VersionString} -> {package.NewVersionString}"
+                : package.VersionString;
+            CardVersionString = package.IsUpgradable
+                && !string.IsNullOrWhiteSpace(package.NewVersionString)
+                && package.NewVersionString != package.VersionString
+                ? $"{package.VersionString} → {package.NewVersionString}"
                 : package.VersionString;
 
             if (package.Name.ToLower() != package.Id.ToLower())

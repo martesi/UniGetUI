@@ -365,7 +365,7 @@
             FontFamily="Segoe UI Variable Text"
             FontSize="11"
             Opacity="0.5"
-            Text="{x:Bind VersionComboString, Mode=OneWay}"
+            Text="{x:Bind CardVersionString, Mode=OneWay}"
             ToolTipService.ToolTip="{x:Bind Package.VersionString}"
           />
         </Grid>
@@ -507,7 +507,7 @@
             FontFamily="Segoe UI Variable Text"
             FontSize="11"
             Opacity="0.5"
-            Text="{x:Bind VersionComboString, Mode=OneWay}"
+            Text="{x:Bind CardVersionString, Mode=OneWay}"
             ToolTipService.ToolTip="{x:Bind Package.VersionString}"
           />
         </Grid>
