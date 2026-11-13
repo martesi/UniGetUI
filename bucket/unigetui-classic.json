@@ -1,0 +1,107 @@
+{
+    "version": "2026.3.3.1",
+    "description": "UniGetUI Classic - portable Windows package manager GUI",
+    "homepage": "https://github.com/martesi/UniGetUI",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/martesi/UniGetUI/releases/download/v2026.3.3.1/UniGetUI.Installer.x64.exe",
+            "hash": "543c9fcef00e2653baf8fe4aec0e46a1fdbc2f5206c9db7cc0aec87e79d9d616"
+        },
+        "arm64": {
+            "url": "https://github.com/martesi/UniGetUI/releases/download/v2026.3.3.1/UniGetUI.Installer.arm64.exe",
+            "hash": "15f6e28fb9d2019d2c0b394adc72a86065e6a0aa2a55f7fb1c9304ae5c9b9165"
+        }
+    },
+    "installer": {
+        "args": [
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/SP-",
+            "/DIR=\"$dir\"",
+            "/TASKS=portableinstall",
+            "/NoAutoStart"
+        ]
+    },
+    "persist": [
+        "Settings"
+    ],
+    "shortcuts": [
+        [
+            "UniGetUI.exe",
+            "UniGetUI Classic"
+        ]
+    ],
+    "notes": [
+        "Installs in UniGetUI's portable mode.",
+        "The Settings directory is persisted by Scoop across upgrades and uninstall.",
+        "The unigetui:// URL protocol is registered for the current Windows user."
+    ],
+    "post_install": [
+        "$schemePath = 'Software\\Classes\\unigetui'",
+        "$commandPath = \"$schemePath\\shell\\open\\command\"",
+        "$exe = [System.IO.Path]::GetFullPath((Join-Path $dir 'UniGetUI.exe'))",
+        "$expectedCommand = '\"' + $exe + '\" \"%1\"'",
+        "$registry = [Microsoft.Win32.Registry]::CurrentUser",
+        "$existingScheme = $registry.OpenSubKey($schemePath)",
+        "if ($existingScheme) {",
+        "    $existingScheme.Dispose()",
+        "    $existingCommandKey = $registry.OpenSubKey($commandPath)",
+        "    if (-not $existingCommandKey) {",
+        "        Write-Warning 'An existing unigetui:// registration was found. It was not changed.'",
+        "        return",
+        "    }",
+        "    try { $existingCommand = [string]$existingCommandKey.GetValue('') } finally { $existingCommandKey.Dispose() }",
+        "    if ($existingCommand -ine $expectedCommand) {",
+        "        Write-Warning 'Another installation owns unigetui://. Its registration was not changed.'",
+        "        return",
+        "    }",
+        "}",
+        "$rootKey = $registry.CreateSubKey($schemePath)",
+        "try {",
+        "    $rootKey.SetValue('', 'URL:UniGetUI Protocol', [Microsoft.Win32.RegistryValueKind]::String)",
+        "    $rootKey.SetValue('URL Protocol', '', [Microsoft.Win32.RegistryValueKind]::String)",
+        "    $iconKey = $rootKey.CreateSubKey('DefaultIcon')",
+        "    try { $iconKey.SetValue('', \"$exe,0\", [Microsoft.Win32.RegistryValueKind]::String) } finally { $iconKey.Dispose() }",
+        "    $commandKey = $rootKey.CreateSubKey('shell\\open\\command')",
+        "    try { $commandKey.SetValue('', $expectedCommand, [Microsoft.Win32.RegistryValueKind]::String) } finally { $commandKey.Dispose() }",
+        "} finally { $rootKey.Dispose() }"
+    ],
+    "pre_uninstall": [
+        "$schemePath = 'Software\\Classes\\unigetui'",
+        "$commandPath = \"$schemePath\\shell\\open\\command\"",
+        "$appRoot = Split-Path -Parent $dir",
+        "$versionExe = [System.IO.Path]::GetFullPath((Join-Path $dir 'UniGetUI.exe'))",
+        "$currentExe = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $appRoot 'current') 'UniGetUI.exe'))",
+        "$expectedCommands = @(",
+        "    ('\"' + $versionExe + '\" \"%1\"'),",
+        "    ('\"' + $currentExe + '\" \"%1\"')",
+        ")",
+        "$registry = [Microsoft.Win32.Registry]::CurrentUser",
+        "$commandKey = $registry.OpenSubKey($commandPath)",
+        "if ($commandKey) {",
+        "    try { $registeredCommand = [string]$commandKey.GetValue('') } finally { $commandKey.Dispose() }",
+        "    if ($expectedCommands -contains $registeredCommand) {",
+        "        $registry.DeleteSubKeyTree($schemePath, $false)",
+        "    }",
+        "}"
+    ],
+    "checkver": {
+        "github": "https://github.com/martesi/UniGetUI",
+        "regex": "v([\\d.]+)"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/martesi/UniGetUI/releases/download/v$version/UniGetUI.Installer.x64.exe"
+            },
+            "arm64": {
+                "url": "https://github.com/martesi/UniGetUI/releases/download/v$version/UniGetUI.Installer.arm64.exe"
+            }
+        },
+        "hash": {
+            "mode": "github"
+        }
+    }
+}
