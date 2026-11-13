@@ -1,0 +1,809 @@
+using System.Collections.Concurrent;
+using UniGetUI.Core.Classes;
+using UniGetUI.Core.Data;
+using UniGetUI.Core.Logging;
+using UniGetUI.Core.SettingsEngine;
+using UniGetUI.Core.Tools;
+using UniGetUI.Interface.Enums;
+using UniGetUI.PackageEngine.Classes.Packages.Classes;
+using UniGetUI.PackageEngine.Enums;
+using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.Interfaces.ManagerProviders;
+using UniGetUI.PackageEngine.PackageClasses;
+using UniGetUI.PackageEngine.ManagerClasses.Manager;
+using UniGetUI.PackageEngine.PackageLoader;
+using UniGetUI.PackageEngine.Serializable;
+using UniGetUI.PackageOperations;
+#if WINDOWS
+using UniGetUI.PackageEngine.Managers.WingetManager;
+#endif
+
+namespace UniGetUI.PackageEngine.Operations
+{
+    public abstract class PackageOperation : AbstractProcessOperation
+    {
+        protected List<string> DesktopShortcutsBeforeStart = [];
+
+        public readonly IPackage Package;
+        public readonly InstallOptions Options;
+        public readonly OperationType Role;
+        private readonly UninstallPackageOperation? _uninstallBeforeReinstall;
+        private bool _reinstallsThisAttempt;
+        private OperationType CommandRole => _reinstallsThisAttempt ? OperationType.Install : Role;
+        public Task SuccessHandled { get; private set; } = Task.CompletedTask;
+
+        protected abstract Task HandleSuccess();
+        protected abstract Task HandleFailure();
+        protected abstract void Initialize();
+
+        public PackageOperation(
+            IPackage package,
+            InstallOptions options,
+            OperationType role,
+            bool IgnoreParallelInstalls = false,
+            AbstractOperation? req = null
+        )
+            : base(
+                !IgnoreParallelInstalls,
+                _getPreInstallOps(options, role, req),
+                _getPostInstallOps(options, role, package)
+            )
+        {
+            Package = package;
+            Role = role;
+            if (ReinstallsOnUpdate(package, options, role))
+            {
+                Options = PinReinstallVersion(package, options);
+                Logger.Info(
+                    $"Queuing {package} version {package.VersionString} for uninstall before reinstalling version {package.NewVersionString}..."
+                );
+                InstallOptions uninstallOptions = options.Copy();
+                uninstallOptions.RemoveDataOnUninstall = false;
+                uninstallOptions.KillBeforeOperation = [];
+                _uninstallBeforeReinstall = new UninstallPackageOperation(package, uninstallOptions)
+                {
+                    IsReinstallStep = true,
+                };
+                OverridenInstallationOptions overridesBeforeUninstall = package.OverridenOptions;
+                _uninstallBeforeReinstall.OperationSucceeded += (_, _) =>
+                    package.OverridenOptions = overridesBeforeUninstall;
+                _reinstallsThisAttempt = true;
+            }
+            else
+            {
+                Options = options;
+            }
+
+            Initialize();
+
+            Enqueued += (_, _) =>
+            {
+                ApplyCapabilities(
+                    RequiresAdminRights(),
+                    Options.InteractiveInstallation,
+                    (Options.SkipHashCheck && Role is not OperationType.Uninstall),
+                    Package.OverridenOptions.Scope ?? Options.InstallationScope
+                );
+
+                Package.SetTag(PackageTag.OnQueue);
+            };
+            StatusChanged += (_, status) =>
+            {
+                if (status is OperationStatus.Canceled)
+                    Package.SetTag(PackageTag.Default);
+            };
+            OperationSucceeded += (_, _) => Package.Manager.InvalidateInstalledPackages();
+            OperationSucceeded += (_, _) => SuccessHandled = HandleSuccess();
+            OperationFailed += (_, _) => HandleFailure();
+        }
+
+        private bool RequiresAdminRights() =>
+            !Settings.Get(Settings.K.ProhibitElevation)
+            && (Package.OverridenOptions.RunAsAdministrator is true || Options.RunAsAdministrator);
+
+        protected override void ApplyRetryAction(string retryMode)
+        {
+            switch (retryMode)
+            {
+                case RetryMode.Retry_AsAdmin:
+                    Options.RunAsAdministrator = true;
+                    break;
+                case RetryMode.Retry_Interactive:
+                    Options.InteractiveInstallation = true;
+                    break;
+                case RetryMode.Retry_SkipIntegrity:
+                    Options.SkipHashCheck = true;
+                    break;
+                case RetryMode.Retry:
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        $"Retry mode {retryMode} is not supported in this context"
+                    );
+            }
+            if (
+                _uninstallBeforeReinstall is not null
+                && _uninstallBeforeReinstall.Status is not OperationStatus.Succeeded
+            )
+            {
+                _uninstallBeforeReinstall.Options.RunAsAdministrator |= Options.RunAsAdministrator;
+                _uninstallBeforeReinstall.Options.InteractiveInstallation |= Options.InteractiveInstallation;
+            }
+            Metadata.OperationInformation =
+                "Retried package operation for Package="
+                + Package.Id
+                + " with Manager="
+                + Package.Manager.Name
+                + "\nUpdated installation options: "
+                + Options.ToString()
+                + "\nOverriden options: "
+                + Package.OverridenOptions.ToString();
+        }
+
+        protected override async Task<OperationVeredict> PerformOperation()
+        {
+            // Observational stage marker only: structured progress starts as indeterminate
+            // with the role's stage label (e.g. "Installing..."). Re-reported on every
+            // attempt, so AutoRetry restarts also reset any previous speed. This changes
+            // nothing about execution, retries, elevation, proxy, or result handling.
+            ReportProgress(
+                Role switch
+                {
+                    OperationType.Install => OperationProgress.ForStage(
+                        OperationProgressStage.Installing
+                    ),
+                    OperationType.Update => OperationProgress.ForStage(
+                        OperationProgressStage.Updating
+                    ),
+                    OperationType.Uninstall => OperationProgress.ForStage(
+                        OperationProgressStage.Uninstalling
+                    ),
+                    _ => OperationProgress.Unknown,
+                }
+            );
+
+            {
+                if (!Package.Manager.Capabilities.SerializesOperations)
+                    return await PerformLocalOperation();
+
+                SemaphoreSlim gate = ManagerOperationGates.GetOrAdd(
+                    Package.Manager.Name,
+                    _ => new SemaphoreSlim(1, 1)
+                );
+                if (!await gate.WaitAsync(0))
+                {
+                    Line(
+                        CoreTools.Translate(
+                            "Waiting for another {0} operation to finish...",
+                            Package.Manager.DisplayName
+                        ),
+                        LineType.ProgressIndicator
+                    );
+                    IsWaitingForManager = true;
+                    try
+                    {
+                        await gate.WaitAsync(CancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return OperationVeredict.Canceled;
+                    }
+                    finally
+                    {
+                        IsWaitingForManager = false;
+                    }
+                }
+
+                try
+                {
+                    return await PerformLocalOperation();
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }
+
+        }
+
+        private async Task<OperationVeredict> PerformLocalOperation()
+        {
+            if (Package.Manager.OperationHelper is IManagedPackageOperationHelper managed)
+            {
+                try
+                {
+                    var result = await managed.TryPerformAsync(Package, Options, CommandRole,
+                        message => Line(message, LineType.Information), ReportProgress, CancellationToken);
+                    if (result is not null)
+                        return result.Value;
+                    // Resolution may have pinned an initially unversioned request before fallback.
+                    PrepareProcessStartInfo();
+                }
+                catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
+                {
+                    return OperationVeredict.Canceled;
+                }
+            }
+            return await base.PerformOperation();
+        }
+
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> ManagerOperationGates =
+            new();
+
+        protected sealed override void PrepareProcessStartInfo()
+        {
+            bool IsAdmin = CoreTools.IsAdministrator();
+            Package.SetTag(PackageTag.OnQueue);
+            var operationParameters = Package.Manager.OperationHelper.GetParameters(
+                Package,
+                Options,
+                CommandRole
+            );
+            var callVector = Package.Manager.Status.OperationCallArgs;
+
+            if (RequiresAdminRights() && IsAdmin is false)
+            {
+                IsAdmin = true;
+                if (
+                    OperatingSystem.IsLinux()
+                    || Settings.Get(Settings.K.DoCacheAdminRights)
+                    || Settings.Get(Settings.K.DoCacheAdminRightsForBatches)
+                )
+                {
+                    RequestCachingOfUACPrompt();
+                }
+
+                process.StartInfo.FileName = CoreData.ElevatorPath;
+                if (callVector.Count > 0)
+                {
+                    SetArgumentVector(
+                        [
+                            .. ElevatorArgumentPrefix(),
+                            Package.Manager.Status.ExecutablePath,
+                            .. callVector,
+                            .. operationParameters,
+                        ]
+                    );
+                }
+                else
+                {
+                    process.StartInfo.Arguments =
+                        $"{CoreData.ElevatorArgs} \"{Package.Manager.Status.ExecutablePath}\" {Package.Manager.Status.ExecutableCallArgs} {string.Join(" ", operationParameters)}".TrimStart();
+                }
+            }
+            else
+            {
+                process.StartInfo.FileName = Package.Manager.Status.ExecutablePath;
+                if (callVector.Count > 0)
+                {
+                    SetArgumentVector([.. callVector, .. operationParameters]);
+                }
+                else
+                {
+                    process.StartInfo.Arguments =
+                        $"{Package.Manager.Status.ExecutableCallArgs} {string.Join(" ", operationParameters)}";
+                }
+            }
+
+            if (IsAdmin && IsWinGetManager(Package.Manager))
+            {
+                RedirectWinGetTempFolder();
+            }
+
+            process.StartInfo.StandardOutputEncoding = Package.Manager.OutputEncoding;
+            process.StartInfo.StandardErrorEncoding = Package.Manager.OutputEncoding;
+
+            ApplyCapabilities(
+                IsAdmin,
+                Options.InteractiveInstallation,
+                (Options.SkipHashCheck && Role is not OperationType.Uninstall),
+                Package.OverridenOptions.Scope ?? Options.InstallationScope
+            );
+        }
+
+        protected sealed override Task<OperationVeredict> GetProcessVeredict(
+            int ReturnCode,
+            List<string> Output
+        )
+        {
+            var result = Package.Manager.OperationHelper.GetResult(Package, CommandRole, Output, ReturnCode);
+            if (result is OperationVeredict.Failure
+                && Output.Any(line => line.Contains("[WinError 32]", StringComparison.Ordinal)))
+            {
+                Metadata.FailureMessage = CoreTools.Translate(
+                    "A file of {package} is in use by another program. Close any program that may be using it, then try again",
+                    new Dictionary<string, object?> { { "package", Package.Name } }
+                );
+            }
+            return Task.FromResult(result);
+        }
+
+        private static bool IsWinGetManager(IPackageManager manager)
+        {
+#if WINDOWS
+            return manager is WinGet;
+#else
+            return false;
+#endif
+        }
+
+        protected async Task<IPackage> ResolveInstalledPackageSnapshotAsync(
+            string fallbackVersion,
+            bool preferFallbackVersionWhenMissing = false
+        )
+        {
+            try
+            {
+                var installedMatches = await Task.Run(() =>
+                    Package
+                        .Manager.GetInstalledPackages()
+                        .Where(candidate => candidate.IsEquivalentTo(Package))
+                        .ToArray()
+                );
+
+                if (installedMatches.Length > 0)
+                {
+                    if (!string.IsNullOrWhiteSpace(fallbackVersion))
+                    {
+                        var exactMatch = installedMatches.FirstOrDefault(candidate =>
+                            candidate.VersionString.Equals(
+                                fallbackVersion,
+                                StringComparison.OrdinalIgnoreCase
+                            )
+                        );
+                        if (exactMatch is not null)
+                        {
+                            return exactMatch;
+                        }
+
+                        if (preferFallbackVersionWhenMissing)
+                        {
+                            return CreateSyntheticInstalledPackage(fallbackVersion);
+                        }
+                    }
+
+                    return installedMatches
+                        .OrderByDescending(candidate => candidate.NormalizedVersion)
+                        .First();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(
+                    $"Could not resolve the installed snapshot for package {Package.Id}; falling back to synthetic state"
+                );
+                Logger.Warn(ex);
+            }
+
+            return CreateSyntheticInstalledPackage(fallbackVersion);
+        }
+
+        private IPackage CreateSyntheticInstalledPackage(string version)
+        {
+            return new Package(
+                Package.Name,
+                Package.Id,
+                version,
+                Package.Source,
+                Package.Manager,
+                Package.OverridenOptions
+            );
+        }
+
+        public override Task<Uri> GetOperationIcon()
+        {
+            return TaskRecycler<Uri>.RunOrAttachAsync(Package.GetIconUrl);
+        }
+
+        private static IReadOnlyList<InnerOperation> _getPreInstallOps(
+            InstallOptions opts,
+            OperationType role,
+            AbstractOperation? preReq = null
+        )
+        {
+            List<InnerOperation> l = new();
+            if (preReq is not null)
+                l.Add(new(preReq, true));
+
+            foreach (var process in opts.KillBeforeOperation)
+                l.Add(new InnerOperation(new KillProcessOperation(process), mustSucceed: true));
+
+            if (role is OperationType.Install && opts.PreInstallCommand.Any())
+                l.Add(
+                    new(new PrePostOperation(opts.PreInstallCommand), opts.AbortOnPreInstallFail)
+                );
+            else if (role is OperationType.Update && opts.PreUpdateCommand.Any())
+                l.Add(new(new PrePostOperation(opts.PreUpdateCommand), opts.AbortOnPreUpdateFail));
+            else if (role is OperationType.Uninstall && opts.PreUninstallCommand.Any())
+                l.Add(
+                    new(
+                        new PrePostOperation(opts.PreUninstallCommand),
+                        opts.AbortOnPreUninstallFail
+                    )
+                );
+
+            return l;
+        }
+
+        public static bool SupportsUninstallBeforeUpdate(IPackage package)
+        {
+            var capabilities = package.Manager.Capabilities;
+            string uninstallVerb = package.Manager.Properties.UninstallVerb;
+            return capabilities.CanReinstallOnUpdate
+                && !string.IsNullOrWhiteSpace(uninstallVerb)
+                && !uninstallVerb.Equals(
+                    "Unset",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                && (
+                    !capabilities.ReinstallsOnUpdateOnlyGlobalPackages
+                    || string.Equals(
+                        package.OverridenOptions.Scope,
+                        PackageScope.Global.ToString(),
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                );
+        }
+
+        private static bool ReinstallsOnUpdate(
+            IPackage package,
+            InstallOptions options,
+            OperationType role
+        ) =>
+            role is OperationType.Update
+            && options.UninstallBeforeUpdate
+            && package.IsUpgradable
+            && SupportsUninstallBeforeUpdate(package);
+
+        private static InstallOptions PinReinstallVersion(
+            IPackage package,
+            InstallOptions options
+        )
+        {
+            var pinned = options.Copy();
+            var capabilities = package.Manager.Capabilities;
+            if (!string.IsNullOrWhiteSpace(pinned.Version) && capabilities.SupportsCustomVersionsOnUpdate)
+                return pinned;
+
+            pinned.Version =
+                package.IsUpgradable && capabilities.SupportsCustomVersions
+                    ? package.NewVersionString
+                    : "";
+            return pinned;
+        }
+
+        private static bool IsKnownToBeUninstalled(IPackage package)
+        {
+            InstalledPackagesLoader installed = InstalledPackagesLoader.Instance;
+            if (!installed.IsLoaded)
+                return false;
+            if (package.Manager is PackageManager manager && manager.LastInstalledListingFailed)
+                return false;
+            if (installed.GetEquivalentPackages(package).Any())
+                return false;
+
+            Logger.Info(
+                $"{package} is no longer installed; proceeding with the install without an uninstall step."
+            );
+            return true;
+        }
+
+        protected override IReadOnlyList<InnerOperation> GetAttemptPreOperations()
+        {
+            List<InnerOperation> operations = [.. base.GetAttemptPreOperations()];
+            if (_uninstallBeforeReinstall is null)
+                return operations;
+
+            bool alreadyUninstalled =
+                _uninstallBeforeReinstall.Status is OperationStatus.Succeeded
+                || IsKnownToBeUninstalled(Package);
+            _reinstallsThisAttempt = true;
+            if (!alreadyUninstalled)
+                operations.Add(new InnerOperation(_uninstallBeforeReinstall, mustSucceed: true));
+            return operations;
+        }
+
+        private static IReadOnlyList<InnerOperation> _getPostInstallOps(
+            InstallOptions opts,
+            OperationType role,
+            IPackage package
+        )
+        {
+            List<InnerOperation> l = new();
+
+            if (role is OperationType.Install && opts.PostInstallCommand.Any())
+                l.Add(new(new PrePostOperation(opts.PostInstallCommand), false));
+            else if (role is OperationType.Update && opts.PostUpdateCommand.Any())
+                l.Add(new(new PrePostOperation(opts.PostUpdateCommand), false));
+            else if (role is OperationType.Uninstall && opts.PostUninstallCommand.Any())
+                l.Add(new(new PrePostOperation(opts.PostUninstallCommand), false));
+
+            static bool IsSupersededBy(IPackage installed, IPackage update) =>
+                update.Manager.CompareVersions(installed.VersionString, update.NewVersionString)
+                    is { } comparison
+                    ? comparison < 0
+                    : installed.NormalizedVersion < update.NormalizedNewVersion;
+
+            if (role is OperationType.Update && opts.UninstallPreviousVersionsOnUpdate)
+            {
+                bool reinstalls = ReinstallsOnUpdate(package, opts, role);
+                var capabilities = package.Manager.Capabilities;
+                string? updatedScope =
+                    capabilities.SupportsCustomScopes
+                    && capabilities.SupportsCustomScopesOnUpdate
+                    && opts.InstallationScope.Length > 0
+                        ? opts.InstallationScope
+                        : package.OverridenOptions.Scope;
+
+                var matches = InstalledPackagesLoader.Instance.Packages.Where(p =>
+                    p.IsEquivalentTo(package)
+                    && !(reinstalls && p.VersionString.Equals(package.VersionString, StringComparison.OrdinalIgnoreCase))
+                    && (
+                        string.IsNullOrEmpty(p.OverridenOptions.Scope)
+                        || string.IsNullOrEmpty(updatedScope)
+                        || p.OverridenOptions.Scope == updatedScope
+                    )
+                    && IsSupersededBy(p, package)
+                );
+                foreach (var match in matches)
+                {
+                    Logger.Info(
+                        $"Queuing {match} version {match.VersionString} for automatic uninstall after update..."
+                    );
+                    l.Add(new(new UninstallPackageOperation(match, opts.Copy()), false));
+                }
+            }
+
+            return l;
+        }
+    }
+
+    /*
+     *
+     *
+     *
+     * PER-OPERATION PACKAGE OPERATIONS
+     *
+     *
+     *
+     */
+    public class InstallPackageOperation : PackageOperation
+    {
+        public InstallPackageOperation(
+            IPackage package,
+            InstallOptions options,
+            bool IgnoreParallelInstalls = false,
+            AbstractOperation? req = null
+        )
+            : base(package, options, OperationType.Install, IgnoreParallelInstalls, req) { }
+
+        protected override Task HandleFailure()
+        {
+            Package.SetTag(PackageTag.Failed);
+            return Task.CompletedTask;
+        }
+
+        protected override async Task HandleSuccess()
+        {
+            Package.SetTag(PackageTag.AlreadyInstalled);
+            bool explicitVersionRequested = !string.IsNullOrWhiteSpace(Options.Version);
+            var installedPackage = await ResolveInstalledPackageSnapshotAsync(
+                explicitVersionRequested ? Options.Version : Package.VersionString,
+                preferFallbackVersionWhenMissing: explicitVersionRequested
+            );
+            await InstalledPackagesLoader.Instance.AddForeign(installedPackage);
+
+            if (Settings.Get(Settings.K.AskToDeleteNewDesktopShortcuts))
+            {
+                DesktopShortcutsDatabase.HandleNewShortcuts(DesktopShortcutsBeforeStart);
+            }
+        }
+
+        protected override void Initialize()
+        {
+            Metadata.OperationInformation =
+                "Package install operation for Package="
+                + Package.Id
+                + " with Manager="
+                + Package.Manager.Name
+                + "\nInstallation options: "
+                + Options.ToString()
+                + "\nOverriden options: "
+                + Package.OverridenOptions.ToString();
+
+            Metadata.Title = CoreTools.Translate(
+                "{package} Installation",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.Status = CoreTools.Translate("{0} is being installed", Package.Name);
+            Metadata.SuccessTitle = CoreTools.Translate("Installation succeeded");
+            Metadata.SuccessMessage = CoreTools.Translate(
+                "{package} was installed successfully",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.FailureTitle = CoreTools.Translate(
+                "Installation failed",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.FailureMessage = CoreTools.Translate(
+                "{package} could not be installed",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+
+            if (Settings.Get(Settings.K.AskToDeleteNewDesktopShortcuts))
+            {
+                DesktopShortcutsBeforeStart = DesktopShortcutsDatabase.GetShortcutsOnDisk();
+            }
+        }
+    }
+
+    public class UpdatePackageOperation : PackageOperation
+    {
+        public UpdatePackageOperation(
+            IPackage package,
+            InstallOptions options,
+            bool IgnoreParallelInstalls = false,
+            AbstractOperation? req = null
+        )
+            : base(package, options, OperationType.Update, IgnoreParallelInstalls, req) { }
+
+        public bool KeepUpdatesPaused { get; init; }
+
+        protected override Task HandleFailure()
+        {
+            Package.SetTag(PackageTag.Failed);
+            return Task.CompletedTask;
+        }
+
+        protected override async Task HandleSuccess()
+        {
+            Package.SetTag(PackageTag.Default);
+            Package.GetAvailablePackage()?.SetTag(PackageTag.AlreadyInstalled);
+
+            foreach (var p in Package.GetInstalledPackages())
+                p.SetTag(PackageTag.Default);
+
+            UpgradablePackagesLoader.Instance.Remove(Package);
+            InstalledPackagesLoader.Instance.Remove(Package);
+
+            bool explicitVersionRequested =
+                !string.IsNullOrWhiteSpace(Options.Version)
+                && Package.Manager.Capabilities.SupportsCustomVersionsOnUpdate;
+            string targetVersion = explicitVersionRequested
+                ? Options.Version
+                : string.IsNullOrWhiteSpace(Package.NewVersionString)
+                    ? Package.VersionString
+                    : Package.NewVersionString;
+            IgnoredUpdatesDatabase.ForgetAvailableUpdate(Package, targetVersion);
+            var installedPackage = await ResolveInstalledPackageSnapshotAsync(
+                targetVersion,
+                preferFallbackVersionWhenMissing: explicitVersionRequested
+            );
+            await InstalledPackagesLoader.Instance.AddForeign(installedPackage);
+
+            if (Settings.Get(Settings.K.AskToDeleteNewDesktopShortcuts))
+            {
+                DesktopShortcutsDatabase.HandleNewShortcuts(DesktopShortcutsBeforeStart);
+            }
+
+            if (
+                !KeepUpdatesPaused
+                && await Package.HasUpdatesIgnoredAsync()
+                && await Package.GetIgnoredUpdatesVersionAsync() != "*"
+            )
+                await Package.RemoveFromIgnoredUpdatesAsync();
+        }
+
+        protected override void Initialize()
+        {
+            Metadata.OperationInformation =
+                "Package update operation for Package="
+                + Package.Id
+                + " with Manager="
+                + Package.Manager.Name
+                + "\nInstallation options: "
+                + Options.ToString()
+                + "\nOverriden options: "
+                + Package.OverridenOptions.ToString()
+                + "\nVersion: "
+                + Package.VersionString
+                + " -> "
+                + Package.NewVersionString;
+
+            Metadata.Title = CoreTools.Translate(
+                "{package} Update",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.Status = CoreTools.Translate(
+                "{0} is being updated to version {1}",
+                Package.Name,
+                Package.NewVersionString
+            );
+            Metadata.SuccessTitle = CoreTools.Translate("Update succeeded");
+            Metadata.SuccessMessage = CoreTools.Translate(
+                "{package} was updated successfully",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.FailureTitle = CoreTools.Translate(
+                "Update failed",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.FailureMessage = CoreTools.Translate(
+                "{package} could not be updated",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+
+            if (Settings.Get(Settings.K.AskToDeleteNewDesktopShortcuts))
+            {
+                DesktopShortcutsBeforeStart = DesktopShortcutsDatabase.GetShortcutsOnDisk();
+            }
+        }
+    }
+
+    public class UninstallPackageOperation : PackageOperation
+    {
+        internal bool IsReinstallStep { get; init; }
+
+        public UninstallPackageOperation(
+            IPackage package,
+            InstallOptions options,
+            bool IgnoreParallelInstalls = false,
+            AbstractOperation? req = null
+        )
+            : base(package, options, OperationType.Uninstall, IgnoreParallelInstalls, req) { }
+
+        protected override Task HandleFailure()
+        {
+            Package.SetTag(PackageTag.Failed);
+            return Task.CompletedTask;
+        }
+
+        protected override Task HandleSuccess()
+        {
+            if (IsReinstallStep)
+            {
+                InstalledPackagesLoader.Instance.Remove(Package);
+                return Task.CompletedTask;
+            }
+
+            Package.SetTag(PackageTag.Default);
+            Package.GetAvailablePackage()?.SetTag(PackageTag.Default);
+            UpgradablePackagesLoader.Instance.Remove(Package);
+            InstalledPackagesLoader.Instance.Remove(Package);
+
+            return Task.CompletedTask;
+        }
+
+        protected override void Initialize()
+        {
+            Metadata.OperationInformation =
+                "Package uninstall operation for Package="
+                + Package.Id
+                + " with Manager="
+                + Package.Manager.Name
+                + "\nInstallation options: "
+                + Options.ToString()
+                + "\nOverriden options: "
+                + Package.OverridenOptions.ToString();
+
+            Metadata.Title = CoreTools.Translate(
+                "{package} Uninstall",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.Status = CoreTools.Translate("{0} is being uninstalled", Package.Name);
+            Metadata.SuccessTitle = CoreTools.Translate("Uninstall succeeded");
+            Metadata.SuccessMessage = CoreTools.Translate(
+                "{package} was uninstalled successfully",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.FailureTitle = CoreTools.Translate(
+                "Uninstall failed",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+            Metadata.FailureMessage = CoreTools.Translate(
+                "{package} could not be uninstalled",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+        }
+    }
+}
