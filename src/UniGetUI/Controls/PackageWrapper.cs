@@ -84,8 +84,7 @@ namespace UniGetUI.PackageEngine.PackageClasses
         public long DownloadSizeBytes { get; private set; }
         public DateTime ReleaseDate { get; private set; }
 
-        private GridLength WidthFor(string column) =>
-            new(_page.IsColumnVisible(column) ? 1 : 0, GridUnitType.Star);
+        private GridLength WidthFor(string column) => _page.GetPackageColumnWidth(column);
         private Visibility VisibilityFor(string column) =>
             _page.IsColumnVisible(column) ? Visibility.Visible : Visibility.Collapsed;
 
@@ -97,8 +96,15 @@ namespace UniGetUI.PackageEngine.PackageClasses
         public GridLength InstallerHostColumnWidth => WidthFor("InstallerHost");
         public GridLength DownloadSizeColumnWidth => WidthFor("DownloadSize");
         public GridLength ReleaseDateColumnWidth => WidthFor("ReleaseDate");
-        public double NameColumnMinWidth => _page.IsColumnVisible("Name") ? 125 : 0;
-        public double IdColumnMinWidth => _page.IsColumnVisible("Id") ? 125 : 0;
+        public double ListColumnMinWidth => _page.ListColumnMinWidth;
+        public double NameColumnMinWidth => _page.IsColumnVisible("Name") ? (_page.IsFixedPackageListColumnSizing ? 0 : 125) : 0;
+        public double IdColumnMinWidth => _page.IsColumnVisible("Id") ? (_page.IsFixedPackageListColumnSizing ? 0 : 125) : 0;
+        public double VersionColumnMaxWidth => _page.GetColumnMaxWidth("Version");
+        public double NewVersionColumnMaxWidth => _page.GetColumnMaxWidth("NewVersion");
+        public double SourceColumnMaxWidth => _page.GetColumnMaxWidth("Source");
+        public double InstallerHostColumnMaxWidth => _page.GetColumnMaxWidth("InstallerHost");
+        public double DownloadSizeColumnMaxWidth => _page.GetColumnMaxWidth("DownloadSize");
+        public double ReleaseDateColumnMaxWidth => _page.GetColumnMaxWidth("ReleaseDate");
         public Visibility NameColumnVisibility => VisibilityFor("Name");
         public Visibility IdColumnVisibility => VisibilityFor("Id");
         public Visibility VersionColumnVisibility => VisibilityFor("Version");
@@ -116,7 +122,9 @@ namespace UniGetUI.PackageEngine.PackageClasses
                 nameof(NameColumnWidth), nameof(IdColumnWidth), nameof(VersionColumnWidth),
                 nameof(NewVersionColumnWidth), nameof(SourceColumnWidth),
                 nameof(InstallerHostColumnWidth), nameof(DownloadSizeColumnWidth),
-                nameof(ReleaseDateColumnWidth), nameof(NameColumnMinWidth), nameof(IdColumnMinWidth),
+                nameof(ReleaseDateColumnWidth), nameof(ListColumnMinWidth), nameof(NameColumnMinWidth), nameof(IdColumnMinWidth),
+                nameof(VersionColumnMaxWidth), nameof(NewVersionColumnMaxWidth), nameof(SourceColumnMaxWidth),
+                nameof(InstallerHostColumnMaxWidth), nameof(DownloadSizeColumnMaxWidth), nameof(ReleaseDateColumnMaxWidth),
                 nameof(NameColumnVisibility), nameof(IdColumnVisibility), nameof(VersionColumnVisibility),
                 nameof(NewVersionColumnVisibility), nameof(SourceColumnVisibility),
                 nameof(InstallerHostColumnVisibility), nameof(DownloadSizeColumnVisibility),

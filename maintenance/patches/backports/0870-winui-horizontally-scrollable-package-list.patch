@@ -1,0 +1,521 @@
+From 91f84faae9b4020a9a9972db59bcbd8a72fd73c0 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 19:16:24 +0000
+Subject: [PATCH] Port package-list column sizing to Classic WinUI
+
+Add fixed saved widths, resize handles, horizontal scrolling, and a fit-to-window mode.
+
+Upstream-Commit: 46692b44fc0cae1e5c1bccfb0df11c3c3e8e9217
+Upstream-PR: Devolutions/UniGetUI#5668
+
+---
+diff --git a/maintenance/PATCH_STACK.md b/maintenance/PATCH_STACK.md
+--- a/maintenance/PATCH_STACK.md
++++ b/maintenance/PATCH_STACK.md
+@@ -109,5 +109,6 @@ The appended patches retain the individual upstream references.
+ ### November 2026 backports
+ 
+ - #5666: show a distinct offered version on the WinUI grid and icon cards.
++- #5668: add saved package-list column widths, resize handles, horizontal scrolling, and a fit-to-window mode to WinUI.
+ - #5669: link unavailable manager status pages to their upstream setup guide sections.
+ - #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -877,5 +877,6 @@
+   "Installer host": "Installer host",
+   "Download size": "Download size",
+   "Release date": "Release date",
++  "Fit columns to the window": "Fit columns to the window",
+   "How to set up {0}": "How to set up {0}"
+ }
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+@@ -75,6 +75,8 @@ public enum K
+         ShowInstallerHostColumn,
+         ShowDownloadSizeColumn,
+         ShowReleaseDateColumn,
++        DisablePackageListColumnAutoFit,
++        PackageListColumnWidths,
+         DisableInstantSearch,
+         SidepanelWidths,
+         HideToggleFilters,
+@@ -198,6 +200,8 @@ public static string ResolveKey(K key)
+             K.ShowInstallerHostColumn => "ShowInstallerHostColumn",
+             K.ShowDownloadSizeColumn => "ShowDownloadSizeColumn",
+             K.ShowReleaseDateColumn => "ShowReleaseDateColumn",
++            K.DisablePackageListColumnAutoFit => "DisablePackageListColumnAutoFit",
++            K.PackageListColumnWidths => "PackageListColumnWidths",
+             K.DisableInstantSearch => "DisableInstantSearch",
+             K.SidepanelWidths => "SidepanelWidths",
+             K.HideToggleFilters => "HideToggleFilters",
+diff --git a/src/UniGetUI/Controls/PackageWrapper.cs b/src/UniGetUI/Controls/PackageWrapper.cs
+--- a/src/UniGetUI/Controls/PackageWrapper.cs
++++ b/src/UniGetUI/Controls/PackageWrapper.cs
+@@ -84,8 +84,7 @@ public Uri? PackageIcon
+         public long DownloadSizeBytes { get; private set; }
+         public DateTime ReleaseDate { get; private set; }
+ 
+-        private GridLength WidthFor(string column) =>
+-            new(_page.IsColumnVisible(column) ? 1 : 0, GridUnitType.Star);
++        private GridLength WidthFor(string column) => _page.GetPackageColumnWidth(column);
+         private Visibility VisibilityFor(string column) =>
+             _page.IsColumnVisible(column) ? Visibility.Visible : Visibility.Collapsed;
+ 
+@@ -97,8 +96,15 @@ private Visibility VisibilityFor(string column) =>
+         public GridLength InstallerHostColumnWidth => WidthFor("InstallerHost");
+         public GridLength DownloadSizeColumnWidth => WidthFor("DownloadSize");
+         public GridLength ReleaseDateColumnWidth => WidthFor("ReleaseDate");
+-        public double NameColumnMinWidth => _page.IsColumnVisible("Name") ? 125 : 0;
+-        public double IdColumnMinWidth => _page.IsColumnVisible("Id") ? 125 : 0;
++        public double ListColumnMinWidth => _page.ListColumnMinWidth;
++        public double NameColumnMinWidth => _page.IsColumnVisible("Name") ? (_page.IsFixedPackageListColumnSizing ? 0 : 125) : 0;
++        public double IdColumnMinWidth => _page.IsColumnVisible("Id") ? (_page.IsFixedPackageListColumnSizing ? 0 : 125) : 0;
++        public double VersionColumnMaxWidth => _page.GetColumnMaxWidth("Version");
++        public double NewVersionColumnMaxWidth => _page.GetColumnMaxWidth("NewVersion");
++        public double SourceColumnMaxWidth => _page.GetColumnMaxWidth("Source");
++        public double InstallerHostColumnMaxWidth => _page.GetColumnMaxWidth("InstallerHost");
++        public double DownloadSizeColumnMaxWidth => _page.GetColumnMaxWidth("DownloadSize");
++        public double ReleaseDateColumnMaxWidth => _page.GetColumnMaxWidth("ReleaseDate");
+         public Visibility NameColumnVisibility => VisibilityFor("Name");
+         public Visibility IdColumnVisibility => VisibilityFor("Id");
+         public Visibility VersionColumnVisibility => VisibilityFor("Version");
+@@ -116,7 +122,9 @@ public void NotifyColumnVisibilityChanged()
+                 nameof(NameColumnWidth), nameof(IdColumnWidth), nameof(VersionColumnWidth),
+                 nameof(NewVersionColumnWidth), nameof(SourceColumnWidth),
+                 nameof(InstallerHostColumnWidth), nameof(DownloadSizeColumnWidth),
+-                nameof(ReleaseDateColumnWidth), nameof(NameColumnMinWidth), nameof(IdColumnMinWidth),
++                nameof(ReleaseDateColumnWidth), nameof(ListColumnMinWidth), nameof(NameColumnMinWidth), nameof(IdColumnMinWidth),
++                nameof(VersionColumnMaxWidth), nameof(NewVersionColumnMaxWidth), nameof(SourceColumnMaxWidth),
++                nameof(InstallerHostColumnMaxWidth), nameof(DownloadSizeColumnMaxWidth), nameof(ReleaseDateColumnMaxWidth),
+                 nameof(NameColumnVisibility), nameof(IdColumnVisibility), nameof(VersionColumnVisibility),
+                 nameof(NewVersionColumnVisibility), nameof(SourceColumnVisibility),
+                 nameof(InstallerHostColumnVisibility), nameof(DownloadSizeColumnVisibility),
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
+@@ -9,6 +9,7 @@
+   xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+   xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+   xmlns:pkgClasses="using:UniGetUI.PackageEngine.PackageClasses"
++  xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
+   xmlns:widgets="using:UniGetUI.Interface.Widgets"
+   Name="ABSTRACT_PAGE"
+   NavigationCacheMode="Required"
+@@ -21,6 +22,25 @@
+   </animations:Implicit.ShowAnimations>
+ 
+   <Page.Resources>
++    <Style x:Key="ColumnResizeHandleStyle" TargetType="primitives:Thumb">
++      <Setter Property="Width" Value="10" />
++      <Setter Property="Background" Value="Transparent" />
++      <Setter Property="Template">
++        <Setter.Value>
++          <ControlTemplate TargetType="primitives:Thumb">
++            <Grid Background="{TemplateBinding Background}">
++              <Border
++                Width="2"
++                Height="16"
++                HorizontalAlignment="Center"
++                VerticalAlignment="Center"
++                Background="{ThemeResource CardStrokeColorDefaultBrush}"
++              />
++            </Grid>
++          </ControlTemplate>
++        </Setter.Value>
++      </Setter>
++    </Style>
+     <DataTemplate x:Key="PackageTemplate_List" x:DataType="pkgClasses:PackageWrapper">
+       <widgets:PackageItemContainer
+         AutomationProperties.Name="{x:Bind Package.AutomationName}"
+@@ -33,20 +53,20 @@
+         RightTapped="{x:Bind PackageItemContainer_RightTapped}"
+         Wrapper="{x:Bind Self}"
+       >
+-        <Grid Padding="12,3,8,3" ColumnSpacing="4" Opacity="{x:Bind ListedOpacity, Mode=OneWay}">
++        <Grid Padding="12,3,8,3" ColumnSpacing="4" MinWidth="{x:Bind ListColumnMinWidth, Mode=OneWay}" Opacity="{x:Bind ListedOpacity, Mode=OneWay}">
+           <Grid.RowDefinitions>
+             <RowDefinition Height="30" />
+           </Grid.RowDefinitions>
+           <Grid.ColumnDefinitions>
+             <ColumnDefinition Width="24" />
+             <ColumnDefinition Width="{x:Bind NameColumnWidth, Mode=OneWay}" MinWidth="{x:Bind NameColumnMinWidth, Mode=OneWay}" />
+             <ColumnDefinition Width="{x:Bind IdColumnWidth, Mode=OneWay}" MinWidth="{x:Bind IdColumnMinWidth, Mode=OneWay}" />
+-            <ColumnDefinition Width="{x:Bind VersionColumnWidth, Mode=OneWay}" MaxWidth="150" />
+-            <ColumnDefinition Width="{x:Bind NewVersionColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind NewVersionLabelWidth}" />
+-            <ColumnDefinition Width="{x:Bind SourceColumnWidth, Mode=OneWay}" MaxWidth="175" />
+-            <ColumnDefinition Width="{x:Bind InstallerHostColumnWidth, Mode=OneWay}" MaxWidth="175" />
+-            <ColumnDefinition Width="{x:Bind DownloadSizeColumnWidth, Mode=OneWay}" MaxWidth="125" />
+-            <ColumnDefinition Width="{x:Bind ReleaseDateColumnWidth, Mode=OneWay}" MaxWidth="125" />
++            <ColumnDefinition Width="{x:Bind VersionColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind VersionColumnMaxWidth, Mode=OneWay}" />
++            <ColumnDefinition Width="{x:Bind NewVersionColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind NewVersionColumnMaxWidth, Mode=OneWay}" />
++            <ColumnDefinition Width="{x:Bind SourceColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind SourceColumnMaxWidth, Mode=OneWay}" />
++            <ColumnDefinition Width="{x:Bind InstallerHostColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind InstallerHostColumnMaxWidth, Mode=OneWay}" />
++            <ColumnDefinition Width="{x:Bind DownloadSizeColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind DownloadSizeColumnMaxWidth, Mode=OneWay}" />
++            <ColumnDefinition Width="{x:Bind ReleaseDateColumnWidth, Mode=OneWay}" MaxWidth="{x:Bind ReleaseDateColumnMaxWidth, Mode=OneWay}" />
+           </Grid.ColumnDefinitions>
+           <CheckBox
+             Grid.Row="0"
+@@ -1003,7 +1023,6 @@
+ 
+         <!--  ACTUAL PACKAGE LIST  -->
+         <Grid
+-          Padding="4,6,4,6"
+           HorizontalAlignment="Stretch"
+           VerticalAlignment="Stretch"
+           Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}"
+@@ -1015,6 +1034,20 @@
+             <RowDefinition Height="37" />
+             <RowDefinition Height="*" />
+           </Grid.RowDefinitions>
++          <ScrollViewer
++            x:Name="PackageListScrollViewer"
++            Grid.RowSpan="2"
++            HorizontalScrollBarVisibility="Disabled"
++            HorizontalScrollMode="Disabled"
++            VerticalScrollBarVisibility="Disabled"
++            VerticalScrollMode="Disabled"
++            ZoomMode="Disabled"
++          >
++            <Grid x:Name="PackageListContent" Padding="4,6,4,6" MinWidth="{x:Bind ListColumnMinWidth, Mode=OneWay}">
++              <Grid.RowDefinitions>
++            <RowDefinition Height="37" />
++            <RowDefinition Height="*" />
++          </Grid.RowDefinitions>
+           <Grid x:Name="ColumnsHeader" Grid.Row="0" Margin="4,2,4,5" ColumnSpacing="0">
+             <Grid.RowDefinitions>
+               <RowDefinition Height="30" />
+@@ -1027,14 +1060,14 @@
+               <ColumnDefinition x:Name="IdHeaderIconWidth" Width="32" />
+               <ColumnDefinition x:Name="IdHeaderWidth" Width="*" MinWidth="100" />
+               <ColumnDefinition x:Name="VersionHeaderIconWidth" Width="32" />
+-              <ColumnDefinition x:Name="VersionHeaderWidth" Width="*" MaxWidth="125" />
+-              <ColumnDefinition x:Name="NewVersionHeaderIconWidth" Width="32" MaxWidth="{x:Bind NewVersionIconWidth}" />
+-              <ColumnDefinition x:Name="NewVersionHeaderWidth" Width="*" MaxWidth="{x:Bind NewVersionLabelWidth}" />
++              <ColumnDefinition x:Name="VersionHeaderWidth" Width="*" MaxWidth="{x:Bind VersionHeaderMaxWidth}" />
++              <ColumnDefinition x:Name="NewVersionHeaderIconWidth" Width="32" MaxWidth="{x:Bind NewVersionHeaderIconMaxWidth}" />
++              <ColumnDefinition x:Name="NewVersionHeaderWidth" Width="*" MaxWidth="{x:Bind NewVersionHeaderMaxWidth}" />
+               <ColumnDefinition x:Name="SourceHeaderIconWidth" Width="32" />
+-              <ColumnDefinition x:Name="SourceHeaderWidth" Width="*" MaxWidth="150" />
+-              <ColumnDefinition x:Name="InstallerHostHeaderWidth" Width="0" MaxWidth="175" />
+-              <ColumnDefinition x:Name="DownloadSizeHeaderWidth" Width="0" MaxWidth="125" />
+-              <ColumnDefinition x:Name="ReleaseDateHeaderWidth" Width="0" MaxWidth="125" />
++              <ColumnDefinition x:Name="SourceHeaderWidth" Width="*" MaxWidth="{x:Bind SourceHeaderMaxWidth}" />
++              <ColumnDefinition x:Name="InstallerHostHeaderWidth" Width="0" MaxWidth="{x:Bind InstallerHostHeaderMaxWidth}" />
++              <ColumnDefinition x:Name="DownloadSizeHeaderWidth" Width="0" MaxWidth="{x:Bind DownloadSizeHeaderMaxWidth}" />
++              <ColumnDefinition x:Name="ReleaseDateHeaderWidth" Width="0" MaxWidth="{x:Bind ReleaseDateHeaderMaxWidth}" />
+               <ColumnDefinition Width="11" />
+             </Grid.ColumnDefinitions>
+             <Button
+@@ -1106,6 +1139,110 @@
+             <Button x:Name="InstallerHostHeader" Grid.Column="12" BorderThickness="0" CornerRadius="0" />
+             <Button x:Name="DownloadSizeHeader" Grid.Column="13" BorderThickness="0" CornerRadius="0" />
+             <Button x:Name="ReleaseDateHeader" AutomationProperties.AutomationId="ReleaseDateHeader" Grid.Column="14" BorderThickness="0" CornerRadius="0" />
++                        <primitives:Thumb
++              x:Name="NameColumnResizeHandle"
++              Grid.Column="3"
++              Tag="Name"
++              Style="{StaticResource ColumnResizeHandleStyle}"
++              HorizontalAlignment="Right"
++              VerticalAlignment="Stretch"
++              Visibility="Collapsed"
++              ToolTipService.ToolTip="Resize column"
++              AutomationProperties.Name="Resize column"
++              DragDelta="ColumnResizeHandle_DragDelta"
++              DragCompleted="ColumnResizeHandle_DragCompleted"
++            />
++                        <primitives:Thumb
++              x:Name="IdColumnResizeHandle"
++              Grid.Column="5"
++              Tag="Id"
++              Style="{StaticResource ColumnResizeHandleStyle}"
++              HorizontalAlignment="Right"
++              VerticalAlignment="Stretch"
++              Visibility="Collapsed"
++              ToolTipService.ToolTip="Resize column"
++              AutomationProperties.Name="Resize column"
++              DragDelta="ColumnResizeHandle_DragDelta"
++              DragCompleted="ColumnResizeHandle_DragCompleted"
++            />
++                        <primitives:Thumb
++              x:Name="VersionColumnResizeHandle"
++              Grid.Column="7"
++              Tag="Version"
++              Style="{StaticResource ColumnResizeHandleStyle}"
++              HorizontalAlignment="Right"
++              VerticalAlignment="Stretch"
++              Visibility="Collapsed"
++              ToolTipService.ToolTip="Resize column"
++              AutomationProperties.Name="Resize column"
++              DragDelta="ColumnResizeHandle_DragDelta"
++              DragCompleted="ColumnResizeHandle_DragCompleted"
++            />
++                        <primitives:Thumb
++              x:Name="NewVersionColumnResizeHandle"
++              Grid.Column="9"
++              Tag="NewVersion"
++              Style="{StaticResource ColumnResizeHandleStyle}"
++              HorizontalAlignment="Right"
++              VerticalAlignment="Stretch"
++              Visibility="Collapsed"
++              ToolTipService.ToolTip="Resize column"
++              AutomationProperties.Name="Resize column"
++              DragDelta="ColumnResizeHandle_DragDelta"
++              DragCompleted="ColumnResizeHandle_DragCompleted"
++            />
++                        <primitives:Thumb
++              x:Name="SourceColumnResizeHandle"
++              Grid.Column="11"
++              Tag="Source"
++              Style="{StaticResource ColumnResizeHandleStyle}"
++              HorizontalAlignment="Right"
++              VerticalAlignment="Stretch"
++              Visibility="Collapsed"
++              ToolTipService.ToolTip="Resize column"
++              AutomationProperties.Name="Resize column"
++              DragDelta="ColumnResizeHandle_DragDelta"
++              DragCompleted="ColumnResizeHandle_DragCompleted"
++            />
++                        <primitives:Thumb
++              x:Name="InstallerHostColumnResizeHandle"
++              Grid.Column="12"
++              Tag="InstallerHost"
++              Style="{StaticResource ColumnResizeHandleStyle}"
++              HorizontalAlignment="Right"
++              VerticalAlignment="Stretch"
++              Visibility="Collapsed"
++              ToolTipService.ToolTip="Resize column"
++              AutomationProperties.Name="Resize column"
++              DragDelta="ColumnResizeHandle_DragDelta"
++              DragCompleted="ColumnResizeHandle_DragCompleted"
++            />
++                        <primitives:Thumb
++              x:Name="DownloadSizeColumnResizeHandle"
++              Grid.Column="13"
++              Tag="DownloadSize"
++              Style="{StaticResource ColumnResizeHandleStyle}"
++              HorizontalAlignment="Right"
++              VerticalAlignment="Stretch"
++              Visibility="Collapsed"
++              ToolTipService.ToolTip="Resize column"
++              AutomationProperties.Name="Resize column"
++              DragDelta="ColumnResizeHandle_DragDelta"
++              DragCompleted="ColumnResizeHandle_DragCompleted"
++            />
++                        <primitives:Thumb
++              x:Name="ReleaseDateColumnResizeHandle"
++              Grid.Column="14"
++              Tag="ReleaseDate"
++              Style="{StaticResource ColumnResizeHandleStyle}"
++              HorizontalAlignment="Right"
++              VerticalAlignment="Stretch"
++              Visibility="Collapsed"
++              ToolTipService.ToolTip="Resize column"
++              AutomationProperties.Name="Resize column"
++              DragDelta="ColumnResizeHandle_DragDelta"
++              DragCompleted="ColumnResizeHandle_DragCompleted"
++            />
+           </Grid>
+ 
+           <Toolkit:SwitchPresenter
+@@ -1180,6 +1317,8 @@
+               TextWrapping="Wrap"
+             />
+           </Grid>
++            </Grid>
++          </ScrollViewer>
+         </Grid>
+ 
+         <!--  Filters/Packages Splitter  -->
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+@@ -223,6 +223,10 @@ private static readonly (string Key, string Label)[] ListColumns =
+         ];
+         private static event Action? ColumnVisibilityChanged;
+         private readonly List<(string Key, ToggleMenuFlyoutItem Item)> _columnMenuItems = [];
++        private readonly List<ToggleMenuFlyoutItem> _fitColumnMenuItems = [];
++        private readonly Dictionary<string, double> _resizingColumnWidths = [];
++        private const double FixedColumnMinWidth = 60;
++        private const double DefaultFixedColumnWidth = 200;
+         private bool _optionalSortPending;
+ 
+         private bool ColumnIsAvailable(string column) => column switch
+@@ -275,6 +279,8 @@ private void SetupColumnMenus()
+                 AddColumnItem(headerMenu.Items, key, label);
+                 AddColumnItem(ColumnsMenu.Items, key, label);
+             }
++            AddFitColumnsMenuItem(headerMenu.Items);
++            AddFitColumnsMenuItem(ColumnsMenu.Items);
+             Loaded += (_, _) =>
+             {
+                 ColumnVisibilityChanged -= RefreshColumnVisibility;
+@@ -294,24 +300,104 @@ private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string l
+             _columnMenuItems.Add((key, item));
+         }
+ 
++        public bool ColumnsFitToWindow => !Settings.Get(Settings.K.DisablePackageListColumnAutoFit);
++        public bool IsFixedPackageListColumnSizing => !ColumnsFitToWindow && ViewModeSelector.SelectedIndex == 0;
++
++        public double ListColumnMinWidth => IsFixedPackageListColumnSizing
++            ? 120 + ListColumns.Where(item => IsColumnVisible(item.Key)).Sum(item => GetSavedColumnWidth(item.Key))
++            : 0;
++
++        public GridLength GetPackageColumnWidth(string column) =>
++            !IsColumnVisible(column)
++                ? new GridLength(0, GridUnitType.Star)
++                : IsFixedPackageListColumnSizing
++                    ? new GridLength(GetSavedColumnWidth(column))
++                    : new GridLength(1, GridUnitType.Star);
++
++        public double GetColumnMaxWidth(string column) =>
++            IsFixedPackageListColumnSizing
++                ? double.PositiveInfinity
++                : column switch
++                {
++                    "Version" => 150,
++                    "NewVersion" => NewVersionLabelWidth,
++                    "Source" or "InstallerHost" => 175,
++                    "DownloadSize" or "ReleaseDate" => 125,
++                    _ => double.PositiveInfinity,
++                };
++
++        public double VersionHeaderMaxWidth => IsFixedPackageListColumnSizing ? double.PositiveInfinity : 125;
++        public double NewVersionHeaderMaxWidth => IsFixedPackageListColumnSizing ? double.PositiveInfinity : NewVersionLabelWidth;
++        public double NewVersionHeaderIconMaxWidth => IsFixedPackageListColumnSizing ? double.PositiveInfinity : NewVersionIconWidth;
++        public double SourceHeaderMaxWidth => IsFixedPackageListColumnSizing ? double.PositiveInfinity : 150;
++        public double InstallerHostHeaderMaxWidth => IsFixedPackageListColumnSizing ? double.PositiveInfinity : 175;
++        public double DownloadSizeHeaderMaxWidth => IsFixedPackageListColumnSizing ? double.PositiveInfinity : 125;
++        public double ReleaseDateHeaderMaxWidth => IsFixedPackageListColumnSizing ? double.PositiveInfinity : 125;
++
++        private double GetSavedColumnWidth(string column)
++        {
++            if (_resizingColumnWidths.TryGetValue(column, out double width))
++                return Math.Max(FixedColumnMinWidth, width);
++            IReadOnlyDictionary<string, int>? saved = Settings.GetDictionary<string, int>(Settings.K.PackageListColumnWidths);
++            return saved is not null && saved.TryGetValue(column, out int value) && value > 0
++                ? Math.Max(FixedColumnMinWidth, value)
++                : DefaultFixedColumnWidth;
++        }
++
++        private GridLength GetHeaderColumnWidth(string column, bool visible, double iconWidth = 0) =>
++            !visible
++                ? new GridLength(0, GridUnitType.Star)
++                : IsFixedPackageListColumnSizing
++                    ? new GridLength(Math.Max(0, GetSavedColumnWidth(column) - iconWidth))
++                    : new GridLength(1, GridUnitType.Star);
++
++        private void AddFitColumnsMenuItem(IList<MenuFlyoutItemBase> items)
++        {
++            items.Add(new MenuFlyoutSeparator());
++            ToggleMenuFlyoutItem fitItem = new()
++            {
++                Text = CoreTools.Translate("Fit columns to the window"),
++                IsChecked = ColumnsFitToWindow,
++            };
++            fitItem.Click += (_, _) =>
++            {
++                Settings.Set(Settings.K.DisablePackageListColumnAutoFit, !fitItem.IsChecked);
++                ColumnVisibilityChanged?.Invoke();
++            };
++            items.Add(fitItem);
++            _fitColumnMenuItems.Add(fitItem);
++        }
++
+         private void RefreshColumnVisibility()
+         {
+-            static GridLength Star(bool visible) => new(visible ? 1 : 0, GridUnitType.Star);
+             static GridLength Icon(bool visible) => new(visible ? 32 : 0);
+             bool name = IsColumnVisible("Name"), id = IsColumnVisible("Id");
+             bool version = IsColumnVisible("Version"), next = IsColumnVisible("NewVersion");
+             bool source = IsColumnVisible("Source"), host = IsColumnVisible("InstallerHost");
+             bool size = IsColumnVisible("DownloadSize"), date = IsColumnVisible("ReleaseDate");
+-            NameHeaderWidth.MinWidth = name ? 100 : 0;
+-            IdHeaderWidth.MinWidth = id ? 100 : 0;
+-            NameHeaderWidth.Width = Star(name);
+-            IdHeaderIconWidth.Width = Icon(id); IdHeaderWidth.Width = Star(id);
+-            VersionHeaderIconWidth.Width = Icon(version); VersionHeaderWidth.Width = Star(version);
+-            NewVersionHeaderIconWidth.Width = Icon(next); NewVersionHeaderWidth.Width = Star(next);
+-            SourceHeaderIconWidth.Width = Icon(source); SourceHeaderWidth.Width = Star(source);
+-            InstallerHostHeaderWidth.Width = Star(host);
+-            DownloadSizeHeaderWidth.Width = Star(size);
+-            ReleaseDateHeaderWidth.Width = Star(date);
++            bool fixedWidths = IsFixedPackageListColumnSizing;
++            NameHeaderWidth.MinWidth = name ? (fixedWidths ? FixedColumnMinWidth : 100) : 0;
++            IdHeaderWidth.MinWidth = id ? (fixedWidths ? FixedColumnMinWidth : 100) : 0;
++            NameHeaderWidth.Width = GetHeaderColumnWidth("Name", name);
++            IdHeaderIconWidth.Width = Icon(id); IdHeaderWidth.Width = GetHeaderColumnWidth("Id", id, 32);
++            VersionHeaderIconWidth.Width = Icon(version); VersionHeaderWidth.Width = GetHeaderColumnWidth("Version", version, 32);
++            NewVersionHeaderIconWidth.Width = Icon(next); NewVersionHeaderWidth.Width = GetHeaderColumnWidth("NewVersion", next, 32);
++            SourceHeaderIconWidth.Width = Icon(source); SourceHeaderWidth.Width = GetHeaderColumnWidth("Source", source, 32);
++            InstallerHostHeaderWidth.Width = GetHeaderColumnWidth("InstallerHost", host);
++            DownloadSizeHeaderWidth.Width = GetHeaderColumnWidth("DownloadSize", size);
++            ReleaseDateHeaderWidth.Width = GetHeaderColumnWidth("ReleaseDate", date);
++            PackageListContent.MinWidth = ListColumnMinWidth;
++            PackageListScrollViewer.HorizontalScrollMode = fixedWidths ? ScrollMode.Enabled : ScrollMode.Disabled;
++            PackageListScrollViewer.HorizontalScrollBarVisibility = fixedWidths ? ScrollBarVisibility.Auto : ScrollBarVisibility.Disabled;
++            Visibility resizeHandleVisibility = fixedWidths ? Visibility.Visible : Visibility.Collapsed;
++            NameColumnResizeHandle.Visibility = resizeHandleVisibility;
++            IdColumnResizeHandle.Visibility = resizeHandleVisibility;
++            VersionColumnResizeHandle.Visibility = resizeHandleVisibility;
++            NewVersionColumnResizeHandle.Visibility = resizeHandleVisibility;
++            SourceColumnResizeHandle.Visibility = resizeHandleVisibility;
++            InstallerHostColumnResizeHandle.Visibility = resizeHandleVisibility;
++            DownloadSizeColumnResizeHandle.Visibility = resizeHandleVisibility;
++            ReleaseDateColumnResizeHandle.Visibility = resizeHandleVisibility;
+             NameHeader.Visibility = name ? Visibility.Visible : Visibility.Collapsed;
+             IdHeader.Visibility = id ? Visibility.Visible : Visibility.Collapsed;
+             VersionHeader.Visibility = version ? Visibility.Visible : Visibility.Collapsed;
+@@ -329,13 +415,43 @@ private void RefreshColumnVisibility()
+                 item.IsChecked = IsColumnVisible(key);
+                 item.IsEnabled = !item.IsChecked || visibleCount > 1;
+             }
++            foreach (ToggleMenuFlyoutItem item in _fitColumnMenuItems)
++                item.IsChecked = ColumnsFitToWindow;
+             foreach (PackageWrapper wrapper in WrappedPackages)
+                 wrapper.NotifyColumnVisibilityChanged();
+             if ((!size && FilteredPackages.CurrentSorter == ObservablePackageCollection.Sorter.DownloadSize)
+                 || (!date && FilteredPackages.CurrentSorter == ObservablePackageCollection.Sorter.ReleaseDate))
+                 SortPackagesBy(ObservablePackageCollection.Sorter.Name);
+         }
+ 
++        private void ColumnResizeHandle_DragDelta(object sender, DragDeltaEventArgs e)
++        {
++            if (!IsFixedPackageListColumnSizing || sender is not Thumb { Tag: string column } || !IsColumnVisible(column))
++                return;
++
++            _resizingColumnWidths[column] = Math.Max(
++                FixedColumnMinWidth,
++                GetSavedColumnWidth(column) + e.HorizontalChange
++            );
++            RefreshColumnVisibility();
++        }
++
++        private void ColumnResizeHandle_DragCompleted(object sender, DragCompletedEventArgs e)
++        {
++            if (_resizingColumnWidths.Count == 0)
++                return;
++
++            Dictionary<string, int> widths =
++                Settings.GetDictionary<string, int>(Settings.K.PackageListColumnWidths)?
++                    .ToDictionary(item => item.Key, item => item.Value)
++                ?? [];
++            foreach ((string column, double width) in _resizingColumnWidths)
++                widths[column] = (int)Math.Round(Math.Max(FixedColumnMinWidth, width));
++            Settings.SetDictionary(Settings.K.PackageListColumnWidths, widths);
++            _resizingColumnWidths.Clear();
++            ColumnVisibilityChanged?.Invoke();
++        }
++
+         protected List<IPackageManager> UsedManagers = [];
+         protected ConcurrentDictionary<
+             IPackageManager,
+@@ -1862,6 +1978,7 @@ private void ViewModeSelector_SelectionChanged(object sender, SelectionChangedEv
+                 ViewModeSelector.SelectedIndex
+             );
+             GenerateHeaderBarTitles();
++            RefreshColumnVisibility();
+         }
+ 
+         FrameworkElement _lastContextMenuButtonTapped = null!;

@@ -32,6 +32,8 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         public bool CanRemoveDataOnUninstall = false;
         public bool CanDownloadInstaller = false;
         public bool CanUninstallPreviousVersionsAfterUpdate = false;
+        public bool CanReinstallOnUpdate = false;
+        public bool ReinstallsOnUpdateOnlyGlobalPackages = false;
         public bool CanListDependencies = false;
         public bool SupportsCustomVersions = false;
         public bool CanListVersions = true;

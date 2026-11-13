@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using UniGetUI.Core.Data;
+using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.SettingsEngine.SecureSettings;
 using UniGetUI.Core.Tools;
@@ -613,6 +614,13 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
                     ? Visibility.Visible
                     : Visibility.Collapsed;
 
+            string installCommand = Manager.Properties.InstallCommands.ForCurrentPlatform() ?? "";
+            ManagerInstallCommandTextBox.Text = installCommand;
+            InstallCommandCard.Visibility =
+                !_isLoading && !Manager.Status.Found && !string.IsNullOrWhiteSpace(installCommand)
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+
             // Load version and manager path
             ShowVersionHyperlink.Visibility = Visibility.Collapsed;
             LongVersionTextBlock.Visibility = Visibility.Collapsed;
@@ -705,6 +713,46 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
                 ManagerStatusBar.Message = CoreTools
                     .Translate("You may need to install {pm} in order to use it with UniGetUI.")
                     .Replace("{pm}", Manager.DisplayName);
+            }
+        }
+
+        private void CopyManagerInstallCommand_Click(object sender, RoutedEventArgs e)
+        {
+            if (Manager is null)
+                return;
+            string command = Manager.Properties.InstallCommands.ForCurrentPlatform() ?? "";
+            if (string.IsNullOrWhiteSpace(command))
+                return;
+
+            WindowsClipboard.SetText(command);
+            DialogHelper.ShowDismissableBalloon(
+                CoreTools.Translate("Copy command"),
+                CoreTools.Translate("The install command was copied to the clipboard. Paste it into the terminal to run it.")
+            );
+        }
+
+        private void OpenManagerInstallCommandTerminal_Click(object sender, RoutedEventArgs e)
+        {
+            CopyManagerInstallCommand_Click(sender, e);
+            try
+            {
+                Process.Start(new ProcessStartInfo("wt.exe") { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex);
+                try
+                {
+                    Process.Start(new ProcessStartInfo("cmd.exe") { UseShellExecute = true });
+                }
+                catch (Exception fallback)
+                {
+                    Logger.Error(fallback);
+                    DialogHelper.ShowDismissableBalloon(
+                        CoreTools.Translate("Open in a terminal"),
+                        CoreTools.Translate("The install command was copied to the clipboard, but no terminal could be opened.")
+                    );
+                }
             }
         }
 

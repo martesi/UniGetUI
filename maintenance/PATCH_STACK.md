@@ -73,7 +73,7 @@ feature checklist. Add a note only when a patch does not explain an exception.
 | #5167, stuck upgrades | Import backend detection and settings. Omit the Avalonia settings control. |
 | #4998 and #5199, phantom updates | Retry once without forced scope/architecture, then report failure. Suppress phantom updates only after that retry, using #5167 tracking. |
 | #5114, PowerShell scope | Map upstream Avalonia scope behavior to the Classic WinUI scope selector. |
-| #5077, reinstall orchestration | Skip: Classic already chains one install operation after the uninstall prerequisite and does not launch uninstall separately. Neither reported defect applies. |
+| #5077, reinstall orchestration | Skip its separate orchestration path: Classic already chains an install after an uninstall prerequisite. The user-selectable #5686 option uses that existing pipeline. |
 | #4959, frontend retirement | Remove the obsolete frontend selector while preserving WinUI and legacy helpers for compatibility. |
 | Classic issue #5, SQLite | Pin SQLitePCLRaw to 2.1.13 for GHSA-2m69-gcr7-jv3q. Remove the override when upstream or Pinget stops resolving vulnerable 2.1.11. |
 
@@ -109,5 +109,7 @@ The appended patches retain the individual upstream references.
 ### November 2026 backports
 
 - #5666: show a distinct offered version on the WinUI grid and icon cards.
-- #5669: link unavailable manager status pages to their upstream setup guide sections.
+- #5668: add saved package-list column widths, resize handles, horizontal scrolling, and a fit-to-window mode to WinUI.
+- #5669: link unavailable managers to the setup guide and expose install commands with copy and terminal actions.
 - #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
+- #5686: add a manager and scope gated uninstall-before-reinstall option to the WinUI update dialog; reuse Classic's chained operation queue.

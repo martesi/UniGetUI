@@ -122,6 +122,7 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
 
             Capabilities = new ManagerCapabilities
             {
+                CanReinstallOnUpdate = true,
                 CanRunAsAdmin = true,
                 CanSkipIntegrityChecks = true,
                 CanDownloadInstaller = true,
