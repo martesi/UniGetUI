@@ -48,6 +48,12 @@
           />
         </InfoBar.Content>
       </InfoBar>
+      <HyperlinkButton
+        x:Name="SetupGuideLink"
+        Margin="4,8"
+        HorizontalAlignment="Right"
+        Visibility="Collapsed"
+      />
       <controls:SettingsCard
         x:Name="ManagerExecutable"
         Padding="24,16,24,16"

@@ -105,3 +105,9 @@ The appended patches retain the individual upstream references.
 
 - #5619: enter a Scoop version directly in WinUI. The existing Classic operation history does not have upstream's new version field.
 - #5623: import the Bun release-date correction. The optional package-list column requires a separate WinUI adaptation.
+
+### November 2026 backports
+
+- #5666: show a distinct offered version on the WinUI grid and icon cards.
+- #5669: link unavailable manager status pages to their upstream setup guide sections.
+- #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.

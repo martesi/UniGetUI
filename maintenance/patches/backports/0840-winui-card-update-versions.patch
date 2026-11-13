@@ -1,0 +1,57 @@
+From 13df7d770755ff6a30aaa0305d5e2f3fc492114b Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 17:59:42+0000
+Subject: [PATCH] Show offered versions on WinUI package cards
+
+Display the installed and offered versions on grid and icon cards only when a distinct offered version exists.
+
+Upstream-Commit: e88c353a8147a8af06262ae314b66051f1bad954
+Upstream-PR: Devolutions/UniGetUI#5666
+
+---
+diff --git a/src/UniGetUI/Controls/PackageWrapper.cs b/src/UniGetUI/Controls/PackageWrapper.cs
+index 71da8ff45acd1559960dbcdd5c6d64551af4247d..9f18a5fbf9b25d6e5549109e2d1c4a4b9bdeff36 100644
+--- a/src/UniGetUI/Controls/PackageWrapper.cs
++++ b/src/UniGetUI/Controls/PackageWrapper.cs
+@@ -49,6 +49,7 @@ public bool IsChecked
+         public bool ShowCustomPackageIcon;
+         public bool ShowDefaultPackageIcon = true;
+         public string VersionComboString;
++        public string CardVersionString = "";
+         public IconType MainIconId = IconType.Id;
+         public IconType AlternateIconId = IconType.Id;
+         public ImageSource? MainIconSource;
+@@ -210,6 +211,11 @@ public PackageWrapper(IPackage package, AbstractPackagesPage page)
+             VersionComboString = package.IsUpgradable
+                 ? $"{package.VersionString} -> {package.NewVersionString}"
+                 : package.VersionString;
++            CardVersionString = package.IsUpgradable
++                && !string.IsNullOrWhiteSpace(package.NewVersionString)
++                && package.NewVersionString != package.VersionString
++                ? $"{package.VersionString} → {package.NewVersionString}"
++                : package.VersionString;
+ 
+             if (package.Name.ToLower() != package.Id.ToLower())
+                 ExtendedTooltip =
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
+index 4d4f521b75d4e8853359875f28a9c58e39a8adb3..8d8a5a012a7a0bf2e5be4f0eb54c374815337a80 100644
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml
+@@ -365,7 +365,7 @@
+             FontFamily="Segoe UI Variable Text"
+             FontSize="11"
+             Opacity="0.5"
+-            Text="{x:Bind VersionComboString, Mode=OneWay}"
++            Text="{x:Bind CardVersionString, Mode=OneWay}"
+             ToolTipService.ToolTip="{x:Bind Package.VersionString}"
+           />
+         </Grid>
+@@ -507,7 +507,7 @@
+             FontFamily="Segoe UI Variable Text"
+             FontSize="11"
+             Opacity="0.5"
+-            Text="{x:Bind VersionComboString, Mode=OneWay}"
++            Text="{x:Bind CardVersionString, Mode=OneWay}"
+             ToolTipService.ToolTip="{x:Bind Package.VersionString}"
+           />
+         </Grid>

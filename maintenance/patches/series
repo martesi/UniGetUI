@@ -86,3 +86,6 @@ backports/0800-column-menu-toggle.patch
 backports/0810-column-automation-id.patch
 backports/0820-winui-e2e-stability.patch
 backports/0830-winui-column-menu-scope.patch
+backports/0840-winui-card-update-versions.patch
+backports/0850-winui-manager-setup-guides.patch
+backports/0860-invariant-casing-for-package-ids-and-icons.patch
