@@ -37,6 +37,7 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
             {
                 Id = "bun",
                 Name = "Bun",
+                SetupGuide = "PACKAGE_MANAGERS.md#bun",
                 Description = CoreTools.Translate("Fast JavaScript runtime, bundler, and package manager"),
                 IconId = IconType.Bun,
                 ColorIconId = "bun_color",

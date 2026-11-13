@@ -603,6 +603,16 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             if (Manager is null)
                 throw new InvalidDataException();
 
+            SetupGuideLink.Content = CoreTools.Translate("How to set up {0}", Manager.DisplayName);
+            string setupGuide = Manager.Properties.SetupGuide;
+            SetupGuideLink.NavigateUri = string.IsNullOrWhiteSpace(setupGuide)
+                ? null
+                : new Uri($"https://github.com/Devolutions/UniGetUI/blob/main/docs/{setupGuide}");
+            SetupGuideLink.Visibility =
+                !_isLoading && !Manager.IsReady() && SetupGuideLink.NavigateUri is not null
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+
             // Load version and manager path
             ShowVersionHyperlink.Visibility = Visibility.Collapsed;
             LongVersionTextBlock.Visibility = Visibility.Collapsed;

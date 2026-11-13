@@ -49,6 +49,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
             {
                 Id = "pwsh",
                 Name = "PowerShell7",
+                SetupGuide = "PACKAGE_MANAGERS.md#powershell-7x",
                 DisplayName = "PowerShell 7.x",
                 Description = CoreTools.Translate(
                     "PowerShell's package manager. Find libraries and scripts to expand PowerShell capabilities<br>Contains: <b>Modules, Scripts, Cmdlets</b>"
