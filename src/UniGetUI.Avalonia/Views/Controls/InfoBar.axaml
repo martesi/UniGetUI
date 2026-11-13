@@ -1,0 +1,95 @@
+<UserControl x:Class="UniGetUI.Avalonia.Views.Controls.InfoBar"
+             xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:automation="clr-namespace:Avalonia.Automation;assembly=Avalonia.Controls"
+             xmlns:vm="using:UniGetUI.Avalonia.ViewModels"
+             xmlns:controls="using:UniGetUI.Avalonia.Views.Controls"
+             x:DataType="vm:InfoBarViewModel">
+
+    <UserControl.Styles>
+        <Style Selector="Border.severity-success">
+            <Setter Property="Background"   Value="{DynamicResource StatusSuccessBackground}"/>
+            <Setter Property="BorderBrush"  Value="{DynamicResource StatusSuccessBorderBrush}"/>
+        </Style>
+        <Style Selector="Border.severity-error">
+            <Setter Property="Background"   Value="{DynamicResource StatusErrorBackground}"/>
+            <Setter Property="BorderBrush"  Value="{DynamicResource StatusErrorBorderBrush}"/>
+        </Style>
+        <Style Selector="Border.severity-warning">
+            <Setter Property="Background"   Value="{DynamicResource WarningBannerBackground}"/>
+            <Setter Property="BorderBrush"  Value="{DynamicResource WarningBannerBorderBrush}"/>
+        </Style>
+        <Style Selector="Border.severity-info">
+            <Setter Property="Background"   Value="{DynamicResource StatusInfoBackground}"/>
+            <Setter Property="BorderBrush"  Value="{DynamicResource StatusInfoBorderBrush}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Border x:Name="BodyBorder"
+            IsVisible="{Binding IsOpen}"
+            BorderThickness="0,1,0,1"
+            automation:AutomationProperties.AccessibilityView="Control"
+            automation:AutomationProperties.Name="{Binding Title}"
+            automation:AutomationProperties.HelpText="{Binding Message}"
+            Padding="0">
+        <Grid ColumnDefinitions="5,Auto,*,Auto,Auto">
+
+            <!-- Severity colour strip -->
+            <Border x:Name="SeverityStrip" Grid.Column="0"/>
+
+            <!-- Severity icon -->
+            <Border Grid.Column="1"
+                    Width="20" Height="20"
+                    Margin="12,0,4,0"
+                    automation:AutomationProperties.AccessibilityView="Raw"
+                    VerticalAlignment="Center">
+                <PathIcon x:Name="SeverityIcon"
+                          Width="16" Height="16"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"/>
+            </Border>
+
+            <!-- Title + message -->
+            <StackPanel Grid.Column="2"
+                        Orientation="Vertical"
+                        Spacing="2"
+                        Margin="4,10,4,10"
+                        VerticalAlignment="Center">
+                <TextBlock Text="{Binding Title}"
+                           FontWeight="SemiBold"
+                           TextWrapping="Wrap"/>
+                <TextBlock Text="{Binding Message}"
+                           IsVisible="{Binding Message, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                           TextWrapping="Wrap"
+                           Opacity="0.85"
+                           FontSize="12"/>
+            </StackPanel>
+
+            <!-- Action button -->
+            <Button Grid.Column="3"
+                    Content="{Binding ActionButtonText}"
+                    Command="{Binding ActionButtonCommand}"
+                    IsVisible="{Binding ActionButtonText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                    automation:AutomationProperties.Name="{Binding ActionButtonText}"
+                    Margin="8,0"
+                    Padding="12,6"
+                    VerticalAlignment="Center"/>
+
+            <!-- Close button -->
+            <Button Grid.Column="4"
+                    IsVisible="{Binding IsClosable}"
+                    Command="{Binding CloseCommand}"
+                    automation:AutomationProperties.Name="Close"
+                    VerticalAlignment="Center"
+                    Margin="4,0,8,0"
+                    Padding="6"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    CornerRadius="4">
+                <controls:SvgIcon Path="avares://UniGetUI.Avalonia/Assets/Symbols/cross.svg"
+                                  Width="10" Height="10"/>
+            </Button>
+
+        </Grid>
+    </Border>
+</UserControl>

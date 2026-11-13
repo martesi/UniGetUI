@@ -1,0 +1,117 @@
+using UniGetUI.Core.IconEngine;
+using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
+using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.ManagerClasses.Classes;
+
+namespace UniGetUI.PackageEngine.Managers.CargoManager;
+
+internal sealed class CargoPkgDetailsHelper(Cargo manager) : BasePkgDetailsHelper(manager)
+{
+    protected override void GetDetails_UnSafe(IPackageDetails details)
+    {
+        RequireCratesIo(details.Package);
+        details.InstallerType = "Source";
+
+        INativeTaskLogger logger = Manager.TaskLogger.CreateNew(
+            Enums.LoggableTaskType.LoadPackageDetails
+        );
+
+        Uri manifestUrl;
+        CargoManifest manifest;
+        try
+        {
+            (manifestUrl, manifest) = CratesIOClient.GetManifest(details.Package.Id);
+        }
+        catch (Exception ex)
+        {
+            logger.Error(ex);
+            logger.Close(1);
+            return;
+        }
+
+        details.Description = manifest.crate.description;
+        details.ManifestUrl = manifestUrl;
+
+        var homepage =
+            manifest.crate.homepage ?? manifest.crate.repository ?? manifest.crate.documentation;
+        if (!string.IsNullOrEmpty(homepage))
+        {
+            details.HomepageUrl = new Uri(homepage);
+        }
+
+        var keywords = manifest.crate.keywords is null
+            ? []
+            : (string[])manifest.crate.keywords.Clone();
+        var categories = manifest.categories?.Select(c => c.category) ?? [];
+        details.Tags = [.. keywords, .. categories];
+
+        var versionData = details.Package.HasConcreteVersion
+            ? manifest.versions.FirstOrDefault(v => v.num == details.Package.VersionString)
+            : manifest.versions.FirstOrDefault(v => v.num == manifest.crate.max_stable_version)
+                ?? manifest.versions.FirstOrDefault(v => v.num == manifest.crate.newest_version);
+
+        if (versionData is not null)
+        {
+            details.Version = versionData.num;
+            details.Author = versionData.published_by?.name;
+            details.License = versionData.license;
+            details.InstallerUrl = new Uri(
+                (CratesIOClient.ApiUrl + versionData.dl_path).Replace("/api/v1/api/v1", "/api/v1")
+            );
+            details.InstallerSize = versionData.crate_size ?? 0;
+            details.InstallerHash = versionData.checksum;
+            details.Publisher = versionData.published_by?.name;
+            details.UpdateDate = versionData.updated_at;
+        }
+
+        // TODO: most packages are hosted on Github; see if there's a way to use the repository
+        // info to extract release notes
+
+        logger.Close(0);
+        return;
+    }
+
+    protected override CacheableIcon? GetIcon_UnSafe(IPackage package)
+    {
+        throw new NotImplementedException();
+    }
+
+    protected override IReadOnlyList<Uri> GetScreenshots_UnSafe(IPackage package)
+    {
+        throw new NotImplementedException();
+    }
+
+    protected override string? GetInstallLocation_UnSafe(IPackage package)
+    {
+        var options = package.GetInstallOptions().GetAwaiter().GetResult();
+        return Path.Join(CargoConfiguration.GetRoot(options.CustomInstallLocation), "bin");
+    }
+
+    protected override IReadOnlyList<string> GetInstallableVersions_UnSafe(IPackage package)
+    {
+        RequireCratesIo(package);
+        INativeTaskLogger logger = Manager.TaskLogger.CreateNew(
+            Enums.LoggableTaskType.LoadPackageVersions
+        );
+        try
+        {
+            var (_, manifest) = CratesIOClient.GetManifest(package.Id);
+            var versions = manifest.versions.Select((v) => v.num).ToArray();
+            logger.Close(0);
+            return versions;
+        }
+        catch (Exception ex)
+        {
+            logger.Error(ex);
+            logger.Close(1);
+            throw;
+        }
+    }
+
+    private void RequireCratesIo(IPackage package)
+    {
+        if (package.Source.Name != Manager.DefaultSource.Name)
+            throw new NotSupportedException(
+                $"Cargo metadata and source downloads are only available for crates.io packages, not {package.Source.Name}.");
+    }
+}

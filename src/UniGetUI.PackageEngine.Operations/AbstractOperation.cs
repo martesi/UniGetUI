@@ -1,0 +1,885 @@
+using UniGetUI.Core.Logging;
+using UniGetUI.Core.SettingsEngine;
+using UniGetUI.Core.Tools;
+using UniGetUI.PackageEngine.Classes.Manager;
+using UniGetUI.PackageEngine.Enums;
+
+namespace UniGetUI.PackageOperations;
+
+public abstract partial class AbstractOperation : IDisposable
+{
+    public readonly OperationMetadata Metadata = new();
+
+    public event EventHandler<OperationStatus>? StatusChanged;
+    public event EventHandler<EventArgs>? CancelRequested;
+    public event EventHandler<(string, LineType)>? LogLineAdded;
+    public event EventHandler<EventArgs>? OperationStarting;
+    public event EventHandler<EventArgs>? OperationFinished;
+    public event EventHandler<EventArgs>? Enqueued;
+    public event EventHandler<EventArgs>? OperationSucceeded;
+    public event EventHandler<EventArgs>? OperationFailed;
+    public event EventHandler<BadgeCollection>? BadgesChanged;
+
+    public bool Started { get; private set; }
+
+    /// <summary>
+    /// Operations UniGetUI started on its own (scheduled updates, <c>--updateapps</c>) rather than
+    /// in response to a user action. They queue behind every user-requested operation.
+    /// </summary>
+    public bool IsBackgroundOperation { get; set; }
+    protected bool QUEUE_ENABLED;
+    protected bool FORCE_HOLD_QUEUE;
+    private bool IsInnerOperation;
+    private readonly object CancellationLock = new();
+    private CancellationTokenSource? RunCancellationSource;
+    private AbstractOperation? ActiveInnerOperation;
+    private Task? ActiveRunTask;
+    private TaskCompletionSource? ScheduledRetryCompletionSource;
+    private bool ActiveRunIsStarting;
+    private volatile bool IsExecutingOperation;
+    private bool Disposed;
+
+    private readonly List<(string, LineType)> LogList = [];
+    private readonly object LogListLock = new();
+    private OperationStatus _status = OperationStatus.InQueue;
+    public OperationStatus Status
+    {
+        get => _status;
+        set
+        {
+            _status = value;
+            StatusChanged?.Invoke(this, value);
+        }
+    }
+
+    public bool SystemRestartRequired { get; private set; }
+
+    public void ApplyCapabilities(bool admin, bool interactive, bool skiphash, string? scope)
+    {
+        BadgesChanged?.Invoke(this, new BadgeCollection(admin, interactive, skiphash, scope));
+    }
+
+    private readonly List<InnerOperation> PreOperations = [];
+    private readonly IReadOnlyList<InnerOperation> PostOperations = [];
+
+    public AbstractOperation(
+        bool queue_enabled,
+        IReadOnlyList<InnerOperation>? preOps = null,
+        IReadOnlyList<InnerOperation>? postOps = null
+    )
+    {
+        QUEUE_ENABLED = queue_enabled;
+        if (preOps is not null)
+            PreOperations.AddRange(preOps);
+        if (postOps is not null)
+            PostOperations = postOps;
+
+        Status = OperationStatus.InQueue;
+        Line("Please wait...", LineType.ProgressIndicator);
+
+        if (int.TryParse(Settings.GetValue(Settings.K.ParallelOperationCount), out int _maxPps))
+        {
+            MAX_OPERATIONS = _maxPps;
+            Logger.Debug($"Parallel operation limit set to {MAX_OPERATIONS}");
+        }
+        else
+        {
+            MAX_OPERATIONS = 1;
+            Logger.Debug("Parallel operation limit not set, defaulting to 1");
+        }
+    }
+
+    protected void AddPreOperation(InnerOperation operation)
+    {
+        PreOperations.Add(operation);
+    }
+
+    public void Cancel()
+    {
+        AbstractOperation? activeInnerOperation;
+        bool wasRunning;
+        bool hasActiveWork;
+        lock (CancellationLock)
+        {
+            if (
+                _status
+                    is OperationStatus.Canceled
+                        or OperationStatus.Failed
+                        or OperationStatus.Succeeded
+                && !ActiveRunIsStarting
+            )
+                return;
+
+            wasRunning = _status is OperationStatus.Running;
+            hasActiveWork = IsExecutingOperation;
+            RunCancellationSource?.Cancel();
+            activeInnerOperation = ActiveInnerOperation;
+        }
+
+        Status = OperationStatus.Canceled;
+        activeInnerOperation?.Cancel();
+
+        if (wasRunning)
+            CancelRequested?.Invoke(this, EventArgs.Empty);
+
+        // A queued operation has no active work to clean up. A running operation stays on the
+        // queue until MainThread has awaited its task and completed its cleanup.
+        if (!hasActiveWork)
+        {
+            RemoveFromQueue(this);
+        }
+    }
+
+    protected CancellationToken CancellationToken
+    {
+        get
+        {
+            lock (CancellationLock)
+                return RunCancellationSource?.Token ?? global::System.Threading.CancellationToken.None;
+        }
+    }
+
+    /// <summary>
+    /// Test hook: installs the cancellation source that MainThread() would normally create,
+    /// so tests invoking PerformOperation() directly can exercise Cancel().
+    /// </summary>
+    internal void SetRunCancellationSourceForTests(CancellationTokenSource source)
+    {
+        lock (CancellationLock)
+            RunCancellationSource = source;
+    }
+
+    private bool TrySetActiveInnerOperation(AbstractOperation operation)
+    {
+        bool cancellationRequested;
+        lock (CancellationLock)
+        {
+            cancellationRequested =
+                RunCancellationSource?.IsCancellationRequested is true
+                || Status is OperationStatus.Canceled;
+            if (!cancellationRequested)
+                ActiveInnerOperation = operation;
+        }
+
+        if (cancellationRequested)
+            operation.Cancel();
+
+        return !cancellationRequested;
+    }
+
+    private void ClearActiveInnerOperation(AbstractOperation operation)
+    {
+        lock (CancellationLock)
+            if (ReferenceEquals(ActiveInnerOperation, operation))
+                ActiveInnerOperation = null;
+    }
+
+    private void EndRunCancellation(CancellationTokenSource cancellationSource)
+    {
+        lock (CancellationLock)
+        {
+            if (!ReferenceEquals(RunCancellationSource, cancellationSource))
+                return;
+            RunCancellationSource = null;
+            ActiveRunIsStarting = false;
+        }
+        cancellationSource.Dispose();
+    }
+
+    protected void Line(string line, LineType type)
+    {
+        // LogList stays raw: it is the source of truth for result parsing. Only display redacts.
+        if (type != LineType.ProgressIndicator)
+        {
+            lock (LogListLock)
+                LogList.Add((line, type));
+        }
+        LogLineAdded?.Invoke(this, (Logger.Redact(line), type));
+    }
+
+    protected IReadOnlyList<(string, LineType)> GetRawOutput()
+    {
+        lock (LogListLock)
+            return LogList.ToArray();
+    }
+
+    public IReadOnlyList<(string, LineType)> GetOutput()
+    {
+        lock (LogListLock)
+        {
+            if (!Logger.RedactUsername)
+                return LogList.ToArray();
+            return LogList.Select(l => (Logger.Redact(l.Item1), l.Item2)).ToArray();
+        }
+    }
+
+    public Task MainThread()
+    {
+        TaskCompletionSource completionSource;
+        CancellationTokenSource cancellationSource;
+        lock (CancellationLock)
+        {
+            ObjectDisposedException.ThrowIf(Disposed, this);
+
+            if (ActiveRunTask is { IsCompleted: false })
+                return ActiveRunTask;
+
+            if (ScheduledRetryCompletionSource is not null)
+                return ScheduledRetryCompletionSource.Task;
+
+            completionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            cancellationSource = new();
+            ActiveRunTask = completionSource.Task;
+            RunCancellationSource = cancellationSource;
+            ActiveRunIsStarting = true;
+        }
+
+        _ = ExecuteRunAsync(completionSource, cancellationSource);
+        return completionSource.Task;
+    }
+
+    private async Task ExecuteRunAsync(
+        TaskCompletionSource completionSource,
+        CancellationTokenSource cancellationSource
+    )
+    {
+        try
+        {
+            await MainThreadCore(cancellationSource).ConfigureAwait(false);
+            completionSource.SetResult();
+        }
+        catch (Exception ex)
+        {
+            completionSource.SetException(ex);
+        }
+    }
+
+    private async Task MainThreadCore(CancellationTokenSource runCancellation)
+    {
+        try
+        {
+            if (Metadata.Status == "")
+                throw new InvalidDataException("Metadata.Status was not set!");
+            if (Metadata.Title == "")
+                throw new InvalidDataException("Metadata.Title was not set!");
+            if (Metadata.OperationInformation == "")
+                throw new InvalidDataException("Metadata.OperationInformation was not set!");
+            if (Metadata.SuccessTitle == "")
+                throw new InvalidDataException("Metadata.SuccessTitle was not set!");
+            if (Metadata.SuccessMessage == "")
+                throw new InvalidDataException("Metadata.SuccessMessage was not set!");
+            if (Metadata.FailureTitle == "")
+                throw new InvalidDataException("Metadata.FailureTitle was not set!");
+            if (Metadata.FailureMessage == "")
+                throw new InvalidDataException("Metadata.FailureMessage was not set!");
+
+            Started = true;
+
+            if (IndexInQueue(this) >= 0)
+                throw new InvalidOperationException("This operation was already on the queue");
+
+            if (runCancellation.IsCancellationRequested)
+            {
+                MarkRunAsStarted(runCancellation);
+                CompleteCanceledRun();
+                return;
+            }
+
+            Status = OperationStatus.InQueue;
+            MarkRunAsStarted(runCancellation);
+            if (runCancellation.IsCancellationRequested)
+            {
+                CompleteCanceledRun();
+                return;
+            }
+
+            Line(Metadata.OperationInformation, LineType.VerboseDetails);
+            Line(Metadata.Status, LineType.ProgressIndicator);
+
+            Enqueued?.Invoke(this, EventArgs.Empty);
+            if (runCancellation.IsCancellationRequested)
+            {
+                CompleteCanceledRun();
+                return;
+            }
+
+            if (QUEUE_ENABLED && !IsInnerOperation)
+            {
+                // QUEUE HANDLER
+                SKIP_QUEUE = false;
+                EnqueueByPriority();
+                if (runCancellation.IsCancellationRequested)
+                {
+                    RemoveFromQueue(this);
+                    CompleteCanceledRun();
+                    return;
+                }
+
+                int lastPos = -2;
+
+                while (
+                    FORCE_HOLD_QUEUE
+                    || (SlotsTakenAhead(this) >= MAX_OPERATIONS && !SKIP_QUEUE)
+                )
+                {
+                    if (IndexInQueue(this) - MAX_OPERATIONS + 1 == -1)
+                        return;
+                    // In this case, operation was canceled;
+
+                    int pos = SlotsTakenAhead(this) - MAX_OPERATIONS + 1;
+                    if (pos != lastPos)
+                    {
+                        lastPos = pos;
+                        Line(
+                            CoreTools.Translate("Operation on queue (position {0})...", pos),
+                            LineType.ProgressIndicator
+                        );
+                    }
+
+                    await Task.Delay(100);
+                }
+            }
+            // END QUEUE HANDLER
+
+            IsExecutingOperation = true;
+            OperationVeredict result;
+            try
+            {
+                result = await _runOperation();
+            }
+            finally
+            {
+                IsExecutingOperation = false;
+            }
+            RemoveFromQueue(this);
+
+            SystemRestartRequired = result is OperationVeredict.RestartRequired;
+
+            if (result is OperationVeredict.Success or OperationVeredict.RestartRequired)
+            {
+                Status = OperationStatus.Succeeded;
+                OperationSucceeded?.Invoke(this, EventArgs.Empty);
+                OperationFinished?.Invoke(this, EventArgs.Empty);
+                Line(Metadata.SuccessMessage, LineType.Information);
+                if (SystemRestartRequired)
+                    Line(
+                        CoreTools.Translate(
+                            "This operation finished, but the computer must be restarted before the changes take effect"
+                        ),
+                        LineType.Information
+                    );
+            }
+            else if (result == OperationVeredict.Failure)
+            {
+                Status = OperationStatus.Failed;
+                OperationFailed?.Invoke(this, EventArgs.Empty);
+                OperationFinished?.Invoke(this, EventArgs.Empty);
+                Line(Metadata.FailureMessage, LineType.Error);
+                Line(
+                    Metadata.FailureMessage
+                        + " - "
+                        + CoreTools.Translate("Click here for more details"),
+                    LineType.ProgressIndicator
+                );
+            }
+            else if (result == OperationVeredict.Canceled)
+            {
+                Status = OperationStatus.Canceled;
+                OperationFinished?.Invoke(this, EventArgs.Empty);
+                Line(CoreTools.Translate("Operation canceled by user"), LineType.Error);
+            }
+            else
+            {
+                throw new InvalidCastException();
+            }
+        }
+        catch (Exception ex)
+        {
+            if (ex is OperationPreconditionException)
+            {
+                Line(ex.Message, LineType.Error);
+            }
+            else
+            {
+                Line("An internal error occurred:", LineType.Error);
+                foreach (var line in ex.ToString().Split("\n"))
+                {
+                    Line(line, LineType.Error);
+                }
+            }
+
+            RemoveFromQueue(this);
+
+            MarkRunAsStarted(runCancellation);
+            Status = OperationStatus.Failed;
+            try
+            {
+                OperationFinished?.Invoke(this, EventArgs.Empty);
+                OperationFailed?.Invoke(this, EventArgs.Empty);
+            }
+            catch (Exception e2)
+            {
+                Line(
+                    "An internal error occurred while handling an internal error:",
+                    LineType.Error
+                );
+                foreach (var line in e2.ToString().Split("\n"))
+                {
+                    Line(line, LineType.Error);
+                }
+            }
+
+            Line(Metadata.FailureMessage, LineType.Error);
+            Line(
+                Metadata.FailureMessage
+                    + " - "
+                    + CoreTools.Translate("Click here for more details"),
+                LineType.ProgressIndicator
+            );
+        }
+        finally
+        {
+            try
+            {
+                OnRunCompleted();
+            }
+            finally
+            {
+                EndRunCancellation(runCancellation);
+                if (QueueLength() == 0)
+                    QueueDrained?.Invoke(null, EventArgs.Empty);
+            }
+        }
+    }
+
+    private void CompleteCanceledRun()
+    {
+        Status = OperationStatus.Canceled;
+        OperationFinished?.Invoke(this, EventArgs.Empty);
+        Line(CoreTools.Translate("Operation canceled by user"), LineType.Error);
+    }
+
+    private void MarkRunAsStarted(CancellationTokenSource cancellationSource)
+    {
+        lock (CancellationLock)
+        {
+            if (ReferenceEquals(RunCancellationSource, cancellationSource))
+                ActiveRunIsStarting = false;
+        }
+    }
+
+    private async Task<OperationVeredict> _runOperation()
+    {
+        OperationVeredict result;
+
+        var preOps = new List<InnerOperation>(PreOperations);
+        preOps.AddRange(GetAttemptPreOperations());
+        int i = 0,
+            count = preOps.Count;
+        if (count > 0)
+            Line("", LineType.VerboseDetails);
+        foreach (var preReq in preOps)
+        {
+            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
+                return OperationVeredict.Canceled;
+
+            i++;
+            Line(
+                    CoreTools.Translate("Running PreOperation ({0}/{1})...", i, count),
+                LineType.Information
+            );
+            preReq.Operation.LogLineAdded += (_, line) => Line(line.Item1, line.Item2);
+            if (!TrySetActiveInnerOperation(preReq.Operation))
+                return OperationVeredict.Canceled;
+            try
+            {
+                await preReq.Operation.MainThread();
+            }
+            finally
+            {
+                ClearActiveInnerOperation(preReq.Operation);
+            }
+            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
+                return OperationVeredict.Canceled;
+            if (preReq.Operation.Status is not OperationStatus.Succeeded && preReq.MustSucceed)
+            {
+                Line(
+                        CoreTools.Translate(
+                            "PreOperation {0} out of {1} failed, and was tagged as necessary. Aborting...",
+                            i,
+                            count
+                        ),
+                    LineType.Error
+                );
+                return OperationVeredict.Failure;
+            }
+            Line(
+                    CoreTools.Translate(
+                        "PreOperation {0} out of {1} finished with result {2}",
+                        i,
+                        count,
+                        preReq.Operation.Status
+                    ),
+                LineType.Information
+            );
+            Line("--------------------------------", LineType.Information);
+            Line("", LineType.VerboseDetails);
+        }
+
+        // BEGIN ACTUAL OPERATION
+        Line(CoreTools.Translate("Starting operation..."), LineType.Information);
+        if (Status is OperationStatus.InQueue)
+            Status = OperationStatus.Running;
+
+        do
+        {
+            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
+            {
+                result = OperationVeredict.Canceled;
+                break;
+            }
+
+            OperationStarting?.Invoke(this, EventArgs.Empty);
+
+            try
+            {
+                Task<OperationVeredict> op = PerformOperation();
+                result = await op.ConfigureAwait(false);
+                if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
+                    result = OperationVeredict.Canceled;
+            }
+            catch (Exception e)
+            {
+                result = CancellationToken.IsCancellationRequested
+                    ? OperationVeredict.Canceled
+                    : OperationVeredict.Failure;
+                Logger.Error(e);
+                if (e is OperationPreconditionException)
+                {
+                    Line(e.Message, LineType.Error);
+                }
+                else
+                {
+                    foreach (string l in e.ToString().Split("\n"))
+                    {
+                        Line(l, LineType.Error);
+                    }
+                }
+            }
+        } while (result is OperationVeredict.AutoRetry);
+
+        if (result is not (OperationVeredict.Success or OperationVeredict.RestartRequired))
+            return result;
+
+        // Process postoperations
+        i = 0;
+        count = PostOperations.Count;
+        foreach (var postReq in PostOperations)
+        {
+            i++;
+            Line("--------------------------------", LineType.Information);
+            Line("", LineType.VerboseDetails);
+            Line(
+                CoreTools.Translate("Running PostOperation ({0}/{1})...", i, count),
+                LineType.Information
+            );
+            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
+                return OperationVeredict.Canceled;
+
+            postReq.Operation.LogLineAdded += (_, line) => Line(line.Item1, line.Item2);
+            if (!TrySetActiveInnerOperation(postReq.Operation))
+                return OperationVeredict.Canceled;
+            try
+            {
+                await postReq.Operation.MainThread();
+            }
+            finally
+            {
+                ClearActiveInnerOperation(postReq.Operation);
+            }
+            if (Status is OperationStatus.Canceled || CancellationToken.IsCancellationRequested)
+                return OperationVeredict.Canceled;
+            if (postReq.Operation.Status is not OperationStatus.Succeeded && postReq.MustSucceed)
+            {
+                Line(
+                    CoreTools.Translate(
+                        "PostOperation {0} out of {1} failed, and was tagged as necessary. Aborting...",
+                        i,
+                        count
+                    ),
+                    LineType.Error
+                );
+                return OperationVeredict.Failure;
+            }
+            Line(
+                CoreTools.Translate(
+                    "PostOperation {0} out of {1} finished with result {2}",
+                    i,
+                    count,
+                    postReq.Operation.Status
+                ),
+                LineType.Information
+            );
+        }
+
+        return result;
+    }
+
+    public static void RemoveFromQueue(AbstractOperation operation)
+    {
+        lock (QueueLock)
+        {
+            while (OperationQueue.Remove(operation))
+                ;
+        }
+    }
+
+    /// <summary>
+    /// The position of the operation in <see cref="OperationQueue"/>, or -1 when it is not queued.
+    /// Reading the queue without the queue lock can observe an insertion or a removal half-applied
+    /// and report -1 for an operation that is really still queued.
+    /// </summary>
+    public static int IndexInQueue(AbstractOperation operation)
+    {
+        lock (QueueLock)
+            return OperationQueue.IndexOf(operation);
+    }
+
+    internal bool IsWaitingForManager
+    {
+        get => _isWaitingForManager;
+        set => _isWaitingForManager = value;
+    }
+    private volatile bool _isWaitingForManager;
+
+    private static int SlotsTakenAhead(AbstractOperation operation)
+    {
+        lock (QueueLock)
+        {
+            int index = OperationQueue.IndexOf(operation);
+            if (index < 0)
+                return index;
+
+            int taken = 0;
+            for (int i = 0; i < index; i++)
+            {
+                if (!OperationQueue[i].IsWaitingForManager)
+                    taken++;
+            }
+            return taken;
+        }
+    }
+
+    public static int QueueLength()
+    {
+        lock (QueueLock)
+            return OperationQueue.Count;
+    }
+
+    private void EnqueueByPriority()
+    {
+        lock (QueueLock)
+        {
+            if (IsBackgroundOperation)
+            {
+                OperationQueue.Add(this);
+                return;
+            }
+
+            int position = Math.Min(MAX_OPERATIONS, OperationQueue.Count);
+            for (int i = position; i < OperationQueue.Count; i++)
+            {
+                if (!OperationQueue[i].IsBackgroundOperation)
+                    position = i + 1;
+            }
+
+            OperationQueue.Insert(position, this);
+        }
+    }
+
+    private bool SKIP_QUEUE;
+
+    public void SkipQueue()
+    {
+        if (Status != OperationStatus.InQueue)
+            return;
+        RemoveFromQueue(this);
+        SKIP_QUEUE = true;
+    }
+
+    public void RunNext()
+    {
+        if (Status != OperationStatus.InQueue)
+            return;
+
+        FORCE_HOLD_QUEUE = true;
+        lock (QueueLock)
+        {
+            if (OperationQueue.Contains(this))
+            {
+                while (OperationQueue.Remove(this))
+                    ;
+                OperationQueue.Insert(Math.Min(MAX_OPERATIONS, OperationQueue.Count), this);
+                IsBackgroundOperation = false;
+            }
+        }
+        FORCE_HOLD_QUEUE = false;
+    }
+
+    public void BackOfTheQueue()
+    {
+        if (Status != OperationStatus.InQueue)
+            return;
+
+        FORCE_HOLD_QUEUE = true;
+        lock (QueueLock)
+        {
+            if (OperationQueue.Contains(this))
+            {
+                while (OperationQueue.Remove(this))
+                    ;
+                OperationQueue.Add(this);
+            }
+        }
+        FORCE_HOLD_QUEUE = false;
+    }
+
+    public void Retry(string retryMode)
+    {
+        if (retryMode is RetryMode.NoRetry)
+            throw new InvalidOperationException("We weren't supposed to reach this, weren't we?");
+
+        IsBackgroundOperation = false;
+
+        Task? previousRun = null;
+        TaskCompletionSource? scheduledRetry = null;
+        bool applyImmediately = false;
+        lock (CancellationLock)
+        {
+            if (Disposed)
+                return;
+
+            if (Status is OperationStatus.Running)
+                return;
+
+            if (Status is OperationStatus.InQueue)
+            {
+                applyImmediately = true;
+            }
+            else
+            {
+                if (ScheduledRetryCompletionSource is not null)
+                    return;
+
+                scheduledRetry = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                ScheduledRetryCompletionSource = scheduledRetry;
+                previousRun = ActiveRunTask ?? Task.CompletedTask;
+            }
+        }
+
+        if (applyImmediately)
+        {
+            ApplyRetryActionAndLog(retryMode);
+            return;
+        }
+
+        _ = RetryAfterRunAsync(previousRun!, scheduledRetry!, retryMode);
+    }
+
+    private async Task RetryAfterRunAsync(
+        Task previousRun,
+        TaskCompletionSource scheduledRetry,
+        string retryMode
+    )
+    {
+        CancellationTokenSource? cancellationSource = null;
+        try
+        {
+            await previousRun.ConfigureAwait(false);
+
+            lock (CancellationLock)
+            {
+                if (!ReferenceEquals(ScheduledRetryCompletionSource, scheduledRetry))
+                    return;
+
+                if (Disposed)
+                {
+                    ScheduledRetryCompletionSource = null;
+                    scheduledRetry.TrySetCanceled();
+                    return;
+                }
+
+                cancellationSource = new();
+                RunCancellationSource = cancellationSource;
+                ActiveRunTask = scheduledRetry.Task;
+                ScheduledRetryCompletionSource = null;
+                ActiveRunIsStarting = true;
+            }
+
+            ApplyRetryActionAndLog(retryMode);
+            await ExecuteRunAsync(scheduledRetry, cancellationSource).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            if (cancellationSource is not null)
+                EndRunCancellation(cancellationSource);
+
+            lock (CancellationLock)
+            {
+                if (ReferenceEquals(ScheduledRetryCompletionSource, scheduledRetry))
+                    ScheduledRetryCompletionSource = null;
+                if (ReferenceEquals(ActiveRunTask, scheduledRetry.Task))
+                    ActiveRunTask = null;
+            }
+            scheduledRetry.TrySetException(ex);
+            Logger.Error(ex);
+        }
+    }
+
+    private void ApplyRetryActionAndLog(string retryMode)
+    {
+        ApplyRetryAction(retryMode);
+        Line($"", LineType.VerboseDetails);
+        Line($"-----------------------", LineType.VerboseDetails);
+        Line($"Retrying operation with RetryMode={retryMode}", LineType.VerboseDetails);
+        Line($"", LineType.VerboseDetails);
+    }
+
+    protected abstract void ApplyRetryAction(string retryMode);
+    protected virtual IReadOnlyList<InnerOperation> GetAttemptPreOperations() => [];
+    protected abstract Task<OperationVeredict> PerformOperation();
+    public abstract Task<Uri> GetOperationIcon();
+
+    protected virtual void OnRunCompleted() { }
+
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (!disposing)
+            return;
+
+        TaskCompletionSource? scheduledRetry;
+        lock (CancellationLock)
+        {
+            if (Disposed)
+                return;
+
+            Disposed = true;
+            scheduledRetry = ScheduledRetryCompletionSource;
+            ScheduledRetryCompletionSource = null;
+        }
+
+        scheduledRetry?.TrySetCanceled();
+        Cancel();
+        DisposeStaleSpeedTimer();
+        if (!IsExecutingOperation)
+        {
+            RemoveFromQueue(this);
+        }
+    }
+}

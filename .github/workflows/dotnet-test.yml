@@ -1,0 +1,99 @@
+name: .NET Tests
+on:
+  push:
+    branches: [ "main", "backport/**-updates" ]
+    paths:
+      - 'global.json'
+      - '**.cs'
+      - '**.axaml'
+      - '**.xaml'
+      - '**.csproj'
+      - '**.props'
+      - '**.targets'
+      - '**.sln'
+      - '**.slnx'
+      - 'src/.editorconfig'
+      - '.github/workflows/dotnet-test.yml'
+
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'global.json'
+      - '**.cs'
+      - '**.axaml'
+      - '**.xaml'
+      - '**.csproj'
+      - '**.props'
+      - '**.targets'
+      - '**.sln'
+      - '**.slnx'
+      - 'src/.editorconfig'
+      - '.github/workflows/dotnet-test.yml'
+
+  workflow_dispatch:
+
+jobs:
+  test-codebase:
+    runs-on: windows-latest
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+
+    steps:
+    - name: Checkout the repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Install .NET SDK
+      uses: actions/setup-dotnet@v5
+      with:
+        global-json-file: global.json
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v5
+      with:
+        path: ${{ env.NUGET_PACKAGES }}
+        key: ${{ runner.os }}-nuget-${{ hashFiles('global.json', 'src/**/*.csproj', 'src/**/*.props', 'src/**/*.targets', 'src/**/*.sln', 'src/**/*.slnx') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+
+    - name: Install dependencies
+      working-directory: src
+      run: dotnet restore UniGetUI.Windows.slnx
+
+    - name: Verify patched SQLitePCLRaw dependency
+      working-directory: src
+      shell: pwsh
+      run: |
+        $Project = 'UniGetUI.PackageEngine.Managers.WinGet/UniGetUI.PackageEngine.Managers.WinGet.csproj'
+        $Packages = dotnet list $Project package --include-transitive | Out-String
+        $Vulnerabilities = dotnet list $Project package --vulnerable --include-transitive | Out-String
+        Write-Host $Packages
+        Write-Host $Vulnerabilities
+
+        if ($Packages -match 'SQLitePCLRaw\.lib\.e_sqlite3\s+2\.1\.11') {
+          throw 'Vulnerable SQLitePCLRaw.lib.e_sqlite3 2.1.11 is still resolved.'
+        }
+        if ($Packages -notmatch 'SQLitePCLRaw\.lib\.e_sqlite3\s+2\.1\.13') {
+          throw 'Expected patched SQLitePCLRaw.lib.e_sqlite3 2.1.13 was not resolved.'
+        }
+        if ($Vulnerabilities -match 'GHSA-2m69-gcr7-jv3q') {
+          throw 'GHSA-2m69-gcr7-jv3q is still reported by NuGet.'
+        }
+
+    - name: Check whitespace formatting
+      run: dotnet format whitespace src --folder --verify-no-changes --verbosity minimal
+
+    - name: Check code style formatting (Windows solution)
+      working-directory: src
+      run: dotnet format style UniGetUI.Windows.slnx --no-restore --verify-no-changes --verbosity minimal
+
+    - name: Build Windows solution
+      working-directory: src
+      run: dotnet build UniGetUI.Windows.slnx --no-restore --verbosity minimal /m:1 /p:UseSharedCompilation=false /p:Platform=x64
+
+    - name: Run Tests
+      working-directory: src
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: dotnet test UniGetUI.Windows.slnx --no-build --no-restore --verbosity q --nologo /p:Platform=x64

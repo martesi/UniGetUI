@@ -1,0 +1,5 @@
+Installed apps:
+Name Version Source   Updated             Info
+---- ------- ------   -------             ----
+git  2.47.1  main     2026-09-22 16:26:39
+pwsh 7.4.6   versions 2026-09-22 16:26:39 Global install

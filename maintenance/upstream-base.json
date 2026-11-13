@@ -1,0 +1,9 @@
+{
+  "upstream_repository": "Devolutions/UniGetUI",
+  "classic_repository": "martesi/UniGetUI",
+  "upstream_tracking_branch": "upstream",
+  "classic_branch": "main",
+  "base_tag": "v2026.2.1",
+  "base_commit": "68411409d001b9f34cfb896af1543a1d7067ca5e",
+  "policy": "selective-backport"
+}
