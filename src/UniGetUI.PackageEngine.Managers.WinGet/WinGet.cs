@@ -109,6 +109,8 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
         {
             Capabilities = new ManagerCapabilities
             {
+                CanReinstallOnUpdate = true,
+                SupportsCustomVersionsOnUpdate = false,
                 CanRunAsAdmin = true,
                 CanSkipIntegrityChecks = true,
                 CanRunInteractively = true,

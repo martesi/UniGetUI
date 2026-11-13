@@ -376,8 +376,8 @@ namespace UniGetUI.Interface
             bool source = IsColumnVisible("Source"), host = IsColumnVisible("InstallerHost");
             bool size = IsColumnVisible("DownloadSize"), date = IsColumnVisible("ReleaseDate");
             bool fixedWidths = IsFixedPackageListColumnSizing;
-            NameHeaderWidth.MinWidth = name ? (fixedWidths ? FixedColumnMinWidth : 100) : 0;
-            IdHeaderWidth.MinWidth = id ? (fixedWidths ? FixedColumnMinWidth : 100) : 0;
+            NameHeaderWidth.MinWidth = name && !fixedWidths ? 100 : 0;
+            IdHeaderWidth.MinWidth = id && !fixedWidths ? 100 : 0;
             NameHeaderWidth.Width = GetHeaderColumnWidth("Name", name);
             IdHeaderIconWidth.Width = Icon(id); IdHeaderWidth.Width = GetHeaderColumnWidth("Id", id, 32);
             VersionHeaderIconWidth.Width = Icon(version); VersionHeaderWidth.Width = GetHeaderColumnWidth("Version", version, 32);
@@ -386,6 +386,13 @@ namespace UniGetUI.Interface
             InstallerHostHeaderWidth.Width = GetHeaderColumnWidth("InstallerHost", host);
             DownloadSizeHeaderWidth.Width = GetHeaderColumnWidth("DownloadSize", size);
             ReleaseDateHeaderWidth.Width = GetHeaderColumnWidth("ReleaseDate", date);
+            VersionHeaderWidth.MaxWidth = VersionHeaderMaxWidth;
+            NewVersionHeaderIconWidth.MaxWidth = NewVersionHeaderIconMaxWidth;
+            NewVersionHeaderWidth.MaxWidth = NewVersionHeaderMaxWidth;
+            SourceHeaderWidth.MaxWidth = SourceHeaderMaxWidth;
+            InstallerHostHeaderWidth.MaxWidth = InstallerHostHeaderMaxWidth;
+            DownloadSizeHeaderWidth.MaxWidth = DownloadSizeHeaderMaxWidth;
+            ReleaseDateHeaderWidth.MaxWidth = ReleaseDateHeaderMaxWidth;
             PackageListContent.MinWidth = ListColumnMinWidth;
             PackageListScrollViewer.HorizontalScrollMode = fixedWidths ? ScrollMode.Enabled : ScrollMode.Disabled;
             PackageListScrollViewer.HorizontalScrollBarVisibility = fixedWidths ? ScrollBarVisibility.Auto : ScrollBarVisibility.Disabled;
@@ -426,7 +433,11 @@ namespace UniGetUI.Interface
 
         private void ColumnResizeHandle_DragDelta(object sender, DragDeltaEventArgs e)
         {
-            if (!IsFixedPackageListColumnSizing || sender is not Thumb { Tag: string column } || !IsColumnVisible(column))
+            if (
+                !IsFixedPackageListColumnSizing
+                || sender is not Thumb { Tag: string column }
+                || !IsColumnVisible(column)
+            )
                 return;
 
             _resizingColumnWidths[column] = Math.Max(
