@@ -22,6 +22,9 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
         {
             Capabilities = new ManagerCapabilities
             {
+                CanReinstallOnUpdate = true,
+                ReinstallsOnUpdateOnlyGlobalPackages = true,
+                SupportsCustomVersionsOnUpdate = false,
                 CanRunAsAdmin = true,
                 SupportsCustomVersions = true,
                 CanDownloadInstaller = true,
@@ -37,6 +40,8 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
             {
                 Id = "bun",
                 Name = "Bun",
+                SetupGuide = "PACKAGE_MANAGERS.md#bun",
+                InstallCommands = new(Windows: "winget install --exact --id Oven-sh.Bun"),
                 Description = CoreTools.Translate("Fast JavaScript runtime, bundler, and package manager"),
                 IconId = IconType.Bun,
                 ColorIconId = "bun_color",

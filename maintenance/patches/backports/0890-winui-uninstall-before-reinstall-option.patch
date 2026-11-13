@@ -1,0 +1,502 @@
+From 90e505079b00cafa0779c94e329cd97096cc2423 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 19:19:35 +0000
+Subject: [PATCH] Add uninstall-before-reinstall updates in WinUI
+
+Gate the option by manager capability and package scope, and sequence uninstall before the update using Classic's operation queue.
+
+Upstream-Commit: 403888a1c4ea8ed81ea6892462039bd45c0a811e
+Upstream-PR: Devolutions/UniGetUI#5686
+
+---
+diff --git a/maintenance/PATCH_STACK.md b/maintenance/PATCH_STACK.md
+--- a/maintenance/PATCH_STACK.md
++++ b/maintenance/PATCH_STACK.md
+@@ -73,7 +73,7 @@ feature checklist. Add a note only when a patch does not explain an exception.
+ | #5167, stuck upgrades | Import backend detection and settings. Omit the Avalonia settings control. |
+ | #4998 and #5199, phantom updates | Retry once without forced scope/architecture, then report failure. Suppress phantom updates only after that retry, using #5167 tracking. |
+ | #5114, PowerShell scope | Map upstream Avalonia scope behavior to the Classic WinUI scope selector. |
+-| #5077, reinstall orchestration | Skip: Classic already chains one install operation after the uninstall prerequisite and does not launch uninstall separately. Neither reported defect applies. |
++| #5077, reinstall orchestration | Skip its separate orchestration path: Classic already chains an install after an uninstall prerequisite. The user-selectable #5686 option uses that existing pipeline. |
+ | #4959, frontend retirement | Remove the obsolete frontend selector while preserving WinUI and legacy helpers for compatibility. |
+ | Classic issue #5, SQLite | Pin SQLitePCLRaw to 2.1.13 for GHSA-2m69-gcr7-jv3q. Remove the override when upstream or Pinget stops resolving vulnerable 2.1.11. |
+ 
+@@ -112,3 +112,4 @@ The appended patches retain the individual upstream references.
+ - #5668: add saved package-list column widths, resize handles, horizontal scrolling, and a fit-to-window mode to WinUI.
+ - #5669: link unavailable managers to the setup guide and expose install commands with copy and terminal actions.
+ - #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
++- #5686: add a manager and scope gated uninstall-before-reinstall option to the WinUI update dialog; reuse Classic's chained operation queue.
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -135,6 +135,7 @@
+   "Interactive installation": "Interactive installation",
+   "Skip hash check": "Skip hash check",
+   "Uninstall previous versions when updated": "Uninstall previous versions when updated",
++  "Uninstall, then reinstall when updated": "Uninstall, then reinstall when updated",
+   "Skip minor updates for this package": "Skip minor updates for this package",
+   "Ignore changes after the first": "Ignore changes after the first",
+   "version numbers": "version numbers",
+diff --git a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+--- a/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
++++ b/src/UniGetUI.PackageEngine.Enums/ManagerCapabilities.cs
+@@ -32,6 +32,8 @@ public struct ManagerCapabilities
+         public bool CanRemoveDataOnUninstall = false;
+         public bool CanDownloadInstaller = false;
+         public bool CanUninstallPreviousVersionsAfterUpdate = false;
++        public bool CanReinstallOnUpdate = false;
++        public bool ReinstallsOnUpdateOnlyGlobalPackages = false;
+         public bool CanListDependencies = false;
+         public bool SupportsCustomVersions = false;
+         public bool CanListVersions = true;
+diff --git a/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs b/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
+@@ -22,6 +22,9 @@ public Bun()
+         {
+             Capabilities = new ManagerCapabilities
+             {
++                CanReinstallOnUpdate = true,
++                ReinstallsOnUpdateOnlyGlobalPackages = true,
++                SupportsCustomVersionsOnUpdate = false,
+                 CanRunAsAdmin = true,
+                 SupportsCustomVersions = true,
+                 CanDownloadInstaller = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
+@@ -88,6 +88,7 @@ public Chocolatey()
+         {
+             Capabilities = new ManagerCapabilities
+             {
++                CanReinstallOnUpdate = true,
+                 CanRunAsAdmin = true,
+                 CanDownloadInstaller = true,
+                 CanSkipIntegrityChecks = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs b/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
+@@ -25,6 +25,7 @@ public DotNet()
+         {
+             Capabilities = new ManagerCapabilities
+             {
++                CanReinstallOnUpdate = true,
+                 CanRunAsAdmin = true,
+                 CanDownloadInstaller = true,
+                 SupportsCustomScopes = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs b/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
+@@ -23,6 +23,9 @@ public Npm()
+         {
+             Capabilities = new ManagerCapabilities
+             {
++                CanReinstallOnUpdate = true,
++                ReinstallsOnUpdateOnlyGlobalPackages = true,
++                SupportsCustomVersionsOnUpdate = false,
+                 CanRunAsAdmin = true,
+                 SupportsCustomVersions = true,
+                 CanDownloadInstaller = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+@@ -59,6 +59,7 @@ public Pip()
+ 
+             Capabilities = new ManagerCapabilities
+             {
++                CanReinstallOnUpdate = true,
+                 CanRunAsAdmin = true,
+                 SupportsCustomVersions = true,
+                 SupportsCustomScopes = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+@@ -22,6 +22,7 @@ public PowerShell()
+         {
+             Capabilities = new ManagerCapabilities
+             {
++                SupportsCustomVersionsOnUpdate = false,
+                 CanRunAsAdmin = true,
+                 CanSkipIntegrityChecks = true,
+                 SupportsCustomVersions = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
+@@ -24,6 +24,7 @@ public PowerShell7()
+         {
+             Capabilities = new ManagerCapabilities
+             {
++                SupportsCustomVersionsOnUpdate = false,
+                 CanRunAsAdmin = true,
+                 SupportsCustomVersions = true,
+                 SupportsCustomScopes = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+@@ -122,6 +122,7 @@ public Scoop()
+ 
+             Capabilities = new ManagerCapabilities
+             {
++                CanReinstallOnUpdate = true,
+                 CanRunAsAdmin = true,
+                 CanSkipIntegrityChecks = true,
+                 CanDownloadInstaller = true,
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+@@ -109,6 +109,8 @@ public WinGet()
+         {
+             Capabilities = new ManagerCapabilities
+             {
++                CanReinstallOnUpdate = true,
++                SupportsCustomVersionsOnUpdate = false,
+                 CanRunAsAdmin = true,
+                 CanSkipIntegrityChecks = true,
+                 CanRunInteractively = true,
+diff --git a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+--- a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
++++ b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+@@ -10,6 +10,7 @@
+ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.Interfaces.ManagerProviders;
+ using UniGetUI.PackageEngine.PackageClasses;
++using UniGetUI.PackageEngine.ManagerClasses.Manager;
+ using UniGetUI.PackageEngine.PackageLoader;
+ using UniGetUI.PackageEngine.Serializable;
+ using UniGetUI.PackageOperations;
+@@ -26,6 +27,9 @@ public abstract class PackageOperation : AbstractProcessOperation
+         public readonly IPackage Package;
+         public readonly InstallOptions Options;
+         public readonly OperationType Role;
++        private readonly UninstallPackageOperation? _uninstallBeforeReinstall;
++        private bool _reinstallsThisAttempt;
++        private OperationType CommandRole => _reinstallsThisAttempt ? OperationType.Install : Role;
+         public Task SuccessHandled { get; private set; } = Task.CompletedTask;
+ 
+         protected abstract Task HandleSuccess();
+@@ -46,8 +50,29 @@ public PackageOperation(
+             )
+         {
+             Package = package;
+-            Options = options;
+             Role = role;
++            if (ReinstallsOnUpdate(package, options, role))
++            {
++                Options = PinReinstallVersion(package, options);
++                Logger.Info(
++                    $"Queuing {package} version {package.VersionString} for uninstall before reinstalling version {package.NewVersionString}..."
++                );
++                InstallOptions uninstallOptions = options.Copy();
++                uninstallOptions.RemoveDataOnUninstall = false;
++                uninstallOptions.KillBeforeOperation = [];
++                _uninstallBeforeReinstall = new UninstallPackageOperation(package, uninstallOptions)
++                {
++                    IsReinstallStep = true,
++                };
++                OverridenInstallationOptions overridesBeforeUninstall = package.OverridenOptions;
++                _uninstallBeforeReinstall.OperationSucceeded += (_, _) =>
++                    package.OverridenOptions = overridesBeforeUninstall;
++                _reinstallsThisAttempt = true;
++            }
++            else
++            {
++                Options = options;
++            }
+ 
+             Initialize();
+ 
+@@ -96,6 +121,14 @@ protected override void ApplyRetryAction(string retryMode)
+                         $"Retry mode {retryMode} is not supported in this context"
+                     );
+             }
++            if (
++                _uninstallBeforeReinstall is not null
++                && _uninstallBeforeReinstall.Status is not OperationStatus.Succeeded
++            )
++            {
++                _uninstallBeforeReinstall.Options.RunAsAdministrator |= Options.RunAsAdministrator;
++                _uninstallBeforeReinstall.Options.InteractiveInstallation |= Options.InteractiveInstallation;
++            }
+             Metadata.OperationInformation =
+                 "Retried package operation for Package="
+                 + Package.Id
+@@ -179,7 +212,7 @@ private async Task<OperationVeredict> PerformLocalOperation()
+             {
+                 try
+                 {
+-                    var result = await managed.TryPerformAsync(Package, Options, Role,
++                    var result = await managed.TryPerformAsync(Package, Options, CommandRole,
+                         message => Line(message, LineType.Information), ReportProgress, CancellationToken);
+                     if (result is not null)
+                         return result.Value;
+@@ -204,7 +237,7 @@ protected sealed override void PrepareProcessStartInfo()
+             var operationParameters = Package.Manager.OperationHelper.GetParameters(
+                 Package,
+                 Options,
+-                Role
++                CommandRole
+             );
+             var callVector = Package.Manager.Status.OperationCallArgs;
+ 
+@@ -273,7 +306,7 @@ protected sealed override Task<OperationVeredict> GetProcessVeredict(
+             List<string> Output
+         )
+         {
+-            var result = Package.Manager.OperationHelper.GetResult(Package, Role, Output, ReturnCode);
++            var result = Package.Manager.OperationHelper.GetResult(Package, CommandRole, Output, ReturnCode);
+             if (result is OperationVeredict.Failure
+                 && Output.Any(line => line.Contains("[WinError 32]", StringComparison.Ordinal)))
+             {
+@@ -392,6 +425,84 @@ private static IReadOnlyList<InnerOperation> _getPreInstallOps(
+             return l;
+         }
+ 
++        public static bool SupportsUninstallBeforeUpdate(IPackage package)
++        {
++            var capabilities = package.Manager.Capabilities;
++            string uninstallVerb = package.Manager.Properties.UninstallVerb;
++            return capabilities.CanReinstallOnUpdate
++                && !string.IsNullOrWhiteSpace(uninstallVerb)
++                && !uninstallVerb.Equals(
++                    "Unset",
++                    StringComparison.OrdinalIgnoreCase
++                )
++                && (
++                    !capabilities.ReinstallsOnUpdateOnlyGlobalPackages
++                    || string.Equals(
++                        package.OverridenOptions.Scope,
++                        PackageScope.Global.ToString(),
++                        StringComparison.OrdinalIgnoreCase
++                    )
++                );
++        }
++
++        private static bool ReinstallsOnUpdate(
++            IPackage package,
++            InstallOptions options,
++            OperationType role
++        ) =>
++            role is OperationType.Update
++            && options.UninstallBeforeUpdate
++            && package.IsUpgradable
++            && SupportsUninstallBeforeUpdate(package);
++
++        private static InstallOptions PinReinstallVersion(
++            IPackage package,
++            InstallOptions options
++        )
++        {
++            var pinned = options.Copy();
++            var capabilities = package.Manager.Capabilities;
++            if (!string.IsNullOrWhiteSpace(pinned.Version) && capabilities.SupportsCustomVersionsOnUpdate)
++                return pinned;
++
++            pinned.Version =
++                package.IsUpgradable && capabilities.SupportsCustomVersions
++                    ? package.NewVersionString
++                    : "";
++            return pinned;
++        }
++
++        private static bool IsKnownToBeUninstalled(IPackage package)
++        {
++            InstalledPackagesLoader installed = InstalledPackagesLoader.Instance;
++            if (!installed.IsLoaded)
++                return false;
++            if (package.Manager is PackageManager manager && manager.LastInstalledListingFailed)
++                return false;
++            if (installed.GetEquivalentPackages(package).Any())
++                return false;
++
++            Logger.Info(
++                $"{package} is no longer installed; proceeding with the install without an uninstall step."
++            );
++            return true;
++        }
++
++        protected override IReadOnlyList<InnerOperation> GetAttemptPreOperations()
++        {
++            List<InnerOperation> operations = [.. base.GetAttemptPreOperations()];
++            if (_uninstallBeforeReinstall is null)
++                return operations;
++
++            bool alreadyUninstalled =
++                _uninstallBeforeReinstall.Status is OperationStatus.Succeeded
++                || IsKnownToBeUninstalled(Package);
++            _reinstallsThisAttempt = true;
++            if (!alreadyUninstalled)
++                operations.Add(new InnerOperation(_uninstallBeforeReinstall, mustSucceed: true));
++            return operations;
++        }
++
+         private static IReadOnlyList<InnerOperation> _getPostInstallOps(
+             InstallOptions opts,
+             OperationType role,
+@@ -415,6 +526,7 @@ static bool IsSupersededBy(IPackage installed, IPackage update) =>
+ 
+             if (role is OperationType.Update && opts.UninstallPreviousVersionsOnUpdate)
+             {
++                bool reinstalls = ReinstallsOnUpdate(package, opts, role);
+                 var capabilities = package.Manager.Capabilities;
+                 string? updatedScope =
+                     capabilities.SupportsCustomScopes
+@@ -425,6 +537,7 @@ static bool IsSupersededBy(IPackage installed, IPackage update) =>
+ 
+                 var matches = InstalledPackagesLoader.Instance.Packages.Where(p =>
+                     p.IsEquivalentTo(package)
++                    && !(reinstalls && p.VersionString.Equals(package.VersionString, StringComparison.OrdinalIgnoreCase))
+                     && (
+                         string.IsNullOrEmpty(p.OverridenOptions.Scope)
+                         || string.IsNullOrEmpty(updatedScope)
+@@ -629,6 +742,8 @@ protected override void Initialize()
+ 
+     public class UninstallPackageOperation : PackageOperation
+     {
++        internal bool IsReinstallStep { get; init; }
++
+         public UninstallPackageOperation(
+             IPackage package,
+             InstallOptions options,
+@@ -645,6 +760,12 @@ protected override Task HandleFailure()
+ 
+         protected override Task HandleSuccess()
+         {
++            if (IsReinstallStep)
++            {
++                InstalledPackagesLoader.Instance.Remove(Package);
++                return Task.CompletedTask;
++            }
++
+             Package.SetTag(PackageTag.Default);
+             Package.GetAvailablePackage()?.SetTag(PackageTag.Default);
+             UpgradablePackagesLoader.Instance.Remove(Package);
+diff --git a/src/UniGetUI.PackageEngine.Serializable/InstallOptions.cs b/src/UniGetUI.PackageEngine.Serializable/InstallOptions.cs
+--- a/src/UniGetUI.PackageEngine.Serializable/InstallOptions.cs
++++ b/src/UniGetUI.PackageEngine.Serializable/InstallOptions.cs
+@@ -15,6 +15,7 @@ public class InstallOptions : SerializableComponent<InstallOptions>
+         private const string SKIP_MINOR_LEVEL = "SkipMinorUpdatesLevel";
+         private const string REMOVE_DATA_UNINST = "RemoveDataOnUninstall";
+         private const string CLEAR_PREV_VER = "UninstallPreviousVersionsOnUpdate";
++        private const string UNINST_BEFORE_UPD = "UninstallBeforeUpdate";
+         private const string ABORT_PRE_INST_FAIL = "AbortOnPreInstallFail";
+         private const string ABORT_PRE_UPD_FAIL = "AbortOnPreUpdateFail";
+         private const string ABORT_PRE_UNINST_FAIL = "AbortOnPreUninstallFail";
+@@ -48,6 +49,7 @@ public class InstallOptions : SerializableComponent<InstallOptions>
+             { SKIP_MINOR, false },
+             { REMOVE_DATA_UNINST, false },
+             { CLEAR_PREV_VER, false },
++            { UNINST_BEFORE_UPD, false },
+             { ABORT_PRE_INST_FAIL, true },
+             { ABORT_PRE_UPD_FAIL, true },
+             { ABORT_PRE_UNINST_FAIL, true },
+@@ -128,6 +130,11 @@ public bool UninstallPreviousVersionsOnUpdate
+             get => _boolVal[CLEAR_PREV_VER];
+             set => _boolVal[CLEAR_PREV_VER] = value;
+         }
++        public bool UninstallBeforeUpdate
++        {
++            get => _boolVal[UNINST_BEFORE_UPD];
++            set => _boolVal[UNINST_BEFORE_UPD] = value;
++        }
+         public bool AbortOnPreInstallFail
+         {
+             get => _boolVal[ABORT_PRE_INST_FAIL];
+diff --git a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml
+--- a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml
++++ b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml
+@@ -222,6 +222,12 @@
+                           Text="Uninstall previous versions when updated"
+                         />
+                       </CheckBox>
++                      <CheckBox Name="UninstallBeforeUpdateCheckBox">
++                        <widgets:TranslatedTextBlock
++                          HorizontalAlignment="Stretch"
++                          Text="Uninstall, then reinstall when updated"
++                        />
++                      </CheckBox>
+                     </controls:WrapPanel>
+                     <Grid
+                       Padding="4,8"
+diff --git a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+--- a/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
++++ b/src/UniGetUI/Pages/DialogPages/InstallOptions_Package.xaml.cs
+@@ -11,6 +11,7 @@
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Interfaces;
+ using UniGetUI.PackageEngine.PackageClasses;
++using UniGetUI.PackageEngine.Operations;
+ using UniGetUI.PackageEngine.Serializable;
+ using UniGetUI.Pages.SettingsPages.GeneralPages;
+ using Architecture = UniGetUI.PackageEngine.Enums.Architecture;
+@@ -119,6 +120,7 @@ async Task LoadImage()
+             InteractiveCheckBox.IsChecked = Options.InteractiveInstallation;
+             HashCheckbox.IsChecked = Options.SkipHashCheck;
+             UninstallPreviousOnUpdate.IsChecked = Options.UninstallPreviousVersionsOnUpdate;
++            UninstallBeforeUpdateCheckBox.IsChecked = Options.UninstallBeforeUpdate;
+ 
+             ArchitectureComboBox.Items.Add(CoreTools.Translate("Default"));
+             ArchitectureComboBox.SelectedIndex = 0;
+@@ -285,6 +287,13 @@ operation is not OperationType.Uninstall
+                     .CanUninstallPreviousVersionsAfterUpdate
+                     ? Visibility.Visible
+                     : Visibility.Collapsed;
++                bool canUninstallBeforeUpdate =
++                    operation is OperationType.Update
++                    && PackageOperation.SupportsUninstallBeforeUpdate(Package);
++                UninstallBeforeUpdateCheckBox.IsEnabled = canUninstallBeforeUpdate;
++                UninstallBeforeUpdateCheckBox.Visibility = canUninstallBeforeUpdate
++                    ? Visibility.Visible
++                    : Visibility.Collapsed;
+ 
+                 ArchitectureComboBox.IsEnabled =
+                     operation is not OperationType.Uninstall
+@@ -390,6 +399,8 @@ public async Task<InstallOptions> GetUpdatedOptions(bool updateDetachedOptions =
+             options.SkipHashCheck = HashCheckbox?.IsChecked ?? false;
+             options.UninstallPreviousVersionsOnUpdate =
+                 UninstallPreviousOnUpdate?.IsChecked ?? false;
++            options.UninstallBeforeUpdate =
++                UninstallBeforeUpdateCheckBox?.IsChecked ?? false;
+             options.OverridesNextLevelOpts = !FollowGlobalOptionsSwitch.IsOn;
+             options.AutoUpdatePackage = AutoUpdatePackageCheckbox.IsChecked ?? false;
+ 
+diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+--- a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
++++ b/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs
+@@ -376,8 +376,8 @@ private void RefreshColumnVisibility()
+             bool source = IsColumnVisible("Source"), host = IsColumnVisible("InstallerHost");
+             bool size = IsColumnVisible("DownloadSize"), date = IsColumnVisible("ReleaseDate");
+             bool fixedWidths = IsFixedPackageListColumnSizing;
+-            NameHeaderWidth.MinWidth = name ? (fixedWidths ? FixedColumnMinWidth : 100) : 0;
+-            IdHeaderWidth.MinWidth = id ? (fixedWidths ? FixedColumnMinWidth : 100) : 0;
++            NameHeaderWidth.MinWidth = name && !fixedWidths ? 100 : 0;
++            IdHeaderWidth.MinWidth = id && !fixedWidths ? 100 : 0;
+             NameHeaderWidth.Width = GetHeaderColumnWidth("Name", name);
+             IdHeaderIconWidth.Width = Icon(id); IdHeaderWidth.Width = GetHeaderColumnWidth("Id", id, 32);
+             VersionHeaderIconWidth.Width = Icon(version); VersionHeaderWidth.Width = GetHeaderColumnWidth("Version", version, 32);
+@@ -386,6 +386,13 @@ private void RefreshColumnVisibility()
+             InstallerHostHeaderWidth.Width = GetHeaderColumnWidth("InstallerHost", host);
+             DownloadSizeHeaderWidth.Width = GetHeaderColumnWidth("DownloadSize", size);
+             ReleaseDateHeaderWidth.Width = GetHeaderColumnWidth("ReleaseDate", date);
++            VersionHeaderWidth.MaxWidth = VersionHeaderMaxWidth;
++            NewVersionHeaderIconWidth.MaxWidth = NewVersionHeaderIconMaxWidth;
++            NewVersionHeaderWidth.MaxWidth = NewVersionHeaderMaxWidth;
++            SourceHeaderWidth.MaxWidth = SourceHeaderMaxWidth;
++            InstallerHostHeaderWidth.MaxWidth = InstallerHostHeaderMaxWidth;
++            DownloadSizeHeaderWidth.MaxWidth = DownloadSizeHeaderMaxWidth;
++            ReleaseDateHeaderWidth.MaxWidth = ReleaseDateHeaderMaxWidth;
+             PackageListContent.MinWidth = ListColumnMinWidth;
+             PackageListScrollViewer.HorizontalScrollMode = fixedWidths ? ScrollMode.Enabled : ScrollMode.Disabled;
+             PackageListScrollViewer.HorizontalScrollBarVisibility = fixedWidths ? ScrollBarVisibility.Auto : ScrollBarVisibility.Disabled;
+@@ -426,7 +433,11 @@ private void RefreshColumnVisibility()
+ 
+         private void ColumnResizeHandle_DragDelta(object sender, DragDeltaEventArgs e)
+         {
+-            if (!IsFixedPackageListColumnSizing || sender is not Thumb { Tag: string column } || !IsColumnVisible(column))
++            if (
++                !IsFixedPackageListColumnSizing
++                || sender is not Thumb { Tag: string column }
++                || !IsColumnVisible(column)
++            )
+                 return;
+ 
+             _resizingColumnWidths[column] = Math.Max(

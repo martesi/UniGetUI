@@ -1,0 +1,205 @@
+From adfe71a720fdfbc3e0b3f86d09a4b7260b2b8881 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 18:03:07+0000
+Subject: [PATCH] Add setup guide links to WinUI manager status pages
+
+Link unavailable managers to the matching upstream setup guide section, while keeping Classic's existing status and installer controls.
+
+Upstream-Commit: 391d71f70e28ad1606adeca2711466b0a7da8df3
+Upstream-PR: Devolutions/UniGetUI#5669
+
+---
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+index 75472f8f3a0642063df8dfa371d6287ce8fd2c48..d12b496d6de436a8efe06eaa9a3459ba013027ac 100644
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -876,5 +876,6 @@
+   "Columns": "Columns",
+   "Installer host": "Installer host",
+   "Download size": "Download size",
+-  "Release date": "Release date"
++  "Release date": "Release date",
++  "How to set up {0}": "How to set up {0}"
+ }
+diff --git a/src/UniGetUI.PackageEngine.Interfaces/ManagerProperties.cs b/src/UniGetUI.PackageEngine.Interfaces/ManagerProperties.cs
+index 188330c55dfa484430d746ccb32cec486d47db5f..140beb8f838b4fd4e4f3eb651995a28deda8d14c 100644
+--- a/src/UniGetUI.PackageEngine.Interfaces/ManagerProperties.cs
++++ b/src/UniGetUI.PackageEngine.Interfaces/ManagerProperties.cs
+@@ -20,6 +20,7 @@ public struct ManagerProperties
+         public string InstallVerb { get; set; } = "Unset";
+         public string UpdateVerb { get; set; } = "Unset";
+         public string UninstallVerb { get; set; } = "Unset";
++        public string SetupGuide { get; set; } = "";
+         public IManagerSource[] KnownSources { get; set; } = [];
+         public IManagerSource DefaultSource { get; set; } = null!;
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs b/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
+index 70054c0b0d789b8c8402a60539a766e0ee130afa..da11231dd23f60f5e42a61be50c372f01d8441b2 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
+@@ -37,6 +37,7 @@ public Bun()
+             {
+                 Id = "bun",
+                 Name = "Bun",
++                SetupGuide = "PACKAGE_MANAGERS.md#bun",
+                 Description = CoreTools.Translate("Fast JavaScript runtime, bundler, and package manager"),
+                 IconId = IconType.Bun,
+                 ColorIconId = "bun_color",
+diff --git a/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs b/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
+index 0c405975a41a3865081e46760d0490c6c186e936..55b2481363dc9dcc623a51664e3b54da45fc168d 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
+@@ -88,6 +88,7 @@ public Cargo()
+         {
+             Id = "cargo",
+             Name = "Cargo",
++            SetupGuide = "PACKAGE_MANAGERS.md#cargo",
+             Description = CoreTools.Translate(
+                 "The Rust package manager.<br>Contains: <b>Rust libraries and programs written in Rust</b>"
+             ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
+index 0e57983aefe941640cb231c66240f05c5d1a4250..71cfafa54366d0e6eb166be9aed90684983d88a9 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
+@@ -113,6 +113,7 @@ public Chocolatey()
+             {
+                 Id = "chocolatey",
+                 Name = "Chocolatey",
++                SetupGuide = "PACKAGE_MANAGERS.md#chocolatey",
+                 Description = CoreTools.Translate(
+                     "The classical package manager for windows. You'll find everything there. <br>Contains: <b>General Software</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs b/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
+index 3b119fb2d30c3d1f14bf0183ed0802c1c3343b9c..918134e5fe3e342f69def22fbe3bcf0b165fbc5c 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
+@@ -50,6 +50,7 @@ public DotNet()
+             {
+                 Id = "dotnet-tool",
+                 Name = ".NET Tool",
++                SetupGuide = "PACKAGE_MANAGERS.md#net-tool",
+                 Description = CoreTools.Translate(
+                     "A repository full of tools and executables designed with Microsoft's .NET ecosystem in mind.<br>Contains: <b>.NET related tools and scripts</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs b/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
+index 488d6679bc3c3ea7407087171e3ba3497bd8ccec..b14b4a128141d275eae1da220dded8266e2e46b4 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
+@@ -38,6 +38,7 @@ public Npm()
+             {
+                 Id = "npm",
+                 Name = "Npm",
++                SetupGuide = "PACKAGE_MANAGERS.md#npm",
+                 Description = CoreTools.Translate(
+                     "Node JS's package manager. Full of libraries and other utilities that orbit the javascript world<br>Contains: <b>Node javascript libraries and other related utilities</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+index ebff3a3d55456557c1a701040849703425a8a79d..a98f34efafdac8f538d99136226707d4c5cc10cb 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+@@ -75,6 +75,7 @@ public Pip()
+             {
+                 Id = "pip",
+                 Name = "Pip",
++                SetupGuide = "PACKAGE_MANAGERS.md#pip",
+                 Description = CoreTools.Translate(
+                     "Python's library manager. Full of python libraries and other python-related utilities<br>Contains: <b>Python libraries and related utilities</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+index ee1cad2c15e450512c54107261eb48cf39532f30..0c81c0352ee6b4e98f8b2048090c466b97b11b09 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell/PowerShell.cs
+@@ -48,6 +48,7 @@ public PowerShell()
+             {
+                 Id = "winps",
+                 Name = "PowerShell",
++                SetupGuide = "PACKAGE_MANAGERS.md#powershell-5x",
+                 DisplayName = "PowerShell 5.x",
+                 Description = CoreTools.Translate(
+                     "PowerShell's package manager. Find libraries and scripts to expand PowerShell capabilities<br>Contains: <b>Modules, Scripts, Cmdlets</b>"
+diff --git a/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs b/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
+index e4bdaf1c3d484ffb6c1efcca05fdb5fffba04009..c81937c749f2326d74b009fdb23280562af46c34 100644
+--- a/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
++++ b/src/UniGetUI.PackageEngine.Managers.PowerShell7/PowerShell7.cs
+@@ -49,6 +49,7 @@ public PowerShell7()
+             {
+                 Id = "pwsh",
+                 Name = "PowerShell7",
++                SetupGuide = "PACKAGE_MANAGERS.md#powershell-7x",
+                 DisplayName = "PowerShell 7.x",
+                 Description = CoreTools.Translate(
+                     "PowerShell's package manager. Find libraries and scripts to expand PowerShell capabilities<br>Contains: <b>Modules, Scripts, Cmdlets</b>"
+diff --git a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+index 69d1964ad5f654e654233a35ef2fb046bb3ed349..b83fb32040148dc8b8ce5002ab19d47124c03437 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Scoop/Scoop.cs
+@@ -153,6 +153,7 @@ public Scoop()
+             {
+                 Id = "scoop",
+                 Name = "Scoop",
++                SetupGuide = "PACKAGE_MANAGERS.md#scoop",
+                 Description = CoreTools.Translate(
+                     "Great repository of unknown but useful utilities and other interesting packages.<br>Contains: <b>Utilities, Command-line programs, General Software (extras bucket required)</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Vcpkg/Vcpkg.cs b/src/UniGetUI.PackageEngine.Managers.Vcpkg/Vcpkg.cs
+index 68e6559d131c9f22f1a1436f619e5ea14cdd091e..54de45bb6e0c46319024234f30d29651ec2da0dc 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Vcpkg/Vcpkg.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Vcpkg/Vcpkg.cs
+@@ -72,6 +72,7 @@ public Vcpkg()
+             {
+                 Id = "vcpkg",
+                 Name = "vcpkg",
++                SetupGuide = "PACKAGE_MANAGERS.md#vcpkg",
+                 Description = CoreTools.Translate(
+                     "A popular C/C++ library manager. Full of C/C++ libraries and other C/C++-related utilities<br>Contains: <b>C/C++ libraries and related utilities</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+index c62442e68706a5b0dc887835e9c96c016e9236ee..cb33ffb25afcd0fec6a881d9e820c8c66758b5c0 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+@@ -143,6 +143,7 @@ public WinGet()
+             {
+                 Id = "winget",
+                 Name = "Winget",
++                SetupGuide = "PACKAGE_MANAGERS.md#winget",
+                 DisplayName = "WinGet",
+                 Description = CoreTools.Translate(
+                     "Microsoft's official package manager. Full of well-known and verified packages<br>Contains: <b>General Software, Microsoft Store apps</b>"
+diff --git a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml
+index 3bebba72bd6c62e387a1060d4c95354dc73e04ea..3c2fa3874a719aaa68a9a76fc86022ee238c1c92 100644
+--- a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml
++++ b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml
+@@ -48,6 +48,12 @@
+           />
+         </InfoBar.Content>
+       </InfoBar>
++      <HyperlinkButton
++        x:Name="SetupGuideLink"
++        Margin="4,8"
++        HorizontalAlignment="Right"
++        Visibility="Collapsed"
++      />
+       <controls:SettingsCard
+         x:Name="ManagerExecutable"
+         Padding="24,16,24,16"
+diff --git a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
+index 7c854741a58d168adb03fad494532f7b24234a88..0945791d919412e4d96199b878bd03505a603645 100644
+--- a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
++++ b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
+@@ -603,6 +603,16 @@ void ApplyManagerState(bool ShowVersion = false)
+             if (Manager is null)
+                 throw new InvalidDataException();
+ 
++            SetupGuideLink.Content = CoreTools.Translate("How to set up {0}", Manager.DisplayName);
++            string setupGuide = Manager.Properties.SetupGuide;
++            SetupGuideLink.NavigateUri = string.IsNullOrWhiteSpace(setupGuide)
++                ? null
++                : new Uri($"https://github.com/Devolutions/UniGetUI/blob/main/docs/{setupGuide}");
++            SetupGuideLink.Visibility =
++                !_isLoading && !Manager.IsReady() && SetupGuideLink.NavigateUri is not null
++                    ? Visibility.Visible
++                    : Visibility.Collapsed;
++
+             // Load version and manager path
+             ShowVersionHyperlink.Visibility = Visibility.Collapsed;
+             LongVersionTextBlock.Visibility = Visibility.Collapsed;

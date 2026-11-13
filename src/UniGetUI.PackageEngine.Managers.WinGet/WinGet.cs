@@ -109,6 +109,8 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
         {
             Capabilities = new ManagerCapabilities
             {
+                CanReinstallOnUpdate = true,
+                SupportsCustomVersionsOnUpdate = false,
                 CanRunAsAdmin = true,
                 CanSkipIntegrityChecks = true,
                 CanRunInteractively = true,
@@ -143,6 +145,7 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
             {
                 Id = "winget",
                 Name = "Winget",
+                SetupGuide = "PACKAGE_MANAGERS.md#winget",
                 DisplayName = "WinGet",
                 Description = CoreTools.Translate(
                     "Microsoft's official package manager. Full of well-known and verified packages<br>Contains: <b>General Software, Microsoft Store apps</b>"

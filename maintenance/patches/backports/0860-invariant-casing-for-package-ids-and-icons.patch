@@ -1,0 +1,152 @@
+From ee223524264e593fbbb586d8ccb0e46e1f8acf0f Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 18:03:11+0000
+Subject: [PATCH] Use invariant casing for package and icon ids
+
+Use culture-independent lowercase conversions for NuGet ids, WinGet manifest paths, and package icon identifiers.
+
+Upstream-Commit: 550fcab761ede680956affa6e48a0b54f217c47c
+Upstream-PR: Devolutions/UniGetUI#5674
+
+---
+diff --git a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+index 10d5dfa382d733029de9597305a45dee32f6acb9..eace2a63487127feba21361c2ea0012e11db3552 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Generic.NuGet/BaseNuGet.cs
+@@ -365,7 +365,7 @@ INativeTaskLogger logger
+                         newest,
+                         source,
+                         this,
+-                        new OverridenInstallationOptions(scopeMap.GetValueOrDefault(id.ToLower()))
++                        new OverridenInstallationOptions(scopeMap.GetValueOrDefault(id.ToLowerInvariant()))
+                     )
+                 );
+             }
+@@ -573,7 +573,7 @@ bool canPrerelease
+             var indexById = new Dictionary<string, int>();
+             foreach (var package in installedPackages)
+             {
+-                string key = package.Id.ToLower();
++                string key = package.Id.ToLowerInvariant();
+                 if (!indexById.TryGetValue(key, out int index))
+                 {
+                     indexById[key] = entries.Count;
+@@ -755,7 +755,7 @@ IReadOnlyList<IPackage> installedPackages
+             {
+                 if (
+                     !newestInstalled.TryGetValue(
+-                        candidate.Id.ToLower(),
++                        candidate.Id.ToLowerInvariant(),
+                         out IPackage? newestPackage
+                     )
+                 )
+@@ -793,7 +793,7 @@ IEnumerable<IPackage> installedPackages
+             var newest = new Dictionary<string, IPackage>();
+             foreach (var package in installedPackages)
+             {
+-                string key = package.Id.ToLower();
++                string key = package.Id.ToLowerInvariant();
+                 if (
+                     !newest.TryGetValue(key, out IPackage? current)
+                     || !IsOlderVersion(package.VersionString, current.VersionString)
+@@ -821,7 +821,7 @@ IEnumerable<IPackage> installedPackages
+         {
+             var scopeMap = new Dictionary<string, string?>();
+             foreach (var package in installedPackages)
+-                scopeMap[package.Id.ToLower()] = package.OverridenOptions.Scope;
++                scopeMap[package.Id.ToLowerInvariant()] = package.OverridenOptions.Scope;
+             return scopeMap;
+         }
+ 
+@@ -853,7 +853,7 @@ internal static List<Package> ParseUpdatesResponse(
+                     .Groups[1]
+                     .Value;
+ 
+-                if (!packageIdVersion.TryGetValue(id.ToLower(), out string? installedVersion))
++                if (!packageIdVersion.TryGetValue(id.ToLowerInvariant(), out string? installedVersion))
+                     continue;
+ 
+                 logger?.Log($"Found package {id} version {new_version} on source {source.Name}");
+@@ -865,7 +865,7 @@ internal static List<Package> ParseUpdatesResponse(
+                     new_version,
+                     source,
+                     manager,
+-                    new OverridenInstallationOptions(packageIdScope.GetValueOrDefault(id.ToLower()))
++                    new OverridenInstallationOptions(packageIdScope.GetValueOrDefault(id.ToLowerInvariant()))
+                 );
+                 packages.Add(nativePackage);
+                 Manifests[nativePackage.GetVersionedHash()] = match.Value;
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+index 644c96191d131e2c73ac52d83b7775c29d093a7c..abe8bc74798cf4b3568c1b65ba6f7a97c8fca67c 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/NativeWinGetHelper.cs
+@@ -835,7 +835,7 @@ public void GetPackageDetails_UnSafe(IPackageDetails details)
+         {
+             details.ManifestUrl = new Uri(
+                 "https://github.com/microsoft/winget-pkgs/tree/master/manifests/"
+-                    + details.Package.Id[0].ToString().ToLower()
++                    + details.Package.Id[0].ToString().ToLowerInvariant()
+                     + "/"
+                     + details.Package.Id.Split('.')[0]
+                     + "/"
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+index 82eae60dd4c560650c8a0654c5ed69980cb46960..d6449f8665b1c5ad7fddb964409b617d58940480 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/PingetCliHelper.cs
+@@ -208,7 +208,7 @@ public void GetPackageDetails_UnSafe(IPackageDetails details)
+         {
+             details.ManifestUrl = new Uri(
+                 "https://github.com/microsoft/winget-pkgs/tree/master/manifests/"
+-                    + details.Package.Id[0].ToString().ToLower()
++                    + details.Package.Id[0].ToString().ToLowerInvariant()
+                     + "/"
+                     + details.Package.Id.Split('.')[0]
+                     + "/"
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+index 70393565367df93a7dce588c86abb1a199ba1d31..1592f991952fba6b71dbf12e1532ac410adb5d40 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetCliHelper.cs
+@@ -432,7 +432,7 @@ public void GetPackageDetails_UnSafe(IPackageDetails details)
+         {
+             details.ManifestUrl = new Uri(
+                 "https://github.com/microsoft/winget-pkgs/tree/master/manifests/"
+-                    + details.Package.Id[0].ToString().ToLower()
++                    + details.Package.Id[0].ToString().ToLowerInvariant()
+                     + "/"
+                     + details.Package.Id.Split('.')[0]
+                     + "/"
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetIconsHelper.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetIconsHelper.cs
+index 6c3082c5ad6724c808b7bb6b3f2bae41d0368857..001e5d43daacfb79e1152d9d467923f1ed8b5d8e 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetIconsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/ClientHelpers/WinGetIconsHelper.cs
+@@ -31,7 +31,7 @@ internal static class WinGetIconsHelper
+         httpRequest.Method = "POST";
+         httpRequest.ContentType = "application/json";
+ 
+-        string data = "{\"productIds\": \"" + package.Id.ToLower() + "\"}";
++        string data = "{\"productIds\": \"" + package.Id.ToLowerInvariant() + "\"}";
+ 
+         using (StreamWriter streamWriter = new(httpRequest.GetRequestStream()))
+             streamWriter.Write(data);
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+index ecefe8c539740c96d76e0e378713e850a0c7a2c7..064644a5e6b0318765814d45df1451f398d9235f 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Packages/Package.cs
+@@ -459,7 +459,7 @@ private static string GenerateIconId(Package p)
+                     "Winget" => p.Source.Name switch
+                     {
+                         "Steam" => p
+-                            .Id.ToLower()
++                            .Id.ToLowerInvariant()
+                             .Split("\\")[^1]
+                             .Replace("steam app ", "steam-")
+                             .Trim(),
+@@ -489,7 +489,7 @@ private static string GenerateIconId(Package p)
+             }
+ 
+             return iconId
+-                .ToLower()
++                .ToLowerInvariant()
+                 .Replace('_', '-')
+                 .Replace('.', '-')
+                 .Replace(' ', '-')

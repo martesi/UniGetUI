@@ -1,0 +1,246 @@
+From 3e90d34a57a2b6170eeb2b6cafabcb12a09abf8b Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 19:17:48 +0000
+Subject: [PATCH] Add WinUI manager install help
+
+Show upstream install commands on unavailable manager pages and let users copy them or open a terminal.
+
+Upstream-Commit: 391d71f70e28ad1606adeca2711466b0a7da8df3
+Upstream-PR: Devolutions/UniGetUI#5669
+
+---
+diff --git a/maintenance/PATCH_STACK.md b/maintenance/PATCH_STACK.md
+--- a/maintenance/PATCH_STACK.md
++++ b/maintenance/PATCH_STACK.md
+@@ -110,5 +110,5 @@ The appended patches retain the individual upstream references.
+ 
+ - #5666: show a distinct offered version on the WinUI grid and icon cards.
+ - #5668: add saved package-list column widths, resize handles, horizontal scrolling, and a fit-to-window mode to WinUI.
+-- #5669: link unavailable manager status pages to their upstream setup guide sections.
++- #5669: link unavailable managers to the setup guide and expose install commands with copy and terminal actions.
+ - #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -878,5 +878,10 @@
+   "Download size": "Download size",
+   "Release date": "Release date",
+   "Fit columns to the window": "Fit columns to the window",
++  "Install it with this command:": "Install it with this command:",
++  "Copy command": "Copy command",
++  "Open in a terminal": "Open in a terminal",
++  "The install command was copied to the clipboard. Paste it into the terminal to run it.": "The install command was copied to the clipboard. Paste it into the terminal to run it.",
++  "The install command was copied to the clipboard, but no terminal could be opened.": "The install command was copied to the clipboard, but no terminal could be opened.",
+   "How to set up {0}": "How to set up {0}"
+ }
+diff --git a/src/UniGetUI.PackageEngine.Interfaces/ManagerInstallCommands.cs b/src/UniGetUI.PackageEngine.Interfaces/ManagerInstallCommands.cs
+new file mode 100644
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Interfaces/ManagerInstallCommands.cs
+@@ -0,0 +1,16 @@
++namespace UniGetUI.PackageEngine.ManagerClasses.Manager
++{
++    public readonly record struct ManagerInstallCommands(
++        string? Windows = null,
++        string? MacOS = null,
++        string? Linux = null
++    )
++    {
++        public string? ForCurrentPlatform() =>
++            OperatingSystem.IsWindows()
++                ? Windows
++                : OperatingSystem.IsMacOS()
++                    ? MacOS
++                    : Linux;
++    }
++}
+diff --git a/src/UniGetUI.PackageEngine.Interfaces/ManagerProperties.cs b/src/UniGetUI.PackageEngine.Interfaces/ManagerProperties.cs
+--- a/src/UniGetUI.PackageEngine.Interfaces/ManagerProperties.cs
++++ b/src/UniGetUI.PackageEngine.Interfaces/ManagerProperties.cs
+@@ -21,6 +21,7 @@ public struct ManagerProperties
+         public string UpdateVerb { get; set; } = "Unset";
+         public string UninstallVerb { get; set; } = "Unset";
+         public string SetupGuide { get; set; } = "";
++        public ManagerInstallCommands InstallCommands { get; set; } = new();
+         public IManagerSource[] KnownSources { get; set; } = [];
+         public IManagerSource DefaultSource { get; set; } = null!;
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs b/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Bun/Bun.cs
+@@ -38,6 +38,7 @@ public Bun()
+                 Id = "bun",
+                 Name = "Bun",
+                 SetupGuide = "PACKAGE_MANAGERS.md#bun",
++                InstallCommands = new(Windows: "winget install --exact --id Oven-sh.Bun"),
+                 Description = CoreTools.Translate("Fast JavaScript runtime, bundler, and package manager"),
+                 IconId = IconType.Bun,
+                 ColorIconId = "bun_color",
+diff --git a/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs b/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Cargo/Cargo.cs
+@@ -89,6 +89,7 @@ public Cargo()
+             Id = "cargo",
+             Name = "Cargo",
+             SetupGuide = "PACKAGE_MANAGERS.md#cargo",
++            InstallCommands = new(Windows: "winget install --exact --id Rustlang.Rustup"),
+             Description = CoreTools.Translate(
+                 "The Rust package manager.<br>Contains: <b>Rust libraries and programs written in Rust</b>"
+             ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Chocolatey/Chocolatey.cs
+@@ -114,6 +114,7 @@ public Chocolatey()
+                 Id = "chocolatey",
+                 Name = "Chocolatey",
+                 SetupGuide = "PACKAGE_MANAGERS.md#chocolatey",
++                InstallCommands = new(Windows: "winget install --exact --id Chocolatey.Chocolatey"),
+                 Description = CoreTools.Translate(
+                     "The classical package manager for windows. You'll find everything there. <br>Contains: <b>General Software</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs b/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Dotnet/DotNet.cs
+@@ -51,6 +51,7 @@ public DotNet()
+                 Id = "dotnet-tool",
+                 Name = ".NET Tool",
+                 SetupGuide = "PACKAGE_MANAGERS.md#net-tool",
++                InstallCommands = new(Windows: "winget install --exact --id Microsoft.DotNet.SDK.10"),
+                 Description = CoreTools.Translate(
+                     "A repository full of tools and executables designed with Microsoft's .NET ecosystem in mind.<br>Contains: <b>.NET related tools and scripts</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs b/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Npm/Npm.cs
+@@ -39,6 +39,7 @@ public Npm()
+                 Id = "npm",
+                 Name = "Npm",
+                 SetupGuide = "PACKAGE_MANAGERS.md#npm",
++                InstallCommands = new(Windows: "winget install --exact --id OpenJS.NodeJS.LTS"),
+                 Description = CoreTools.Translate(
+                     "Node JS's package manager. Full of libraries and other utilities that orbit the javascript world<br>Contains: <b>Node javascript libraries and other related utilities</b>"
+                 ),
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+--- a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+@@ -76,6 +76,7 @@ public Pip()
+                 Id = "pip",
+                 Name = "Pip",
+                 SetupGuide = "PACKAGE_MANAGERS.md#pip",
++                InstallCommands = new(Windows: "winget install --exact --id Python.Python.3.14"),
+                 Description = CoreTools.Translate(
+                     "Python's library manager. Full of python libraries and other python-related utilities<br>Contains: <b>Python libraries and related utilities</b>"
+                 ),
+diff --git a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml
+--- a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml
++++ b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml
+@@ -54,6 +54,37 @@
+         HorizontalAlignment="Right"
+         Visibility="Collapsed"
+       />
++      <controls:SettingsCard
++        x:Name="InstallCommandCard"
++        Margin="0,0,0,16"
++        Padding="24,16"
++        HorizontalContentAlignment="Stretch"
++        BorderThickness="1"
++        CornerRadius="8"
++        Visibility="Collapsed"
++      >
++        <controls:SettingsCard.Header>
++          <widgets:TranslatedTextBlock Text="Install it with this command:" />
++        </controls:SettingsCard.Header>
++        <controls:SettingsCard.Content>
++          <StackPanel Spacing="8">
++            <TextBox
++              x:Name="ManagerInstallCommandTextBox"
++              IsReadOnly="True"
++              TextWrapping="Wrap"
++              HorizontalAlignment="Stretch"
++            />
++            <StackPanel Orientation="Horizontal" Spacing="8">
++              <Button Click="CopyManagerInstallCommand_Click">
++                <widgets:TranslatedTextBlock Text="Copy command" />
++              </Button>
++              <Button Click="OpenManagerInstallCommandTerminal_Click">
++                <widgets:TranslatedTextBlock Text="Open in a terminal" />
++              </Button>
++            </StackPanel>
++          </StackPanel>
++        </controls:SettingsCard.Content>
++      </controls:SettingsCard>
+       <controls:SettingsCard
+         x:Name="ManagerExecutable"
+         Padding="24,16,24,16"
+diff --git a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
+--- a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
++++ b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
+@@ -5,6 +5,7 @@
+ using Microsoft.UI.Xaml.Controls;
+ using Microsoft.UI.Xaml.Navigation;
+ using UniGetUI.Core.Data;
++using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
+ using UniGetUI.Core.SettingsEngine.SecureSettings;
+ using UniGetUI.Core.Tools;
+@@ -613,6 +614,13 @@ void ApplyManagerState(bool ShowVersion = false)
+                     ? Visibility.Visible
+                     : Visibility.Collapsed;
+ 
++            string installCommand = Manager.Properties.InstallCommands.ForCurrentPlatform() ?? "";
++            ManagerInstallCommandTextBox.Text = installCommand;
++            InstallCommandCard.Visibility =
++                !_isLoading && !Manager.Status.Found && !string.IsNullOrWhiteSpace(installCommand)
++                    ? Visibility.Visible
++                    : Visibility.Collapsed;
++
+             // Load version and manager path
+             ShowVersionHyperlink.Visibility = Visibility.Collapsed;
+             LongVersionTextBlock.Visibility = Visibility.Collapsed;
+@@ -708,6 +716,46 @@ void ApplyManagerState(bool ShowVersion = false)
+             }
+         }
+ 
++        private void CopyManagerInstallCommand_Click(object sender, RoutedEventArgs e)
++        {
++            if (Manager is null)
++                return;
++            string command = Manager.Properties.InstallCommands.ForCurrentPlatform() ?? "";
++            if (string.IsNullOrWhiteSpace(command))
++                return;
++
++            WindowsClipboard.SetText(command);
++            DialogHelper.ShowDismissableBalloon(
++                CoreTools.Translate("Copy command"),
++                CoreTools.Translate("The install command was copied to the clipboard. Paste it into the terminal to run it.")
++            );
++        }
++
++        private void OpenManagerInstallCommandTerminal_Click(object sender, RoutedEventArgs e)
++        {
++            CopyManagerInstallCommand_Click(sender, e);
++            try
++            {
++                Process.Start(new ProcessStartInfo("wt.exe") { UseShellExecute = true });
++            }
++            catch (Exception ex)
++            {
++                Logger.Warn(ex);
++                try
++                {
++                    Process.Start(new ProcessStartInfo("cmd.exe") { UseShellExecute = true });
++                }
++                catch (Exception fallback)
++                {
++                    Logger.Error(fallback);
++                    DialogHelper.ShowDismissableBalloon(
++                        CoreTools.Translate("Open in a terminal"),
++                        CoreTools.Translate("The install command was copied to the clipboard, but no terminal could be opened.")
++                    );
++                }
++            }
++        }
++
+         private void ManagerPath_Click(object sender, RoutedEventArgs e) =>
+             _ = _managerPath_Click();
+ 

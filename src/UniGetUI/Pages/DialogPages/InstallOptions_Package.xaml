@@ -222,6 +222,12 @@
                           Text="Uninstall previous versions when updated"
                         />
                       </CheckBox>
+                      <CheckBox Name="UninstallBeforeUpdateCheckBox">
+                        <widgets:TranslatedTextBlock
+                          HorizontalAlignment="Stretch"
+                          Text="Uninstall, then reinstall when updated"
+                        />
+                      </CheckBox>
                     </controls:WrapPanel>
                     <Grid
                       Padding="4,8"
