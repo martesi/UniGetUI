@@ -878,5 +878,10 @@
   "Download size": "Download size",
   "Release date": "Release date",
   "Fit columns to the window": "Fit columns to the window",
+  "Install it with this command:": "Install it with this command:",
+  "Copy command": "Copy command",
+  "Open in a terminal": "Open in a terminal",
+  "The install command was copied to the clipboard. Paste it into the terminal to run it.": "The install command was copied to the clipboard. Paste it into the terminal to run it.",
+  "The install command was copied to the clipboard, but no terminal could be opened.": "The install command was copied to the clipboard, but no terminal could be opened.",
   "How to set up {0}": "How to set up {0}"
 }
