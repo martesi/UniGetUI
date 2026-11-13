@@ -76,6 +76,7 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
                 Id = "pip",
                 Name = "Pip",
                 SetupGuide = "PACKAGE_MANAGERS.md#pip",
+                InstallCommands = new(Windows: "winget install --exact --id Python.Python.3.14"),
                 Description = CoreTools.Translate(
                     "Python's library manager. Full of python libraries and other python-related utilities<br>Contains: <b>Python libraries and related utilities</b>"
                 ),
