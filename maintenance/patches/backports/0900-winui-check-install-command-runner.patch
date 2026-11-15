@@ -1,9 +1,9 @@
-From 6e54e050de8e8b4e8e9e746d1a2665f9e8a3d3c8 Mon Sep 17 00:00:00 2001
+From 4a5f91bdda815d8399e3bbb7c8f648fd5d2b95ca Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 12:42:00 +0000
 Subject: [PATCH] Only show install commands when their runner is available
 
-Classic-Source-Commit: 6e54e050de8e8b4e8e9e746d1a2665f9e8a3d3c8
+Classic-Source-Commit: 4a5f91bdda815d8399e3bbb7c8f648fd5d2b95ca
 ---
  src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs | 6 +++++-
  1 file changed, 5 insertions(+), 1 deletion(-)

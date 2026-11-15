@@ -347,28 +347,15 @@ diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src
  
          private bool ColumnIsAvailable(string column) => column switch
 @@ -275,6 +279,8 @@ private void SetupColumnMenus()
--                AddColumnItem(headerMenu.Items, key, label, automationId: false);
--                AddColumnItem(ColumnsMenu.Items, key, label, automationId: true);
-+                AddColumnItem(headerMenu.Items, key, label);
-+                AddColumnItem(ColumnsMenu.Items, key, label);
+                 AddColumnItem(headerMenu.Items, key, label, automationId: false);
+                 AddColumnItem(ColumnsMenu.Items, key, label, automationId: true);
              }
 +            AddFitColumnsMenuItem(headerMenu.Items);
 +            AddFitColumnsMenuItem(ColumnsMenu.Items);
              Loaded += (_, _) =>
              {
                  ColumnVisibilityChanged -= RefreshColumnVisibility;
-@@ -288,7 +294,6 @@ private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label, bool automationId)
--        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label, bool automationId)
-+        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label)
-         {
-             ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
--            if (automationId)
--                AutomationProperties.SetAutomationId(item, "Column" + key);
--            item.Click += (_, _) => SetColumnVisible(key, !ColumnSettingVisible(key));
-+            AutomationProperties.SetAutomationId(item, "Column" + key);
-+            item.Click += (_, _) => SetColumnVisible(key, item.IsChecked);
-             items.Add(item);
-@@ -295,24 +300,104 @@ private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string l
+@@ -295,24 +301,104 @@ private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string l
              _columnMenuItems.Add((key, item));
          }
  
@@ -484,7 +471,7 @@ diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src
              NameHeader.Visibility = name ? Visibility.Visible : Visibility.Collapsed;
              IdHeader.Visibility = id ? Visibility.Visible : Visibility.Collapsed;
              VersionHeader.Visibility = version ? Visibility.Visible : Visibility.Collapsed;
-@@ -329,13 +414,43 @@ private void RefreshColumnVisibility()
+@@ -329,13 +415,43 @@ private void RefreshColumnVisibility()
                  item.IsChecked = IsColumnVisible(key);
                  item.IsEnabled = !item.IsChecked || visibleCount > 1;
              }
@@ -528,7 +515,7 @@ diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src
          protected List<IPackageManager> UsedManagers = [];
          protected ConcurrentDictionary<
              IPackageManager,
-@@ -1862,6 +1977,7 @@ private void ViewModeSelector_SelectionChanged(object sender, SelectionChangedEv
+@@ -1862,6 +1978,7 @@ private void ViewModeSelector_SelectionChanged(object sender, SelectionChangedEv
                  ViewModeSelector.SelectedIndex
              );
              GenerateHeaderBarTitles();
