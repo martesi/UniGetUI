@@ -1,0 +1,29 @@
+From b8fdfc998babafafb03d89aab1b331770453f72e Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 12:42:00 +0000
+Subject: [PATCH] Only show install commands when their runner is available
+
+Classic-Source-Commit: b8fdfc998babafafb03d89aab1b331770453f72e
+---
+ src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
+--- a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
++++ b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
+@@ -615,9 +615,15 @@ void ApplyManagerState(bool ShowVersion = false)
+                     : Visibility.Collapsed;
+ 
+             string installCommand = Manager.Properties.InstallCommands.ForCurrentPlatform() ?? "";
++            bool managerExecutableFound =
++                Manager.Status.Found
++                || (!Manager.IsEnabled() && Manager.GetExecutableFile().Item1);
++            bool installCommandIsRunnable =
++                !string.IsNullOrWhiteSpace(installCommand)
++                && CoreTools.Which(installCommand.Split(' ', 2)[0]).Item1;
+             ManagerInstallCommandTextBox.Text = installCommand;
+             InstallCommandCard.Visibility =
+-                !_isLoading && !Manager.Status.Found && !string.IsNullOrWhiteSpace(installCommand)
++                !_isLoading && !managerExecutableFound && installCommandIsRunnable
+                     ? Visibility.Visible
+                     : Visibility.Collapsed;
