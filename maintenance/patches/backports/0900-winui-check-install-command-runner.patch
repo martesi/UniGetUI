@@ -1,9 +1,9 @@
-From b8fdfc998babafafb03d89aab1b331770453f72e Mon Sep 17 00:00:00 2001
+From 6e54e050de8e8b4e8e9e746d1a2665f9e8a3d3c8 Mon Sep 17 00:00:00 2001
 From: martesi <96113508+martesi@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 12:42:00 +0000
 Subject: [PATCH] Only show install commands when their runner is available
 
-Classic-Source-Commit: b8fdfc998babafafb03d89aab1b331770453f72e
+Classic-Source-Commit: 6e54e050de8e8b4e8e9e746d1a2665f9e8a3d3c8
 ---
  src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs | 6 +++++-
  1 file changed, 5 insertions(+), 1 deletion(-)
@@ -27,3 +27,4 @@ diff --git a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.
 +                !_isLoading && !managerExecutableFound && installCommandIsRunnable
                      ? Visibility.Visible
                      : Visibility.Collapsed;
+ 

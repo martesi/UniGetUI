@@ -12,13 +12,17 @@ Upstream-PR: Devolutions/UniGetUI#5668
 diff --git a/maintenance/PATCH_STACK.md b/maintenance/PATCH_STACK.md
 --- a/maintenance/PATCH_STACK.md
 +++ b/maintenance/PATCH_STACK.md
-@@ -109,5 +109,6 @@ The appended patches retain the individual upstream references.
- ### November 2026 backports
- 
- - #5666: show a distinct offered version on the WinUI grid and icon cards.
+@@ -100,3 +100,10 @@
+ - Avalonia Software Catalog/editor, TUI, macOS presentation, sidebar reordering,
+   upstream release-channel identity, and agent automation workflows remain outside
+   Classic's WinUI maintenance boundary.
++
++### November 2026 backports
++
++- #5666: show a distinct offered version on the WinUI grid and icon cards.
 +- #5668: add saved package-list column widths, resize handles, horizontal scrolling, and a fit-to-window mode to WinUI.
- - #5669: link unavailable manager status pages to their upstream setup guide sections.
- - #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
++- #5669: link unavailable manager status pages to their upstream setup guide sections.
++- #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
 diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
 --- a/src/Languages/lang_en.json
 +++ b/src/Languages/lang_en.json
@@ -343,15 +347,28 @@ diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src
  
          private bool ColumnIsAvailable(string column) => column switch
 @@ -275,6 +279,8 @@ private void SetupColumnMenus()
-                 AddColumnItem(headerMenu.Items, key, label);
-                 AddColumnItem(ColumnsMenu.Items, key, label);
+-                AddColumnItem(headerMenu.Items, key, label, automationId: false);
+-                AddColumnItem(ColumnsMenu.Items, key, label, automationId: true);
++                AddColumnItem(headerMenu.Items, key, label);
++                AddColumnItem(ColumnsMenu.Items, key, label);
              }
 +            AddFitColumnsMenuItem(headerMenu.Items);
 +            AddFitColumnsMenuItem(ColumnsMenu.Items);
              Loaded += (_, _) =>
              {
                  ColumnVisibilityChanged -= RefreshColumnVisibility;
-@@ -294,24 +300,104 @@ private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string l
+@@ -288,7 +294,6 @@ private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label, bool automationId)
+-        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label, bool automationId)
++        private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string label)
+         {
+             ToggleMenuFlyoutItem item = new() { Text = CoreTools.Translate(label) };
+-            if (automationId)
+-                AutomationProperties.SetAutomationId(item, "Column" + key);
+-            item.Click += (_, _) => SetColumnVisible(key, !ColumnSettingVisible(key));
++            AutomationProperties.SetAutomationId(item, "Column" + key);
++            item.Click += (_, _) => SetColumnVisible(key, item.IsChecked);
+             items.Add(item);
+@@ -295,24 +300,104 @@ private void AddColumnItem(IList<MenuFlyoutItemBase> items, string key, string l
              _columnMenuItems.Add((key, item));
          }
  
@@ -467,7 +484,7 @@ diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src
              NameHeader.Visibility = name ? Visibility.Visible : Visibility.Collapsed;
              IdHeader.Visibility = id ? Visibility.Visible : Visibility.Collapsed;
              VersionHeader.Visibility = version ? Visibility.Visible : Visibility.Collapsed;
-@@ -329,13 +415,43 @@ private void RefreshColumnVisibility()
+@@ -329,13 +414,43 @@ private void RefreshColumnVisibility()
                  item.IsChecked = IsColumnVisible(key);
                  item.IsEnabled = !item.IsChecked || visibleCount > 1;
              }
@@ -511,7 +528,7 @@ diff --git a/src/UniGetUI/Pages/SoftwarePages/AbstractPackagesPage.xaml.cs b/src
          protected List<IPackageManager> UsedManagers = [];
          protected ConcurrentDictionary<
              IPackageManager,
-@@ -1862,6 +1978,7 @@ private void ViewModeSelector_SelectionChanged(object sender, SelectionChangedEv
+@@ -1862,6 +1977,7 @@ private void ViewModeSelector_SelectionChanged(object sender, SelectionChangedEv
                  ViewModeSelector.SelectedIndex
              );
              GenerateHeaderBarTitles();
