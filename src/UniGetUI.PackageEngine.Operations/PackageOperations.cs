@@ -10,6 +10,7 @@ using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.Interfaces.ManagerProviders;
 using UniGetUI.PackageEngine.PackageClasses;
+using UniGetUI.PackageEngine.ManagerClasses.Manager;
 using UniGetUI.PackageEngine.PackageLoader;
 using UniGetUI.PackageEngine.Serializable;
 using UniGetUI.PackageOperations;
@@ -26,6 +27,9 @@ namespace UniGetUI.PackageEngine.Operations
         public readonly IPackage Package;
         public readonly InstallOptions Options;
         public readonly OperationType Role;
+        private readonly UninstallPackageOperation? _uninstallBeforeReinstall;
+        private bool _reinstallsThisAttempt;
+        private OperationType CommandRole => _reinstallsThisAttempt ? OperationType.Install : Role;
         public Task SuccessHandled { get; private set; } = Task.CompletedTask;
 
         protected abstract Task HandleSuccess();
@@ -46,8 +50,29 @@ namespace UniGetUI.PackageEngine.Operations
             )
         {
             Package = package;
-            Options = options;
             Role = role;
+            if (ReinstallsOnUpdate(package, options, role))
+            {
+                Options = PinReinstallVersion(package, options);
+                Logger.Info(
+                    $"Queuing {package} version {package.VersionString} for uninstall before reinstalling version {package.NewVersionString}..."
+                );
+                InstallOptions uninstallOptions = options.Copy();
+                uninstallOptions.RemoveDataOnUninstall = false;
+                uninstallOptions.KillBeforeOperation = [];
+                _uninstallBeforeReinstall = new UninstallPackageOperation(package, uninstallOptions)
+                {
+                    IsReinstallStep = true,
+                };
+                OverridenInstallationOptions overridesBeforeUninstall = package.OverridenOptions;
+                _uninstallBeforeReinstall.OperationSucceeded += (_, _) =>
+                    package.OverridenOptions = overridesBeforeUninstall;
+                _reinstallsThisAttempt = true;
+            }
+            else
+            {
+                Options = options;
+            }
 
             Initialize();
 
@@ -95,6 +120,14 @@ namespace UniGetUI.PackageEngine.Operations
                     throw new InvalidOperationException(
                         $"Retry mode {retryMode} is not supported in this context"
                     );
+            }
+            if (
+                _uninstallBeforeReinstall is not null
+                && _uninstallBeforeReinstall.Status is not OperationStatus.Succeeded
+            )
+            {
+                _uninstallBeforeReinstall.Options.RunAsAdministrator |= Options.RunAsAdministrator;
+                _uninstallBeforeReinstall.Options.InteractiveInstallation |= Options.InteractiveInstallation;
             }
             Metadata.OperationInformation =
                 "Retried package operation for Package="
@@ -179,7 +212,7 @@ namespace UniGetUI.PackageEngine.Operations
             {
                 try
                 {
-                    var result = await managed.TryPerformAsync(Package, Options, Role,
+                    var result = await managed.TryPerformAsync(Package, Options, CommandRole,
                         message => Line(message, LineType.Information), ReportProgress, CancellationToken);
                     if (result is not null)
                         return result.Value;
@@ -204,7 +237,7 @@ namespace UniGetUI.PackageEngine.Operations
             var operationParameters = Package.Manager.OperationHelper.GetParameters(
                 Package,
                 Options,
-                Role
+                CommandRole
             );
             var callVector = Package.Manager.Status.OperationCallArgs;
 
@@ -273,7 +306,7 @@ namespace UniGetUI.PackageEngine.Operations
             List<string> Output
         )
         {
-            var result = Package.Manager.OperationHelper.GetResult(Package, Role, Output, ReturnCode);
+            var result = Package.Manager.OperationHelper.GetResult(Package, CommandRole, Output, ReturnCode);
             if (result is OperationVeredict.Failure
                 && Output.Any(line => line.Contains("[WinError 32]", StringComparison.Ordinal)))
             {
@@ -392,6 +425,84 @@ namespace UniGetUI.PackageEngine.Operations
             return l;
         }
 
+        public static bool SupportsUninstallBeforeUpdate(IPackage package)
+        {
+            var capabilities = package.Manager.Capabilities;
+            string uninstallVerb = package.Manager.Properties.UninstallVerb;
+            return capabilities.CanReinstallOnUpdate
+                && !string.IsNullOrWhiteSpace(uninstallVerb)
+                && !uninstallVerb.Equals(
+                    "Unset",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                && (
+                    !capabilities.ReinstallsOnUpdateOnlyGlobalPackages
+                    || string.Equals(
+                        package.OverridenOptions.Scope,
+                        PackageScope.Global.ToString(),
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                );
+        }
+
+        private static bool ReinstallsOnUpdate(
+            IPackage package,
+            InstallOptions options,
+            OperationType role
+        ) =>
+            role is OperationType.Update
+            && options.UninstallBeforeUpdate
+            && package.IsUpgradable
+            && SupportsUninstallBeforeUpdate(package);
+
+        private static InstallOptions PinReinstallVersion(
+            IPackage package,
+            InstallOptions options
+        )
+        {
+            var pinned = options.Copy();
+            var capabilities = package.Manager.Capabilities;
+            if (!string.IsNullOrWhiteSpace(pinned.Version) && capabilities.SupportsCustomVersionsOnUpdate)
+                return pinned;
+
+            pinned.Version =
+                package.IsUpgradable && capabilities.SupportsCustomVersions
+                    ? package.NewVersionString
+                    : "";
+            return pinned;
+        }
+
+        private static bool IsKnownToBeUninstalled(IPackage package)
+        {
+            InstalledPackagesLoader installed = InstalledPackagesLoader.Instance;
+            if (!installed.IsLoaded)
+                return false;
+            if (package.Manager is PackageManager manager && manager.LastInstalledListingFailed)
+                return false;
+            if (installed.GetEquivalentPackages(package).Any())
+                return false;
+
+            Logger.Info(
+                $"{package} is no longer installed; proceeding with the install without an uninstall step."
+            );
+            return true;
+        }
+
+        protected override IReadOnlyList<InnerOperation> GetAttemptPreOperations()
+        {
+            List<InnerOperation> operations = [.. base.GetAttemptPreOperations()];
+            if (_uninstallBeforeReinstall is null)
+                return operations;
+
+            bool alreadyUninstalled =
+                _uninstallBeforeReinstall.Status is OperationStatus.Succeeded
+                || IsKnownToBeUninstalled(Package);
+            _reinstallsThisAttempt = true;
+            if (!alreadyUninstalled)
+                operations.Add(new InnerOperation(_uninstallBeforeReinstall, mustSucceed: true));
+            return operations;
+        }
+
         private static IReadOnlyList<InnerOperation> _getPostInstallOps(
             InstallOptions opts,
             OperationType role,
@@ -415,6 +526,7 @@ namespace UniGetUI.PackageEngine.Operations
 
             if (role is OperationType.Update && opts.UninstallPreviousVersionsOnUpdate)
             {
+                bool reinstalls = ReinstallsOnUpdate(package, opts, role);
                 var capabilities = package.Manager.Capabilities;
                 string? updatedScope =
                     capabilities.SupportsCustomScopes
@@ -425,6 +537,7 @@ namespace UniGetUI.PackageEngine.Operations
 
                 var matches = InstalledPackagesLoader.Instance.Packages.Where(p =>
                     p.IsEquivalentTo(package)
+                    && !(reinstalls && p.VersionString.Equals(package.VersionString, StringComparison.OrdinalIgnoreCase))
                     && (
                         string.IsNullOrEmpty(p.OverridenOptions.Scope)
                         || string.IsNullOrEmpty(updatedScope)
@@ -629,6 +742,8 @@ namespace UniGetUI.PackageEngine.Operations
 
     public class UninstallPackageOperation : PackageOperation
     {
+        internal bool IsReinstallStep { get; init; }
+
         public UninstallPackageOperation(
             IPackage package,
             InstallOptions options,
@@ -645,6 +760,12 @@ namespace UniGetUI.PackageEngine.Operations
 
         protected override Task HandleSuccess()
         {
+            if (IsReinstallStep)
+            {
+                InstalledPackagesLoader.Instance.Remove(Package);
+                return Task.CompletedTask;
+            }
+
             Package.SetTag(PackageTag.Default);
             Package.GetAvailablePackage()?.SetTag(PackageTag.Default);
             UpgradablePackagesLoader.Instance.Remove(Package);

@@ -11,6 +11,7 @@ using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.PackageClasses;
+using UniGetUI.PackageEngine.Operations;
 using UniGetUI.PackageEngine.Serializable;
 using UniGetUI.Pages.SettingsPages.GeneralPages;
 using Architecture = UniGetUI.PackageEngine.Enums.Architecture;
@@ -119,6 +120,7 @@ namespace UniGetUI.Interface.Dialogs
             InteractiveCheckBox.IsChecked = Options.InteractiveInstallation;
             HashCheckbox.IsChecked = Options.SkipHashCheck;
             UninstallPreviousOnUpdate.IsChecked = Options.UninstallPreviousVersionsOnUpdate;
+            UninstallBeforeUpdateCheckBox.IsChecked = Options.UninstallBeforeUpdate;
 
             ArchitectureComboBox.Items.Add(CoreTools.Translate("Default"));
             ArchitectureComboBox.SelectedIndex = 0;
@@ -285,6 +287,13 @@ namespace UniGetUI.Interface.Dialogs
                     .CanUninstallPreviousVersionsAfterUpdate
                     ? Visibility.Visible
                     : Visibility.Collapsed;
+                bool canUninstallBeforeUpdate =
+                    operation is OperationType.Update
+                    && PackageOperation.SupportsUninstallBeforeUpdate(Package);
+                UninstallBeforeUpdateCheckBox.IsEnabled = canUninstallBeforeUpdate;
+                UninstallBeforeUpdateCheckBox.Visibility = canUninstallBeforeUpdate
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
 
                 ArchitectureComboBox.IsEnabled =
                     operation is not OperationType.Uninstall
@@ -390,6 +399,8 @@ namespace UniGetUI.Interface.Dialogs
             options.SkipHashCheck = HashCheckbox?.IsChecked ?? false;
             options.UninstallPreviousVersionsOnUpdate =
                 UninstallPreviousOnUpdate?.IsChecked ?? false;
+            options.UninstallBeforeUpdate =
+                UninstallBeforeUpdateCheckBox?.IsChecked ?? false;
             options.OverridesNextLevelOpts = !FollowGlobalOptionsSwitch.IsOn;
             options.AutoUpdatePackage = AutoUpdatePackageCheckbox.IsChecked ?? false;
 

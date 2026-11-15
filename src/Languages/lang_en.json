@@ -135,6 +135,7 @@
   "Interactive installation": "Interactive installation",
   "Skip hash check": "Skip hash check",
   "Uninstall previous versions when updated": "Uninstall previous versions when updated",
+  "Uninstall, then reinstall when updated": "Uninstall, then reinstall when updated",
   "Skip minor updates for this package": "Skip minor updates for this package",
   "Ignore changes after the first": "Ignore changes after the first",
   "version numbers": "version numbers",
@@ -876,5 +877,12 @@
   "Columns": "Columns",
   "Installer host": "Installer host",
   "Download size": "Download size",
-  "Release date": "Release date"
+  "Release date": "Release date",
+  "Fit columns to the window": "Fit columns to the window",
+  "Install it with this command:": "Install it with this command:",
+  "Copy command": "Copy command",
+  "Open in a terminal": "Open in a terminal",
+  "The install command was copied to the clipboard. Paste it into the terminal to run it.": "The install command was copied to the clipboard. Paste it into the terminal to run it.",
+  "The install command was copied to the clipboard, but no terminal could be opened.": "The install command was copied to the clipboard, but no terminal could be opened.",
+  "How to set up {0}": "How to set up {0}"
 }
