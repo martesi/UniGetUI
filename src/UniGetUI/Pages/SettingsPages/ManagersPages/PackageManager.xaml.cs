@@ -615,9 +615,15 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
                     : Visibility.Collapsed;
 
             string installCommand = Manager.Properties.InstallCommands.ForCurrentPlatform() ?? "";
+            bool managerExecutableFound =
+                Manager.Status.Found
+                || (!Manager.IsEnabled() && Manager.GetExecutableFile().Item1);
+            bool installCommandIsRunnable =
+                !string.IsNullOrWhiteSpace(installCommand)
+                && CoreTools.Which(installCommand.Split(' ', 2)[0]).Item1;
             ManagerInstallCommandTextBox.Text = installCommand;
             InstallCommandCard.Visibility =
-                !_isLoading && !Manager.Status.Found && !string.IsNullOrWhiteSpace(installCommand)
+                !_isLoading && !managerExecutableFound && installCommandIsRunnable
                     ? Visibility.Visible
                     : Visibility.Collapsed;
 
