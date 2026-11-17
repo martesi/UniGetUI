@@ -93,3 +93,4 @@ backports/0870-winui-horizontally-scrollable-package-list.patch
 backports/0880-winui-manager-install-commands.patch
 backports/0890-winui-uninstall-before-reinstall-option.patch
 backports/0900-winui-check-install-command-runner.patch
+backports/0910-restore-release-verification.patch
