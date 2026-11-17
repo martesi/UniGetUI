@@ -236,9 +236,13 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         /// <returns>A tuple containing: a boolean that represents whether the path was found or not; the path to the file if found.</returns>
         public abstract IReadOnlyList<string> FindCandidateExecutableFiles();
 
+        protected virtual bool CanSelectAutomatically(string candidate) => true;
+
+        protected virtual bool CanUseSelectedExecutable(string path) => true;
+
         public Tuple<bool, string> GetExecutableFile()
         {
-            var candidates = FindCandidateExecutableFiles();
+            var candidates = FindCandidateExecutableFiles().Where(CanSelectAutomatically).ToList();
 
             // If custom package manager paths are DISABLED, get the first one (as old UniGetUI did) and return it.
             if (!SecureSettings.Get(SecureSettings.K.AllowCustomManagerPaths))
@@ -274,6 +278,12 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
                         $"The selected executable path {exeSelection} for manager {Name} does not exist, the default one will be used if available..."
                     );
                 }
+                else if (!CanUseSelectedExecutable(exeSelection))
+                {
+                    Logger.Warn(
+                        $"The selected executable path {exeSelection} for manager {Name} has been excluded, the default one will be used if available..."
+                    );
+                }
 
                 else
                 {
@@ -290,11 +300,14 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
             }
         }
 
-        protected bool IsUserSelectedExecutablePath(string path)
+        protected bool IsUserSelectedExecutablePath(string path) =>
+            GetUserSelectedExecutablePath()?.Equals(path, StringComparison.OrdinalIgnoreCase) == true;
+
+        protected string? GetUserSelectedExecutablePath()
         {
             if (!SecureSettings.Get(SecureSettings.K.AllowCustomManagerPaths))
             {
-                return false;
+                return null;
             }
 
             string? exeSelection = Settings.GetDictionaryItem<string, string>(
@@ -302,9 +315,9 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
                 Name
             );
 
-            return !string.IsNullOrEmpty(exeSelection)
-                && File.Exists(exeSelection)
-                && exeSelection.Equals(path, StringComparison.OrdinalIgnoreCase);
+            return !string.IsNullOrEmpty(exeSelection) && File.Exists(exeSelection)
+                ? exeSelection
+                : null;
         }
 
         /// <summary>
