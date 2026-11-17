@@ -55,6 +55,12 @@ public sealed class WinGetManagerTests : IDisposable
     }
 
     [Fact]
+    public void ReinstallBeforeUpdateIsDisabledUntilTargetCanBeValidated()
+    {
+        Assert.False(new WinGet().Capabilities.CanReinstallOnUpdate);
+    }
+
+    [Fact]
     public void GetProxyArgumentReturnsEmptyStringWhenProxyIsDisabled()
     {
         Settings.Set(Settings.K.EnableProxy, false);

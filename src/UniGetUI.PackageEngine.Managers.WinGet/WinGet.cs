@@ -109,7 +109,8 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
         {
             Capabilities = new ManagerCapabilities
             {
-                CanReinstallOnUpdate = true,
+                // Re-enable after validating the reinstall target before uninstalling (#5778).
+                CanReinstallOnUpdate = false,
                 SupportsCustomVersionsOnUpdate = false,
                 CanRunAsAdmin = true,
                 CanSkipIntegrityChecks = true,
