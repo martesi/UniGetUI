@@ -95,3 +95,4 @@ backports/0890-winui-uninstall-before-reinstall-option.patch
 backports/0900-winui-check-install-command-runner.patch
 backports/0910-restore-release-verification.patch
 backports/0920-disable-unsafe-winget-reinstall.patch
+backports/0930-scoop-version-comparison.patch
