@@ -1,0 +1,46 @@
+From d5a9193444f53f700af8b74f4ddaf941ca07268b Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 18:22:34 +0800
+Subject: [PATCH] Disable unsafe WinGet uninstall-before-update option
+
+Upstream-PR: https://github.com/Devolutions/UniGetUI/pull/5778
+Classic-Source-Commit: d5a9193444f53f700af8b74f4ddaf941ca07268b
+---
+ src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs   | 3 ++-
+ src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs | 6 ++++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+index 4cab7c05..5ac14be4 100644
+--- a/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
++++ b/src/UniGetUI.PackageEngine.Managers.WinGet/WinGet.cs
+@@ -109,7 +109,8 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
+         {
+             Capabilities = new ManagerCapabilities
+             {
+-                CanReinstallOnUpdate = true,
++                // Re-enable after validating the reinstall target before uninstalling (#5778).
++                CanReinstallOnUpdate = false,
+                 SupportsCustomVersionsOnUpdate = false,
+                 CanRunAsAdmin = true,
+                 CanSkipIntegrityChecks = true,
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index b1d06a4d..381c1a6a 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -54,6 +54,12 @@ public sealed class WinGetManagerTests : IDisposable
+         }
+     }
+ 
++    [Fact]
++    public void ReinstallBeforeUpdateIsDisabledUntilTargetCanBeValidated()
++    {
++        Assert.False(new WinGet().Capabilities.CanReinstallOnUpdate);
++    }
++
+     [Fact]
+     public void GetProxyArgumentReturnsEmptyStringWhenProxyIsDisabled()
+     {
+-- 
+2.52.0
+

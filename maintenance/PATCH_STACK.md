@@ -112,4 +112,4 @@ The appended patches retain the individual upstream references.
 - #5668: add saved package-list column widths, resize handles, horizontal scrolling, and a fit-to-window mode to WinUI.
 - #5669: link unavailable managers to the setup guide and expose install commands with copy and terminal actions.
 - #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
-- #5686: add a manager and scope gated uninstall-before-reinstall option to the WinUI update dialog; reuse Classic's chained operation queue.
+- #5686: add a manager and scope gated uninstall-before-reinstall option to the WinUI update dialog; reuse Classic's chained operation queue. WinGet is disabled until #5778 target validation and reinstall safeguards are ported.

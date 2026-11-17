@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "base_commit": "68411409d001b9f34cfb896af1543a1d7067ca5e",
-  "classic_source_commit": "8997bfe07dd36a6121d50188da4678d04c955d5d",
+  "classic_source_commit": "d5a9193444f53f700af8b74f4ddaf941ca07268b",
   "series": "maintenance/patches/series",
   "equivalence": "The replay tree must equal classic_source_commit exactly."
 }
