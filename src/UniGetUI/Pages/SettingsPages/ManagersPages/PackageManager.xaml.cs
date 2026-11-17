@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using UniGetUI.Core.Data;
+using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.SettingsEngine.SecureSettings;
 using UniGetUI.Core.Tools;
@@ -586,6 +587,16 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
                 ManagerLogs.CornerRadius = new CornerRadius(8, 8, 0, 0);
                 AppExecutionAliasWarningLabel.Text =
                     "If Python cannot be found or is not listing packages but is installed on the system, you may need to disable the \"python.exe\" App Execution Alias in the settings.";
+
+                Pip pip = (Pip)Manager;
+                SettingsCard environmentCard = new()
+                {
+                    Header = CoreTools.Translate("Python environments"),
+                    CornerRadius = new CornerRadius(8),
+                    BorderThickness = new Thickness(1),
+                };
+                PopulatePipEnvironmentCard(pip, environmentCard);
+                ExtraControls.Children.Add(environmentCard);
             }
             else
             {
@@ -598,10 +609,87 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
         private void ShowVersionHyperlink_Click(object sender, RoutedEventArgs e) =>
             ApplyManagerState(true);
 
+        private void PopulatePipEnvironmentCard(Pip pip, SettingsCard card)
+        {
+            StackPanel environmentList = new() { Spacing = 8 };
+            environmentList.Children.Add(new TextBlock
+            {
+                Text = CoreTools.Translate(
+                    "UniGetUI only manages the Python environments checked below. Virtual environments, conda environments and embedded Pythons usually belong to other apps, so they are not managed unless you check them."
+                ),
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 12,
+            });
+
+            IReadOnlyList<Pip.PythonCandidate> candidates = pip.GetPythonCandidates();
+            if (candidates.Count == 0)
+            {
+                environmentList.Children.Add(new TextBlock
+                {
+                    Text = CoreTools.Translate("No Python interpreters were found"),
+                });
+            }
+
+            foreach (Pip.PythonCandidate candidate in candidates)
+            {
+                string kind = CoreTools.Translate(candidate.Kind switch
+                {
+                    PythonEnvironmentKind.VirtualEnvironment => "Virtual environment",
+                    PythonEnvironmentKind.CondaEnvironment => "Conda environment",
+                    PythonEnvironmentKind.Embedded => "Embedded Python",
+                    PythonEnvironmentKind.StoreAlias => "Microsoft Store alias",
+                    PythonEnvironmentKind.System => "System Python",
+                    _ => "Unrecognized Python",
+                });
+                bool inUse = Pip.IsSameEnvironment(candidate.Path, Manager!.Status.ExecutablePath);
+                CheckBox manageEnvironment = new()
+                {
+                    Content = $"{candidate.Path} — {kind}{(inUse ? " (" + CoreTools.Translate("In use") + ")" : "")}",
+                    IsChecked = candidate.Managed,
+                    IsEnabled = candidate.Managed || Pip.CanOptInEnvironments(),
+                };
+                async void SaveEnvironmentChoice(object? _, RoutedEventArgs __)
+                {
+                    environmentList.IsEnabled = false;
+                    Pip.SetEnvironmentManaged(candidate.Path, manageEnvironment.IsChecked is true);
+                    await ReloadPackageManager();
+                    PopulatePipEnvironmentCard(pip, card);
+                }
+                manageEnvironment.Checked += SaveEnvironmentChoice;
+                manageEnvironment.Unchecked += SaveEnvironmentChoice;
+                environmentList.Children.Add(manageEnvironment);
+            }
+
+            card.Content = environmentList;
+        }
+
         void ApplyManagerState(bool ShowVersion = false)
         {
             if (Manager is null)
                 throw new InvalidDataException();
+
+            SetupGuideLink.Content = CoreTools.Translate("How to set up {0}", Manager.DisplayName);
+            string setupGuide = Manager.Properties.SetupGuide;
+            SetupGuideLink.NavigateUri = string.IsNullOrWhiteSpace(setupGuide)
+                ? null
+                : new Uri($"https://github.com/Devolutions/UniGetUI/blob/main/docs/{setupGuide}");
+            SetupGuideLink.Visibility =
+                !_isLoading && !Manager.IsReady() && SetupGuideLink.NavigateUri is not null
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+
+            string installCommand = Manager.Properties.InstallCommands.ForCurrentPlatform() ?? "";
+            bool managerExecutableFound =
+                Manager.Status.Found
+                || (!Manager.IsEnabled() && Manager.GetExecutableFile().Item1);
+            bool installCommandIsRunnable =
+                !string.IsNullOrWhiteSpace(installCommand)
+                && CoreTools.Which(installCommand.Split(' ', 2)[0]).Item1;
+            ManagerInstallCommandTextBox.Text = installCommand;
+            InstallCommandCard.Visibility =
+                !_isLoading && !managerExecutableFound && installCommandIsRunnable
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
 
             // Load version and manager path
             ShowVersionHyperlink.Visibility = Visibility.Collapsed;
@@ -695,6 +783,46 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
                 ManagerStatusBar.Message = CoreTools
                     .Translate("You may need to install {pm} in order to use it with UniGetUI.")
                     .Replace("{pm}", Manager.DisplayName);
+            }
+        }
+
+        private void CopyManagerInstallCommand_Click(object sender, RoutedEventArgs e)
+        {
+            if (Manager is null)
+                return;
+            string command = Manager.Properties.InstallCommands.ForCurrentPlatform() ?? "";
+            if (string.IsNullOrWhiteSpace(command))
+                return;
+
+            WindowsClipboard.SetText(command);
+            DialogHelper.ShowDismissableBalloon(
+                CoreTools.Translate("Copy command"),
+                CoreTools.Translate("The install command was copied to the clipboard. Paste it into the terminal to run it.")
+            );
+        }
+
+        private void OpenManagerInstallCommandTerminal_Click(object sender, RoutedEventArgs e)
+        {
+            CopyManagerInstallCommand_Click(sender, e);
+            try
+            {
+                Process.Start(new ProcessStartInfo("wt.exe") { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex);
+                try
+                {
+                    Process.Start(new ProcessStartInfo("cmd.exe") { UseShellExecute = true });
+                }
+                catch (Exception fallback)
+                {
+                    Logger.Error(fallback);
+                    DialogHelper.ShowDismissableBalloon(
+                        CoreTools.Translate("Open in a terminal"),
+                        CoreTools.Translate("The install command was copied to the clipboard, but no terminal could be opened.")
+                    );
+                }
             }
         }
 

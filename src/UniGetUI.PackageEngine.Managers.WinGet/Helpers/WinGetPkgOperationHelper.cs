@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using Devolutions.Pinget.Core;
 using Microsoft.Management.Deployment;
 using Microsoft.Win32;
 using UniGetUI.Core.Logging;
@@ -16,6 +18,32 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager;
 
 internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
 {
+    internal enum UpgradeRecheck
+    {
+        StillOffered,
+        SourceUnreadable,
+        NotOffered,
+    }
+
+    internal static Func<ListQuery, ListResponse> ListUpgrades { get; set; } = query =>
+    {
+        using Repository repository = Repository.Open(
+            PingetPackageDetailsProvider.CreateRepositoryOptions()
+        );
+        return repository.List(query);
+    };
+
+    private static readonly ConditionalWeakTable<IPackage, object> UnconfirmedUpgradeLookups = new();
+
+    internal static bool ReportedUnconfirmedUpgradeLookup(IPackage package) =>
+        UnconfirmedUpgradeLookups.TryGetValue(package, out _);
+
+    internal static bool ReportedNoUpgradeCandidate(IReadOnlyList<string> output, int returnCode) =>
+        (uint)returnCode is not 0x8A15002B
+        && output.Any(line =>
+            line.Contains("No applicable upgrade found", StringComparison.OrdinalIgnoreCase)
+        );
+
     public static string GetIdNamePiece(IPackage package)
     {
         if (!package.Id.EndsWith("…"))
@@ -349,6 +377,7 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         int returnCode
     )
     {
+        UnconfirmedUpgradeLookups.Remove(package);
         // See https://github.com/microsoft/winget-cli/blob/master/doc/windows/package-manager/winget/returnCodes.md for reference
         uint uintCode = (uint)returnCode;
 
@@ -411,7 +440,14 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
             }
 
             if (operation is OperationType.Update)
-                SuppressPhantomUpgrade(package);
+            {
+                if (!ReportedNoUpgradeCandidate(processOutput, returnCode))
+                    SuppressPhantomUpgrade(package);
+                else if (RecheckUpgrade(package) is UpgradeRecheck.NotOffered)
+                    SuppressPhantomUpgrade(package);
+                else
+                    UnconfirmedUpgradeLookups.GetValue(package, _ => new object());
+            }
 
             Logger.Warn(
                 $"Update for {package.Id} is not applicable to this system, even without scope/architecture constraints"
@@ -495,6 +531,52 @@ internal sealed class WinGetPkgOperationHelper : BasePkgOperationHelper
         }
 
         return OperationVeredict.Failure;
+    }
+
+    private static UpgradeRecheck RecheckUpgrade(IPackage package)
+    {
+        try
+        {
+            ListResponse response = ListUpgrades(CreateUpgradeRecheckQuery(package));
+
+            if (response.Matches.Any(match => !string.IsNullOrEmpty(match.AvailableVersion)))
+            {
+                Logger.Warn(
+                    $"Pinget still offers an update for {package.Id}; keeping it listed after a transient lookup failure."
+                );
+                return UpgradeRecheck.StillOffered;
+            }
+            if (response.Warnings.Count > 0)
+            {
+                Logger.Warn(
+                    $"Pinget could not read every source while rechecking {package.Id}; keeping the update listed."
+                );
+                return UpgradeRecheck.SourceUnreadable;
+            }
+            return UpgradeRecheck.NotOffered;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Could not recheck WinGet update {package.Id}: {ex.Message}");
+            return UpgradeRecheck.SourceUnreadable;
+        }
+    }
+
+    internal static ListQuery CreateUpgradeRecheckQuery(IPackage package)
+    {
+        PackageQuery selector = PingetPackageDetailsProvider.CreateQuery(package);
+        string? localIdentifier = GetSelectedLocalIdentifier(package);
+        return new ListQuery
+        {
+            Id = localIdentifier ?? selector.Id,
+            Name = localIdentifier is null ? selector.Name : null,
+            Exact = localIdentifier is not null || selector.Exact,
+            Source = selector.Source,
+            InstallScope = GetEffectiveScope(package, InstallOptionsFactory.LoadApplicable(package)),
+            UpgradeOnly = true,
+            IncludeUnknown = true,
+            IncludePinned = true,
+        };
     }
 
     // Default number of "successful" upgrades to the same version (without the installed version

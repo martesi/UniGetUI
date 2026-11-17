@@ -86,3 +86,16 @@ backports/0800-column-menu-toggle.patch
 backports/0810-column-automation-id.patch
 backports/0820-winui-e2e-stability.patch
 backports/0830-winui-column-menu-scope.patch
+backports/0840-winui-card-update-versions.patch
+backports/0850-winui-manager-setup-guides.patch
+backports/0860-invariant-casing-for-package-ids-and-icons.patch
+backports/0870-winui-horizontally-scrollable-package-list.patch
+backports/0880-winui-manager-install-commands.patch
+backports/0890-winui-uninstall-before-reinstall-option.patch
+backports/0900-winui-check-install-command-runner.patch
+backports/0910-restore-release-verification.patch
+backports/0920-disable-unsafe-winget-reinstall.patch
+backports/0930-scoop-version-comparison.patch
+backports/0940-pinget-upgrade-recheck.patch
+backports/0950-pip-environment-safety.patch
+backports/0960-classic-target-build-fix.patch

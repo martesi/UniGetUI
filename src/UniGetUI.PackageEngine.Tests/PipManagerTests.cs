@@ -1,5 +1,6 @@
 using UniGetUI.Core.Data;
 using UniGetUI.Core.SettingsEngine;
+using UniGetUI.Core.SettingsEngine.SecureSettings;
 using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Managers.PipManager;
@@ -31,6 +32,10 @@ public sealed class PipManagerTests : IDisposable
         Directory.CreateDirectory(_testRoot);
         CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
         Directory.CreateDirectory(CoreData.UniGetUIUserConfigurationDirectory);
+        string secureSettingsRoot = Path.Combine(_testRoot, "SecureSettings");
+        SecureSettings.TEST_SecureSettingsRootOverride = secureSettingsRoot;
+        Directory.CreateDirectory(secureSettingsRoot);
+        AllowCustomManagerPaths(false);
         Settings.ResetSettings();
         Settings.Set(Settings.K.EnableProxy, false);
         Settings.Set(Settings.K.EnableProxyAuth, false);
@@ -39,12 +44,117 @@ public sealed class PipManagerTests : IDisposable
 
     public void Dispose()
     {
+        AllowCustomManagerPaths(false);
+        SecureSettings.TEST_SecureSettingsRootOverride = null;
         Settings.ResetSettings();
         CoreData.TEST_DataDirectoryOverride = null;
         if (Directory.Exists(_testRoot))
         {
             Directory.Delete(_testRoot, recursive: true);
         }
+    }
+
+    [Fact]
+    public void PipClassifiesAppOwnedPythonEnvironmentsAndSkipsThemAutomatically()
+    {
+        string venvPython = CreateFile("app", "venv", "Scripts", "python.exe");
+        CreateFile("app", "venv", "pyvenv.cfg");
+        string systemPython = CreateFile("Python314", "python.exe");
+
+        Assert.Equal(PythonEnvironmentKind.VirtualEnvironment, Pip.ClassifyEnvironment(venvPython));
+        Assert.Equal(PythonEnvironmentKind.System, Pip.ClassifyEnvironment(systemPython));
+        Assert.False(Pip.IsEnvironmentManaged(venvPython));
+        Assert.True(Pip.IsEnvironmentManaged(systemPython));
+        Assert.Equal(new(true, systemPython), new ScriptedPip([venvPython, systemPython]).GetExecutableFile());
+    }
+
+    [Fact]
+    public void SelectedPythonEnvironmentAppearsInTheManagementList()
+    {
+        string selected = CreateFile("other-app", "venv", "Scripts", "python.exe");
+        CreateFile("other-app", "venv", "pyvenv.cfg");
+        var pip = new Pip();
+        AllowCustomManagerPaths(true);
+        Settings.SetDictionaryItem(Settings.K.ManagerPaths, pip.Name, selected);
+
+        Assert.Contains(pip.GetPythonCandidates(), candidate =>
+            Pip.IsSameEnvironment(candidate.Path, selected)
+        );
+    }
+
+    [Fact]
+    public void SelectedAppOwnedPythonShowsAsManagedAndCanBeExcludedAgain()
+    {
+        string selected = CreateFile("other-app", "venv", "Scripts", "python.exe");
+        CreateFile("other-app", "venv", "pyvenv.cfg");
+        var pip = new Pip();
+        AllowCustomManagerPaths(true);
+        Settings.SetDictionaryItem(Settings.K.ManagerPaths, pip.Name, selected);
+
+        Pip.PythonCandidate active = Assert.Single(
+            pip.GetPythonCandidates(),
+            candidate => Pip.IsSameEnvironment(candidate.Path, selected)
+        );
+        Assert.True(active.Managed);
+        Assert.True(pip.IsChosenExecutable(selected));
+
+        Pip.SetEnvironmentManaged(selected, false);
+
+        Pip.PythonCandidate ignored = Assert.Single(
+            pip.GetPythonCandidates(),
+            candidate => Pip.IsSameEnvironment(candidate.Path, selected)
+        );
+        Assert.False(ignored.Managed);
+        Assert.False(pip.IsChosenExecutable(selected));
+        Assert.NotEqual(selected, pip.GetExecutableFile().Item2);
+    }
+
+    [Fact]
+    public void OptingIntoAnAppOwnedEnvironmentRequiresCustomPathsToBeAllowed()
+    {
+        string venvPython = CreateFile("other-app", "venv", "Scripts", "python.exe");
+        CreateFile("other-app", "venv", "pyvenv.cfg");
+
+        Pip.SetEnvironmentManaged(venvPython, true);
+        Assert.False(Pip.IsEnvironmentManaged(venvPython));
+
+        AllowCustomManagerPaths(true);
+        Pip.SetEnvironmentManaged(venvPython, true);
+        Assert.True(Pip.IsEnvironmentManaged(venvPython));
+
+        AllowCustomManagerPaths(false);
+        Assert.False(Pip.IsEnvironmentManaged(venvPython));
+    }
+
+    [Fact]
+    public void InstallLocationUsesTheSitePackagesReportedByPip()
+    {
+        string sitePackages = Path.Combine(_testRoot, "app", "venv", "Lib", "site-packages");
+        string banner = $"pip 26.0 from {Path.Combine(sitePackages, "pip")} (python 3.13)";
+        string expected = Path.Combine(sitePackages, "requests");
+
+        Assert.Equal(expected, Pip.ResolveInstallLocation(banner, "python.exe", "requests", path => path == expected));
+        Assert.Equal(sitePackages, Pip.ResolveInstallLocation(banner, "python.exe", "PyYAML", _ => false));
+    }
+
+    private static void AllowCustomManagerPaths(bool allowed) =>
+        SecureSettings.ApplyForUser(
+            Environment.UserName,
+            SecureSettings.ResolveKey(SecureSettings.K.AllowCustomManagerPaths),
+            allowed
+        );
+
+    private string CreateFile(params string[] segments)
+    {
+        string path = Path.Combine([_testRoot, .. segments]);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "");
+        return path;
+    }
+
+    private sealed class ScriptedPip(IReadOnlyList<string> candidates) : Pip
+    {
+        public override IReadOnlyList<string> FindCandidateExecutableFiles() => candidates;
     }
 
     [Fact]
