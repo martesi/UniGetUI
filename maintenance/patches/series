@@ -97,3 +97,5 @@ backports/0910-restore-release-verification.patch
 backports/0920-disable-unsafe-winget-reinstall.patch
 backports/0930-scoop-version-comparison.patch
 backports/0940-pinget-upgrade-recheck.patch
+backports/0950-pip-environment-safety.patch
+backports/0960-classic-target-build-fix.patch
