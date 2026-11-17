@@ -114,3 +114,4 @@ The appended patches retain the individual upstream references.
 - #5674: use invariant casing for package ids, icon ids, and WinGet manifest paths.
 - #5686: add a manager and scope gated uninstall-before-reinstall option to the WinUI update dialog; reuse Classic's chained operation queue. WinGet is disabled until #5778 target validation and reinstall safeguards are ported.
 - #5780: compare Scoop versions with Scoop's own `Compare-Version` rules so pre-release transitions and revisions match `scoop status`.
+- #5779: confirm a bundled Pinget "no applicable upgrade" result with a second source query before suppressing the update; keep it visible when the lookup is transient or a source cannot be read.
