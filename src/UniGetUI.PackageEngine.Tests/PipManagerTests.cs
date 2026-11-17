@@ -137,7 +137,7 @@ public sealed class PipManagerTests : IDisposable
         Assert.Equal(sitePackages, Pip.ResolveInstallLocation(banner, "python.exe", "PyYAML", _ => false));
     }
 
-    private void AllowCustomManagerPaths(bool allowed) =>
+    private static void AllowCustomManagerPaths(bool allowed) =>
         SecureSettings.ApplyForUser(
             Environment.UserName,
             SecureSettings.ResolveKey(SecureSettings.K.AllowCustomManagerPaths),

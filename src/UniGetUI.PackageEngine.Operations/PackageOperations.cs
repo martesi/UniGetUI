@@ -13,6 +13,7 @@ using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.ManagerClasses.Manager;
 using UniGetUI.PackageEngine.PackageLoader;
 using UniGetUI.PackageEngine.Serializable;
+using UniGetUI.PackageEngine.Structs;
 using UniGetUI.PackageOperations;
 #if WINDOWS
 using UniGetUI.PackageEngine.Managers.WingetManager;
@@ -315,6 +316,7 @@ namespace UniGetUI.PackageEngine.Operations
                     new Dictionary<string, object?> { { "package", Package.Name } }
                 );
             }
+#if WINDOWS
             else if (
                 result is OperationVeredict.Failure
                 && Package.Manager is WinGet winget
@@ -326,6 +328,7 @@ namespace UniGetUI.PackageEngine.Operations
                     new Dictionary<string, object?> { { "package", Package.Name } }
                 );
             }
+#endif
             return Task.FromResult(result);
         }
 
