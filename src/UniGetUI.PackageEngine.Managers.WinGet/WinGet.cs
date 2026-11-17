@@ -247,6 +247,10 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
             return PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(package, version);
         }
 
+        public bool ReportedUnconfirmedUpgradeLookup(
+            UniGetUI.PackageEngine.Interfaces.IPackage package
+        ) => WinGetPkgOperationHelper.ReportedUnconfirmedUpgradeLookup(package);
+
         protected override IReadOnlyList<Package> FindPackages_UnSafe(string query)
         {
             return WinGetHelper.Instance.FindPackages_UnSafe(query);

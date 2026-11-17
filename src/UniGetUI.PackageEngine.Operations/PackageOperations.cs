@@ -315,6 +315,17 @@ namespace UniGetUI.PackageEngine.Operations
                     new Dictionary<string, object?> { { "package", Package.Name } }
                 );
             }
+            else if (
+                result is OperationVeredict.Failure
+                && Package.Manager is WinGet winget
+                && winget.ReportedUnconfirmedUpgradeLookup(Package)
+            )
+            {
+                Metadata.FailureMessage = CoreTools.Translate(
+                    "{package} could not be updated because its package source was busy or unreachable. Try again in a few minutes",
+                    new Dictionary<string, object?> { { "package", Package.Name } }
+                );
+            }
             return Task.FromResult(result);
         }
 

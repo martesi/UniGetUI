@@ -2418,16 +2418,134 @@ public sealed class WinGetManagerTests : IDisposable
             .WithNewVersion("2.0.0")
             .Build();
 
-        var veredict = manager.OperationHelper.GetResult(
-            package,
-            OperationType.Update,
-            ["No applicable upgrade found."],
-            0
-        );
+        var veredict = RunPingetNoUpgradeResult(manager, package, _ => ListResponseWith([], []));
 
         OperationAssert.HasVeredict(veredict, OperationVeredict.Failure);
         Assert.True(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
     }
+
+    [Fact]
+    public void WinGetPingetNoUpgradeKeepsTheUpdateWhenASecondLookupStillOffersIt()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        var result = RunPingetNoUpgradeResult(
+            manager,
+            package,
+            _ => ListResponseWith([new ListMatch { AvailableVersion = "2.0.0" }], [])
+        );
+
+        OperationAssert.HasVeredict(result, OperationVeredict.Failure);
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+        Assert.True(WinGetPkgOperationHelper.ReportedUnconfirmedUpgradeLookup(package));
+    }
+
+    [Fact]
+    public void WinGetPingetRecheckUsesLocalIdentifierAndTheEffectiveScope()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS");
+        NativePackageHandler.AddLocalIdentifier(package, NodeJsLocalIdentifier);
+        package.OverridenOptions.WinGet_UseLocalIdentifier = true;
+        ListQuery query = WinGetPkgOperationHelper.CreateUpgradeRecheckQuery(package);
+
+        Assert.Equal(NodeJsLocalIdentifier, query.Id);
+        Assert.Null(query.Name);
+        Assert.True(query.Exact);
+        Assert.Null(query.InstallScope);
+    }
+
+    [Fact]
+    public void WinGetPingetRecheckPreservesAnExplicitPackageScope()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = BuildNodeJsPackage(manager, "OpenJS.NodeJS");
+        package.OverridenOptions.Scope = PackageScope.User;
+        ListQuery query = WinGetPkgOperationHelper.CreateUpgradeRecheckQuery(package);
+
+        Assert.Equal(PackageScope.User, query.InstallScope);
+    }
+
+    [Fact]
+    public void WinGetPingetNoUpgradeKeepsTheUpdateWhenTheSourceCannotBeRead()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        var result = RunPingetNoUpgradeResult(
+            manager,
+            package,
+            _ => ListResponseWith([], ["source unavailable"])
+        );
+
+        OperationAssert.HasVeredict(result, OperationVeredict.Failure);
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+        Assert.True(WinGetPkgOperationHelper.ReportedUnconfirmedUpgradeLookup(package));
+    }
+
+    [Fact]
+    public void WinGetPingetNoUpgradeKeepsTheUpdateWhenTheSecondLookupThrows()
+    {
+        var manager = new WinGet();
+        SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+        var package = new PackageBuilder()
+            .WithManager(manager)
+            .WithId("Contoso.Tool")
+            .WithVersion("1.0.0")
+            .WithNewVersion("2.0.0")
+            .Build();
+
+        var result = RunPingetNoUpgradeResult(
+            manager,
+            package,
+            _ => throw new IOException("The index is locked")
+        );
+
+        OperationAssert.HasVeredict(result, OperationVeredict.Failure);
+        Assert.False(WinGetPkgOperationHelper.IsStuckUpgradeLoop(package));
+        Assert.True(WinGetPkgOperationHelper.ReportedUnconfirmedUpgradeLookup(package));
+    }
+
+    private static OperationVeredict RunPingetNoUpgradeResult(
+        WinGet manager,
+        IPackage package,
+        Func<ListQuery, ListResponse> listUpgrades
+    )
+    {
+        var original = WinGetPkgOperationHelper.ListUpgrades;
+        WinGetPkgOperationHelper.ListUpgrades = listUpgrades;
+        try
+        {
+            return manager.OperationHelper.GetResult(
+                package,
+                OperationType.Update,
+                ["No applicable upgrade found."],
+                0
+            );
+        }
+        finally
+        {
+            WinGetPkgOperationHelper.ListUpgrades = original;
+        }
+    }
+
+    private static ListResponse ListResponseWith(List<ListMatch> matches, List<string> warnings) =>
+        new() { Matches = matches, Warnings = warnings };
 
     [Fact]
     public void WinGetUpdateNotApplicableSuppressesPhantomUpdate()
