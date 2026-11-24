@@ -101,3 +101,4 @@ backports/0950-pip-environment-safety.patch
 backports/0960-classic-target-build-fix.patch
 backports/0970-sort-package-operation-imports.patch
 backports/0980-fix-winui-pip-settings-build.patch
+backports/0990-fix-windows-test-fixture-and-column-automation.patch

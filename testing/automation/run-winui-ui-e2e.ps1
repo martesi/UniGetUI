@@ -86,52 +86,48 @@ function Invoke-Element {
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
 }
 
-function Toggle-Column {
+function Open-ColumnToggle {
     param([System.Windows.Automation.AutomationElement] $Root, [string] $Column)
 
-    $headerId = switch ($Column) {
-        'ReleaseDate' { 'ReleaseDateHeader' }
-        'NewVersion' { 'NewVersionHeader' }
-        default { $null }
+    Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
+    $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
+    try {
+        $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
+            [System.Windows.Automation.ExpandCollapsePattern]::Pattern
+        )
+        $expand.Expand()
     }
-    $wasVisible = $false
-    if ($headerId) {
-        try {
-            [void](Wait-ColumnVisibility $Root $headerId $true -TimeoutSeconds 1)
-            $wasVisible = $true
-        }
-        catch {
-        }
+    catch {
+        $columnsMenu.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
     }
-    $targetVisible = -not $wasVisible
 
-    for ($attempt = 0; $attempt -lt 2; $attempt++) {
-        Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
-        $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
-        try {
-            $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
-                [System.Windows.Automation.ExpandCollapsePattern]::Pattern
-            )
-            $expand.Expand()
-        }
-        catch {
-            $columnsMenu.SetFocus()
-            [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
-        }
-        Start-Sleep -Milliseconds 250
+    $item = Find-ToggleByAutomationId $Root "Column$Column"
+    return [System.Windows.Automation.TogglePattern]$item.GetCurrentPattern(
+        [System.Windows.Automation.TogglePattern]::Pattern
+    )
+}
 
-        $item = Find-ToggleByAutomationId $Root "Column$Column"
-        Invoke-Element $item
-        Start-Sleep -Milliseconds 500
-        if (-not $headerId) {
-            return
-        }
-        try {
-            [void](Wait-ColumnVisibility $Root $headerId $targetVisible -TimeoutSeconds 5)
-            return
-        }
-        catch {
-        }
+function Set-ColumnVisibility {
+    param(
+        [System.Windows.Automation.AutomationElement] $Root,
+        [string] $Column,
+        [bool] $Visible
+    )
+
+    $expected = if ($Visible) { [System.Windows.Automation.ToggleState]::On } else {
+        [System.Windows.Automation.ToggleState]::Off
+    }
+    $toggle = Open-ColumnToggle $Root $Column
+    if ($toggle.Current.ToggleState -ne $expected) {
+        $toggle.Toggle()
+        $toggle = Open-ColumnToggle $Root $Column
+    }
+
+    $actual = $toggle.Current.ToggleState
+    [System.Windows.Forms.SendKeys]::SendWait('{ESC}{ESC}')
+    if ($actual -ne $expected) {
+        throw "Columns menu item '$Column' was $actual, expected $expected."
     }
 }
 
@@ -250,6 +246,17 @@ function Select-LastComboBoxItem {
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
 }
 
+function Search-DiscoverForDotnetsay {
+    param([System.Windows.Automation.AutomationElement] $Root)
+
+    $query = Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120
+    $value = [System.Windows.Automation.ValuePattern]$query.GetCurrentPattern(
+        [System.Windows.Automation.ValuePattern]::Pattern
+    )
+    $value.SetValue('dotnetsay')
+    Invoke-Element (Find-ElementByAutomationId $root 'MegaFindButton')
+}
+
 $appProcess = $null
 try {
     Get-Process -Name UniGetUI -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -357,14 +364,9 @@ try {
     }
     Start-Sleep -Milliseconds 1000
     $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $query = Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120
-    Toggle-Column $root 'ReleaseDate'
-    [void](Wait-ColumnVisibility $root 'ReleaseDateHeader' $true -TimeoutSeconds 60)
-    $value = [System.Windows.Automation.ValuePattern]$query.GetCurrentPattern(
-        [System.Windows.Automation.ValuePattern]::Pattern
-    )
-    $value.SetValue('dotnetsay')
-    Invoke-Element (Find-ElementByAutomationId $root 'MegaFindButton')
+    [void](Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120)
+    Set-ColumnVisibility $root 'ReleaseDate' $true
+    Search-DiscoverForDotnetsay $root
     $dateCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PackageReleaseDate'
     )
@@ -393,16 +395,16 @@ try {
     }
     Start-Sleep -Milliseconds 1000
     [void](Wait-ColumnVisibility $root 'NewVersionHeader' $true -TimeoutSeconds 120)
-    Toggle-Column $root 'NewVersion'
+    Set-ColumnVisibility $root 'NewVersion' $false
     [void](Wait-ColumnVisibility $root 'NewVersionHeader' $false -TimeoutSeconds 30)
-    Toggle-Column $root 'NewVersion'
+    Set-ColumnVisibility $root 'NewVersion' $true
     [void](Wait-ColumnVisibility $root 'NewVersionHeader' $true -TimeoutSeconds 30)
 
     Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
     Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
     $appProcess = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
         -ArgumentList 'unigetui://showDiscoverPage' -PassThru
-    [void](Find-ElementByAutomationId $root 'MegaQueryBlock' -TimeoutSeconds 120)
+    Search-DiscoverForDotnetsay $root
     $dateHeader = Wait-ColumnVisibility $root 'ReleaseDateHeader' $true -TimeoutSeconds 120
     if ($dateHeader.Current.ProcessId -ne $appProcess.Id) {
         throw 'The release date column did not remain enabled after restart.'
