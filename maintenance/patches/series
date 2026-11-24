@@ -103,3 +103,4 @@ backports/0970-sort-package-operation-imports.patch
 backports/0980-fix-winui-pip-settings-build.patch
 backports/0990-fix-windows-test-fixture-and-column-automation.patch
 backports/1000-complete-pinget-fixture-and-winui-flyout.patch
+backports/1010-isolate-pinget-tests-and-await-winui-flyout.patch

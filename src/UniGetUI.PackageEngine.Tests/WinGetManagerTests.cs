@@ -2413,7 +2413,7 @@ public sealed class WinGetManagerTests : IDisposable
         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
         var package = new PackageBuilder()
             .WithManager(manager)
-            .WithId("Contoso.Tool")
+            .WithId("Contoso.Tool.NoUpgrade")
             .WithVersion("1.0.0")
             .WithNewVersion("2.0.0")
             .Build();
@@ -2431,7 +2431,7 @@ public sealed class WinGetManagerTests : IDisposable
         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
         var package = new PackageBuilder()
             .WithManager(manager)
-            .WithId("Contoso.Tool")
+            .WithId("Contoso.Tool.StillOffered")
             .WithVersion("1.0.0")
             .WithNewVersion("2.0.0")
             .Build();
@@ -2444,8 +2444,8 @@ public sealed class WinGetManagerTests : IDisposable
                     new ListMatch
                     {
                         Name = "Contoso Tool",
-                        Id = "Contoso.Tool",
-                        LocalId = "Contoso.Tool",
+                        Id = "Contoso.Tool.StillOffered",
+                        LocalId = "Contoso.Tool.StillOffered",
                         InstalledVersion = "1.0.0",
                         AvailableVersion = "2.0.0",
                     },
@@ -2494,7 +2494,7 @@ public sealed class WinGetManagerTests : IDisposable
         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
         var package = new PackageBuilder()
             .WithManager(manager)
-            .WithId("Contoso.Tool")
+            .WithId("Contoso.Tool.UnavailableSource")
             .WithVersion("1.0.0")
             .WithNewVersion("2.0.0")
             .Build();
@@ -2517,7 +2517,7 @@ public sealed class WinGetManagerTests : IDisposable
         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
         var package = new PackageBuilder()
             .WithManager(manager)
-            .WithId("Contoso.Tool")
+            .WithId("Contoso.Tool.LookupError")
             .WithVersion("1.0.0")
             .WithNewVersion("2.0.0")
             .Build();
