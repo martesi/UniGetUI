@@ -87,9 +87,18 @@ function Invoke-Element {
 }
 
 function Open-ColumnToggle {
-    param([System.Windows.Automation.AutomationElement] $Root, [string] $Column)
+    param(
+        [System.Windows.Automation.AutomationElement] $Root,
+        [System.Windows.Automation.ExpandCollapsePattern] $OrderMenu,
+        [string] $Column,
+        [string] $Phase
+    )
 
-    Invoke-Element (Find-ElementByAutomationId $Root 'OrderByButton')
+    $menuState = $OrderMenu.Current.ExpandCollapseState
+    Write-Host "Columns menu for '$Column' (${Phase}): order flyout is $menuState"
+    if ($menuState -ne [System.Windows.Automation.ExpandCollapseState]::Expanded) {
+        $OrderMenu.Expand()
+    }
     $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
     try {
         $expand = [System.Windows.Automation.ExpandCollapsePattern]$columnsMenu.GetCurrentPattern(
@@ -118,14 +127,23 @@ function Set-ColumnVisibility {
     $expected = if ($Visible) { [System.Windows.Automation.ToggleState]::On } else {
         [System.Windows.Automation.ToggleState]::Off
     }
-    $toggle = Open-ColumnToggle $Root $Column
-    if ($toggle.Current.ToggleState -ne $expected) {
-        $toggle.Toggle()
-        $toggle = Open-ColumnToggle $Root $Column
+    $orderButton = Find-ElementByAutomationId $Root 'OrderByButton'
+    $orderMenu = [System.Windows.Automation.ExpandCollapsePattern]$orderButton.GetCurrentPattern(
+        [System.Windows.Automation.ExpandCollapsePattern]::Pattern
+    )
+    try {
+        $toggle = Open-ColumnToggle $Root $orderMenu $Column 'initial'
+        if ($toggle.Current.ToggleState -ne $expected) {
+            $toggle.Toggle()
+            $toggle = Open-ColumnToggle $Root $orderMenu $Column 'after toggle'
+        }
+        $actual = $toggle.Current.ToggleState
     }
-
-    $actual = $toggle.Current.ToggleState
-    [System.Windows.Forms.SendKeys]::SendWait('{ESC}{ESC}')
+    finally {
+        if ($orderMenu.Current.ExpandCollapseState -eq [System.Windows.Automation.ExpandCollapseState]::Expanded) {
+            $orderMenu.Collapse()
+        }
+    }
     if ($actual -ne $expected) {
         throw "Columns menu item '$Column' was $actual, expected $expected."
     }

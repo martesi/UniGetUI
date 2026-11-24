@@ -2439,7 +2439,19 @@ public sealed class WinGetManagerTests : IDisposable
         var result = RunPingetNoUpgradeResult(
             manager,
             package,
-            _ => ListResponseWith([new ListMatch { Name = "Contoso Tool", AvailableVersion = "2.0.0" }], [])
+            _ => ListResponseWith(
+                [
+                    new ListMatch
+                    {
+                        Name = "Contoso Tool",
+                        Id = "Contoso.Tool",
+                        LocalId = "Contoso.Tool",
+                        InstalledVersion = "1.0.0",
+                        AvailableVersion = "2.0.0",
+                    },
+                ],
+                []
+            )
         );
 
         OperationAssert.HasVeredict(result, OperationVeredict.Failure);
