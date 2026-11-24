@@ -582,13 +582,12 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
             ExtraControls.Children.Add(customAgeCard);
 
             // Hide the AppExecutionAliasWarning element if Manager is not Pip
-            if (Manager is Pip)
+            if (Manager is Pip pip)
             {
                 ManagerLogs.CornerRadius = new CornerRadius(8, 8, 0, 0);
                 AppExecutionAliasWarningLabel.Text =
                     "If Python cannot be found or is not listing packages but is installed on the system, you may need to disable the \"python.exe\" App Execution Alias in the settings.";
 
-                Pip pip = (Pip)Manager;
                 SettingsCard environmentCard = new()
                 {
                     Header = CoreTools.Translate("Python environments"),
@@ -650,10 +649,17 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
                 };
                 async void SaveEnvironmentChoice(object? _, RoutedEventArgs __)
                 {
-                    environmentList.IsEnabled = false;
-                    Pip.SetEnvironmentManaged(candidate.Path, manageEnvironment.IsChecked is true);
-                    await ReloadPackageManager();
-                    PopulatePipEnvironmentCard(pip, card);
+                    card.IsEnabled = false;
+                    try
+                    {
+                        Pip.SetEnvironmentManaged(candidate.Path, manageEnvironment.IsChecked is true);
+                        await ReloadPackageManager();
+                        PopulatePipEnvironmentCard(pip, card);
+                    }
+                    finally
+                    {
+                        card.IsEnabled = true;
+                    }
                 }
                 manageEnvironment.Checked += SaveEnvironmentChoice;
                 manageEnvironment.Unchecked += SaveEnvironmentChoice;
