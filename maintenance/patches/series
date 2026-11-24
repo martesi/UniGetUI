@@ -99,3 +99,4 @@ backports/0930-scoop-version-comparison.patch
 backports/0940-pinget-upgrade-recheck.patch
 backports/0950-pip-environment-safety.patch
 backports/0960-classic-target-build-fix.patch
+backports/0970-sort-package-operation-imports.patch
