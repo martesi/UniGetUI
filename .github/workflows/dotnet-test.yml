@@ -1,26 +1,11 @@
 name: .NET Tests
 on:
-  push:
-    branches: [ "main", "backport/**-updates" ]
-    paths:
-      - 'global.json'
-      - '**.cs'
-      - '**.axaml'
-      - '**.xaml'
-      - '**.csproj'
-      - '**.props'
-      - '**.targets'
-      - '**.sln'
-      - '**.slnx'
-      - 'src/.editorconfig'
-      - '.github/workflows/dotnet-test.yml'
-
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [ "main" ]
     paths:
       - 'global.json'
       - '**.cs'
-      - '**.axaml'
       - '**.xaml'
       - '**.csproj'
       - '**.props'
@@ -29,11 +14,18 @@ on:
       - '**.slnx'
       - 'src/.editorconfig'
       - '.github/workflows/dotnet-test.yml'
+      - '!src/UniGetUI.Avalonia/**'
+      - '!src/UniGetUI.Avalonia.slnx'
 
   workflow_dispatch:
 
+concurrency:
+  group: dotnet-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-codebase:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: windows-latest
     env:
       NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages

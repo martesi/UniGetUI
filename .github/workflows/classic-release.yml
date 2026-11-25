@@ -11,6 +11,7 @@ on:
       - 'scripts/set-version.ps1'
       - 'scripts/*integrity-tree.ps1'
       - 'src/Directory.Build.*'
+      - 'src/UniGetUI.Windows.slnx'
       - 'src/UniGetUI/UniGetUI.csproj'
   workflow_dispatch:
     inputs:
