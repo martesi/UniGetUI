@@ -1,6 +1,17 @@
 name: Classic Release
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/classic-release.yml'
+      - 'UniGetUI.iss'
+      - 'InstallerExtras/**'
+      - 'global.json'
+      - 'scripts/set-version.ps1'
+      - 'scripts/*integrity-tree.ps1'
+      - 'src/Directory.Build.*'
+      - 'src/UniGetUI/UniGetUI.csproj'
   workflow_dispatch:
     inputs:
       version:
@@ -12,6 +23,11 @@ on:
         required: true
         type: boolean
         default: true
+      package-only:
+        description: 'Build and upload CI artifacts without creating a tag or release'
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,9 +41,11 @@ jobs:
       - name: Validate version
         id: version
         shell: bash
+        env:
+          VERSION: ${{ github.event_name == 'pull_request' && '0.0.0.0' || inputs.version }}
         run: |
           set -euo pipefail
-          version='${{ inputs.version }}'
+          version="$VERSION"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo 'Classic release versions must be numeric four-part versions such as 2026.2.7.1.' >&2
             exit 1
@@ -42,59 +60,46 @@ jobs:
       matrix:
         platform: [x64, arm64]
     steps:
-      - name: Checkout patch stack
+      - name: Checkout exact Classic commit
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - name: Replay and verify Classic source
-        id: replay
+      - name: Verify source commit before stamping
         shell: pwsh
         run: |
-          $worktree = Join-Path '${{ runner.temp }}' 'unigetui-classic-${{ matrix.platform }}'
-          ./scripts/apply-patch-stack.ps1 -WorktreePath $worktree | Out-Host
-
-          $metadata = Get-Content './maintenance/patch-stack.json' -Raw | ConvertFrom-Json
-          $expectedCommit = [string] $metadata.classic_source_commit
-          $expectedTree = (git rev-parse "$expectedCommit^{tree}").Trim()
-          if ($LASTEXITCODE -ne 0) { throw "Could not resolve expected Classic tree for $expectedCommit." }
-
-          $actualTree = (git -C $worktree rev-parse 'HEAD^{tree}').Trim()
-          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the replayed Classic tree.' }
-          if ($actualTree -ne $expectedTree) {
-            throw "Replayed Classic tree $actualTree does not match expected tree $expectedTree."
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:GITHUB_SHA) {
+            throw "Expected source commit $env:GITHUB_SHA, got $actual."
           }
-
-          Write-Host "Release source verified at tree $actualTree"
-          "path=$worktree" >> $env:GITHUB_OUTPUT
+          Write-Host "Packaging Classic source at $actual"
 
       - name: Install .NET
         uses: actions/setup-dotnet@v5
         with:
-          global-json-file: ${{ steps.replay.outputs.path }}/global.json
+          global-json-file: global.json
 
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup -y --no-progress
 
       - name: Stamp Classic version
-        working-directory: ${{ steps.replay.outputs.path }}
         shell: pwsh
         run: ./scripts/set-version.ps1 -Version '${{ needs.validate.outputs.version }}'
 
       - name: Restore
-        working-directory: ${{ steps.replay.outputs.path }}/src
+        working-directory: src
         shell: pwsh
         run: dotnet restore UniGetUI.Windows.slnx /p:Platform=${{ matrix.platform }}
 
       - name: Test package engine
         if: matrix.platform == 'x64'
-        working-directory: ${{ steps.replay.outputs.path }}/src
+        working-directory: src
         shell: pwsh
-        run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64
+        run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64 /m:1
 
       - name: Publish WinUI Classic
-        working-directory: ${{ steps.replay.outputs.path }}
         shell: pwsh
         run: |
           [xml]$props = Get-Content 'src/Directory.Build.props'
@@ -131,7 +136,6 @@ jobs:
           ./scripts/refresh-integrity-tree.ps1 -Path $PWD/unigetui_bin -FailOnUnexpectedFiles
 
       - name: Build unsigned installer
-        working-directory: ${{ steps.replay.outputs.path }}
         shell: pwsh
         run: |
           $platform = '${{ matrix.platform }}'
@@ -154,14 +158,18 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: classic-installer-${{ matrix.platform }}
-          path: ${{ steps.replay.outputs.path }}/output/UniGetUI.Installer.${{ matrix.platform }}.exe
+          path: output/UniGetUI.Installer.${{ matrix.platform }}.exe
           if-no-files-found: error
 
   release:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !inputs.package-only
     needs: [validate, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: classic-release-${{ inputs.version }}
+      cancel-in-progress: false
     steps:
       - name: Download installers
         uses: actions/download-artifact@v8
@@ -213,7 +221,17 @@ jobs:
           set -euo pipefail
           version='${{ needs.validate.outputs.version }}'
           draft='${{ inputs.draft }}'
-          args=(release create "v$version" --repo '${{ github.repository }}' --title "UniGetUI Classic v$version")
+          tag="v$version"
+          # Create the tag directly at the commit actually packaged. Never move a tag.
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null; then
+            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
+            if [[ "$actual" != "$GITHUB_SHA" ]]; then
+              echo "Tag $tag targets $actual, not the packaged commit $GITHUB_SHA." >&2
+              exit 1
+            fi
+          fi
+          args=(release create "$tag" --verify-tag --repo "$GITHUB_REPOSITORY" --title "UniGetUI Classic $tag")
           if [[ "$draft" == 'true' ]]; then
             args+=(--draft)
           fi

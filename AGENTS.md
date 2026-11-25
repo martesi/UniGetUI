@@ -15,13 +15,10 @@ Solution entry points:
 - Split mixed backend/Avalonia changes. Adapt behavior to WinUI only when Classic needs it; skip Avalonia-only changes.
 - Keep compatibility adapters small. Avoid duplicating PackageEngine or manager implementations.
 - Prioritize security, then backend correctness, then UI features. Before a release, review upstream changes since the last reviewed tag and identify security fixes.
-- Preserve imported provenance with `Upstream-Commit:` and `Upstream-PR:` trailers. Downstream patch files need a `Classic-Source-Commit:` trailer.
-- Keep patch files and `maintenance/patches/series` current. Update `classic_source_commit` in `maintenance/patch-stack.json` to the source snapshot; retain that commit on a remote branch.
-- Run patch replay verification from the maintenance checkout before submitting a patch-stack change. Release builds use the replayed source tree.
-- Put new skipped/adapted decisions in `maintenance/PATCH_STACK.md` only when the reason is not clear from the patch. Do not maintain a second applied-change ledger.
+- Commit directly to a branch from Classic `main`; there is no replay step. Backports should keep `Upstream-Commit:` and `Upstream-PR:` trailers (also retained in the PR if squashed).
 - Preserve the separate Classic installation and update identity described in `CLASSIC.md`. Keep `BundleModernApp=false` in `src/Directory.Build.targets`.
 
-See `maintenance/PATCH_STACK.md` for replay commands and the patch update process.
+The old patch series and import decisions are linked from `CLASSIC.md`.
 
 ## Architecture
 
@@ -61,12 +58,6 @@ dotnet restore src/UniGetUI.Windows.slnx
 dotnet build src/UniGetUI.Windows.slnx --no-restore --verbosity minimal /p:Platform=x64
 dotnet test src/UniGetUI.Windows.slnx --no-restore --verbosity q --nologo /p:Platform=x64
 dotnet publish src/UniGetUI/UniGetUI.csproj /p:Configuration=Release /p:Platform=x64
-```
-
-For patch-stack changes, run from the maintenance checkout:
-
-```powershell
-pwsh ./scripts/verify-patch-stack.ps1
 ```
 
 - Target framework: `net10.0-windows10.0.26100.0` (min `10.0.19041`)

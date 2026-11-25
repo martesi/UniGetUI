@@ -42,7 +42,9 @@ jobs:
     - name: Checkout the repository
       uses: actions/checkout@v6
       with:
+        ref: ${{ github.sha }}
         fetch-depth: 0
+        persist-credentials: false
 
     - name: Install .NET SDK
       uses: actions/setup-dotnet@v5
@@ -96,4 +98,5 @@ jobs:
       working-directory: src
       env:
         GITHUB_TOKEN: ${{ github.token }}
-      run: dotnet test UniGetUI.Windows.slnx --no-build --no-restore --verbosity q --nologo /p:Platform=x64
+      # Keep test hosts serial: several suites share on-disk settings and package-manager state.
+      run: dotnet test UniGetUI.Windows.slnx --no-build --no-restore --verbosity q --nologo /p:Platform=x64 /m:1 --logger "console;verbosity=normal"
