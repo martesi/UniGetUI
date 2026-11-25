@@ -1,0 +1,39 @@
+From 66d034ec2f74e608727f6bc09301db50873e2269 Mon Sep 17 00:00:00 2001
+From: dot <dot@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 17:59:22 -0800
+Subject: [PATCH] Check standalone Agent Skills CLI before starting WinUI
+
+Classic-Source-Commit: 66d034ec2f74e608727f6bc09301db50873e2269
+---
+ testing/automation/run-winui-ui-e2e.ps1 | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
+index bbbfe9f..9f23cc6 100644
+--- a/testing/automation/run-winui-ui-e2e.ps1
++++ b/testing/automation/run-winui-ui-e2e.ps1
+@@ -278,6 +278,24 @@ try {
+     Get-Process -Name UniGetUI -ErrorAction SilentlyContinue | Stop-Process -Force
+ 
+     $executable = Find-Executable
++    Write-Host 'Checking standalone Agent Skills CLI before launching WinUI'
++    $skillsHelpOutput = [System.IO.Path]::GetTempFileName()
++    try {
++        $skillsHelp = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
++            -ArgumentList @('skills', '--help') -RedirectStandardOutput $skillsHelpOutput -PassThru
++        if (-not $skillsHelp.WaitForExit(25000)) {
++            $skillsHelp.Kill()
++            throw 'Standalone skills --help did not exit.'
++        }
++        $help = Get-Content -LiteralPath $skillsHelpOutput -Raw
++        if ($skillsHelp.ExitCode -ne 0 -or $help -notmatch 'Manage Skills:') {
++            throw "Standalone skills --help did not return usage (exit $($skillsHelp.ExitCode))."
++        }
++    }
++    finally {
++        Remove-Item -LiteralPath $skillsHelpOutput
++    }
++
+     $appProcess = Start-Process `
+         -FilePath $executable `
+         -WorkingDirectory (Split-Path $executable) `

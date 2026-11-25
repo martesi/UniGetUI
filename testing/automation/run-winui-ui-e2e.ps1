@@ -278,6 +278,24 @@ try {
     Get-Process -Name UniGetUI -ErrorAction SilentlyContinue | Stop-Process -Force
 
     $executable = Find-Executable
+    Write-Host 'Checking standalone Agent Skills CLI before launching WinUI'
+    $skillsHelpOutput = [System.IO.Path]::GetTempFileName()
+    try {
+        $skillsHelp = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+            -ArgumentList @('skills', '--help') -RedirectStandardOutput $skillsHelpOutput -PassThru
+        if (-not $skillsHelp.WaitForExit(25000)) {
+            $skillsHelp.Kill()
+            throw 'Standalone skills --help did not exit.'
+        }
+        $help = Get-Content -LiteralPath $skillsHelpOutput -Raw
+        if ($skillsHelp.ExitCode -ne 0 -or $help -notmatch 'Manage Skills:') {
+            throw "Standalone skills --help did not return usage (exit $($skillsHelp.ExitCode))."
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $skillsHelpOutput
+    }
+
     $appProcess = Start-Process `
         -FilePath $executable `
         -WorkingDirectory (Split-Path $executable) `
@@ -302,6 +320,23 @@ try {
     if (-not $window) {
         throw 'UniGetUI main window was not found.'
     }
+
+    Write-Host 'Verifying Agent Skills remains opt-in'
+    Invoke-Element (Find-ElementByAutomationId $window 'AgentSkillsSettingsEntry' -TimeoutSeconds 120)
+    $skillsSwitch = Find-ToggleByAutomationId $window 'AgentSkillsEnabled'
+    $skillsToggle = [System.Windows.Automation.TogglePattern]$skillsSwitch.GetCurrentPattern(
+        [System.Windows.Automation.TogglePattern]::Pattern
+    )
+    if ($skillsToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+        throw 'Agent Skills was enabled by default.'
+    }
+    $skillsToggle.Toggle()
+    [void](Find-ElementByAutomationId $window 'AgentSkillsMode')
+    $skillsToggle.Toggle()
+    if ($skillsToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+        throw 'Agent Skills could not be disabled.'
+    }
+    Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
 
     Invoke-Element (Find-ElementByAutomationId $window 'OperationsSettingsEntry' -TimeoutSeconds 120)
     [void](Find-ElementByAutomationId $window 'InstallerFileNameScheme')
@@ -342,6 +377,13 @@ try {
     Select-LastComboBoxItem $backupCountSelector
     [void](Find-ElementByAutomationId $window 'MaxLocalBackupCountCustom')
 
+    Write-Host 'Opening Manager Health from Settings'
+    Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
+    Invoke-Element (Find-ElementByAutomationId $window 'ManagersSettingsShortcut')
+    Invoke-Element (Find-ElementByAutomationId $window 'ManagerHealthEntry')
+    [void](Find-ElementByAutomationId $window 'ManagerHealthFilter')
+    [void](Find-ElementByAutomationId $window 'ManagerHealthCheckAgain')
+
     Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
     $appProcess = Start-Process `
         -FilePath $executable `
@@ -369,13 +411,6 @@ try {
     }
 
     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
-
-    Write-Host 'Opening Manager Health'
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    Invoke-Element (Find-ElementByAutomationId $root 'ManagersNavigationButton')
-    Invoke-Element (Find-ElementByAutomationId $root 'ManagerHealthEntry')
-    [void](Find-ElementByAutomationId $root 'ManagerHealthFilter')
-    [void](Find-ElementByAutomationId $root 'ManagerHealthCheckAgain')
 
     Write-Host 'Enabling the release date column on Discover'
     $redirect = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `

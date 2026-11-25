@@ -68,6 +68,16 @@ namespace UniGetUI.PackageEngine.PackageLoader
                 return false;
             }
 
+            // The Agent Skills extension's Notion CLI pin must not overwrite user-managed ignores.
+            if (
+                (package.Manager.Name.Equals("WinGet", StringComparison.OrdinalIgnoreCase)
+                    && package.Id.Equals("Notion.ntn", StringComparison.OrdinalIgnoreCase)
+                    || package.Manager.Name.Equals("npm", StringComparison.OrdinalIgnoreCase)
+                    && package.Id.Equals("ntn", StringComparison.OrdinalIgnoreCase))
+                && !string.IsNullOrWhiteSpace(Settings.GetValue(Settings.K.SkillsNotionCliVersion))
+            )
+                return false;
+
             if (await package.HasUpdatesIgnoredAsync(package.NewVersionString))
             {
                 IgnoredPackages[package.Id] = package;

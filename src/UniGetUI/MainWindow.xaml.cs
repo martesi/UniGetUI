@@ -26,6 +26,7 @@ using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.PackageLoader;
 using UniGetUI.Pages.DialogPages;
+using UniGetUI.Pages.SettingsPages.GeneralPages;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.UI.Text.Core;
 using WindowExtensions = H.NotifyIcon.WindowExtensions;
@@ -231,6 +232,11 @@ namespace UniGetUI.Interface
             else if (action == NotificationArguments.ShowOnUpdatesTab)
             {
                 NavigationPage.NavigateTo(PageType.Updates);
+                Activate();
+            }
+            else if (action == NotificationArguments.ShowOnAgentSkillsTab)
+            {
+                NavigationPage.OpenSettingsPage(typeof(AgentSkillsPage));
                 Activate();
             }
             else if (action == NotificationArguments.Show)

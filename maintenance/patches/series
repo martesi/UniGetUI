@@ -105,3 +105,6 @@ backports/0990-fix-windows-test-fixture-and-column-automation.patch
 backports/1000-complete-pinget-fixture-and-winui-flyout.patch
 backports/1010-isolate-pinget-tests-and-await-winui-flyout.patch
 backports/1020-port-manager-health-to-classic-winui.patch
+backports/1030-import-agent-skills-backend.patch
+backports/1040-wire-agent-skills-in-classic-winui.patch
+backports/1050-test-standalone-agent-skills-cli.patch
