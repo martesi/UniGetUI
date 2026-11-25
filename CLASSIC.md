@@ -10,9 +10,11 @@ This branch preserves the WinUI frontend that shipped in UniGetUI v2026.2.1 whil
 
 ## Maintenance model
 
-Classic releases use an ordered patch stack over the exact upstream base in `maintenance/upstream-base.json`. The release workflow replays `maintenance/patches/series` and verifies that the complete source tree matches `classic_source_commit` in `maintenance/patch-stack.json` before building.
+The checked-in source on `main` is authoritative. Branch from `main`, apply selected upstream commits directly, and send a normal PR. There is no generated source branch or patch replay to update. See `AGENTS.md` for build and test commands.
 
-Read `AGENTS.md` for maintenance rules and `maintenance/PATCH_STACK.md` for commands, patch updates, and decisions.
+The **Classic Release** workflow checks out and verifies the exact triggering commit before it stamps the release version. The same workflow builds x64 and arm64 installers as CI artifacts on packaging PRs and on manual **package-only** runs. Only manual release runs from `main` can create a tag and release. The tag points to the commit used to build the installers.
+
+The [final 109-patch stack](https://github.com/martesi/UniGetUI/tree/037beba67aec2ce74ee65c0509cf3ec866e46ab5/maintenance) remains in Git history. Its [replayed source](https://github.com/martesi/UniGetUI/tree/030a13c2d732c69443a0c82fba0a6054c0981362) has the same shipped source and assets as the checked-in tree at the transition.
 
 ## Compatibility boundary
 
@@ -68,4 +70,4 @@ Classic versions are numeric four-part versions. The first three components iden
 
 ## Backports
 
-Imported fixes carry upstream commit and PR trailers in Git history and patch files. The ordered patch series defines the changes used for releases. Skipped or adapted backport decisions are recorded in `maintenance/PATCH_STACK.md`.
+Record upstream fixes with `Upstream-Commit:` and `Upstream-PR:` trailers (or the corresponding PR text if squashed). Prior skip/adapt decisions are in the [archived maintenance notes](https://github.com/martesi/UniGetUI/blob/037beba67aec2ce74ee65c0509cf3ec866e46ab5/maintenance/PATCH_STACK.md).
