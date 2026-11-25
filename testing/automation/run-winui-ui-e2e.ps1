@@ -331,7 +331,26 @@ try {
         throw 'Agent Skills was enabled by default.'
     }
     $skillsToggle.Toggle()
-    [void](Find-ElementByAutomationId $window 'AgentSkillsMode')
+    $libraryView = Find-ElementByAutomationId $window 'AgentSkillsMode'
+    $typeFilter = Find-ElementByAutomationId $window 'AgentSkillsTypeFilter'
+    [void](Find-ElementByAutomationId $window 'AgentSkillsToolFilter')
+    $deadline = (Get-Date).AddSeconds(45)
+    while (-not $libraryView.Current.IsEnabled -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $libraryView.Current.IsEnabled) {
+        throw 'The unified Agent Skills library did not finish opening.'
+    }
+    Select-LastComboBoxItem $libraryView
+    $selection = [System.Windows.Automation.SelectionPattern]$libraryView.GetCurrentPattern(
+        [System.Windows.Automation.SelectionPattern]::Pattern
+    )
+    if ($selection.Current.GetSelection()[0].Current.Name -ne 'Sources') {
+        throw 'Sources must be the last unified library view, with no separate Plugins view.'
+    }
+    if ($typeFilter.Current.IsOffscreen) {
+        throw 'The Type filter must remain available on Sources.'
+    }
     $skillsToggle.Toggle()
     if ($skillsToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
         throw 'Agent Skills could not be disabled.'
