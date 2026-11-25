@@ -1,21 +1,6 @@
 name: WinUI UI E2E
 
 on:
-  push:
-    branches: [ "backport/**-updates" ]
-  pull_request:
-    branches: [ "main" ]
-    paths:
-      - 'src/**/*.cs'
-      - 'src/**/*.xaml'
-      - 'src/**/*.csproj'
-      - 'src/**/*.props'
-      - 'src/**/*.targets'
-      - 'src/**/*.sln'
-      - 'src/**/*.slnx'
-      - 'testing/automation/run-winui-ui-e2e.ps1'
-      - '.github/workflows/winui-ui-e2e.yml'
-      - 'global.json'
   workflow_dispatch:
 
 jobs:

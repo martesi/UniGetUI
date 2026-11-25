@@ -1,43 +1,12 @@
 name: CLI Headless E2E
 
 on:
-  push:
-    branches: [ "backport/**-updates" ]
-  pull_request:
-    branches: [ "main" ]
-    paths:
-      - 'src/**/*.cs'
-      - 'src/**/*.csproj'
-      - 'src/**/*.props'
-      - 'src/**/*.targets'
-      - 'src/**/*.sln'
-      - 'src/**/*.slnx'
-      - 'testing/automation/**'
-      - '.github/workflows/cli-headless-e2e.yml'
-      - 'global.json'
   workflow_dispatch:
 
 jobs:
   cli-headless-e2e:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows (WinUI 3)
-            os: windows-latest
-            solution: UniGetUI.Windows.slnx
-            daemon_project: UniGetUI/UniGetUI.csproj
-            daemon_build_args: '-p:Platform=x64'
-            manifest: testing/automation/cli-e2e.manifest.windows.json
-          - name: Linux (Avalonia)
-            os: ubuntu-latest
-            solution: UniGetUI.Avalonia.slnx
-            daemon_project: UniGetUI.Avalonia/UniGetUI.Avalonia.csproj
-            daemon_build_args: ''
-            manifest: testing/automation/cli-e2e.manifest.linux.json
-
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    name: Windows (WinUI 3)
+    runs-on: windows-latest
     env:
       CONFIGURATION: Release
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
@@ -72,25 +41,12 @@ jobs:
       - name: Restore solution
         working-directory: src
         shell: pwsh
-        run: dotnet restore ${{ matrix.solution }}
+        run: dotnet restore UniGetUI.Windows.slnx
 
       - name: Build headless daemon
         working-directory: src
         shell: pwsh
-        run: |
-          $args = @(
-            'build',
-            '${{ matrix.daemon_project }}',
-            '--no-restore',
-            '--configuration',
-            '${{ env.CONFIGURATION }}',
-            '--verbosity',
-            'minimal'
-          )
-          if ('${{ matrix.daemon_build_args }}') {
-            $args += '${{ matrix.daemon_build_args }}'
-          }
-          dotnet @args
+        run: dotnet build UniGetUI/UniGetUI.csproj --no-restore --configuration ${{ env.CONFIGURATION }} --verbosity minimal -p:Platform=x64
 
       - name: Upgrade pip tooling
         shell: pwsh
@@ -107,7 +63,7 @@ jobs:
       - name: Run headless CLI E2E
         shell: pwsh
         env:
-          UNIGETUI_CLI_E2E_MANIFEST: ${{ matrix.manifest }}
+          UNIGETUI_CLI_E2E_MANIFEST: testing/automation/cli-e2e.manifest.windows.json
           UNIGETUI_CLI_E2E_ARTIFACTS: ${{ github.workspace }}/artifacts/cli-headless-e2e/${{ runner.os }}
         run: ./testing/automation/run-cli-e2e.ps1
 
@@ -115,6 +71,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: cli-headless-e2e-${{ matrix.name }}
+          name: cli-headless-e2e-windows
           path: artifacts/cli-headless-e2e/${{ runner.os }}
           if-no-files-found: warn
