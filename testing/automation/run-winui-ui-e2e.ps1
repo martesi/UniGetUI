@@ -278,6 +278,24 @@ try {
     Get-Process -Name UniGetUI -ErrorAction SilentlyContinue | Stop-Process -Force
 
     $executable = Find-Executable
+    Write-Host 'Checking standalone Agent Skills CLI before launching WinUI'
+    $skillsHelpOutput = [System.IO.Path]::GetTempFileName()
+    try {
+        $skillsHelp = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
+            -ArgumentList @('skills', '--help') -RedirectStandardOutput $skillsHelpOutput -PassThru
+        if (-not $skillsHelp.WaitForExit(25000)) {
+            $skillsHelp.Kill()
+            throw 'Standalone skills --help did not exit.'
+        }
+        $help = Get-Content -LiteralPath $skillsHelpOutput -Raw
+        if ($skillsHelp.ExitCode -ne 0 -or $help -notmatch 'Manage Skills:') {
+            throw "Standalone skills --help did not return usage (exit $($skillsHelp.ExitCode))."
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $skillsHelpOutput
+    }
+
     $appProcess = Start-Process `
         -FilePath $executable `
         -WorkingDirectory (Split-Path $executable) `
