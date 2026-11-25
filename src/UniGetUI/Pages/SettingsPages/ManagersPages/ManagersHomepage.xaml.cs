@@ -1,5 +1,6 @@
 using CommunityToolkit.WinUI;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
@@ -147,6 +148,16 @@ namespace UniGetUI.Pages.SettingsPages
             }
             var last = (SettingsPageButton)SettingsEntries.Children[^1];
             last.CornerRadius = new CornerRadius(0, 0, 8, 8);
+
+            var health = new SettingsPageButton
+            {
+                Text = "Manager Health",
+                UnderText = "Check package manager status and run repair actions.",
+                Margin = new Thickness(0, 0, 0, 8),
+            };
+            AutomationProperties.SetAutomationId(health, "ManagerHealthEntry");
+            health.Click += (_, _) => NavigationRequested?.Invoke(this, typeof(ManagerHealthPage));
+            SettingsEntries.Children.Insert(0, health);
         }
 
         protected override void OnNavigatedTo(NavigationEventArgs e)
