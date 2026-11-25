@@ -99,6 +99,7 @@
 
       <widgets:SettingsPageButton
         x:Name="ManagersSettingsShortcut"
+        AutomationProperties.AutomationId="ManagersSettingsShortcut"
         Click="ManagersShortcut"
         CornerRadius="8"
         Icon="Search"
@@ -133,6 +134,15 @@
         Icon="experimental"
         Text="Experimental settings and developer options"
         UnderText="Beta features and other options that shouldn't be touched"
+      />
+      <UserControl Height="16" />
+      <widgets:SettingsPageButton
+        AutomationProperties.AutomationId="AgentSkillsSettingsEntry"
+        Click="AgentSkills"
+        CornerRadius="8"
+        Icon="Package"
+        Text="Agent Skills &amp; Plugins"
+        UnderText="Find, install and update skills and plugins for coding agents"
       />
     </StackPanel>
   </ScrollViewer>

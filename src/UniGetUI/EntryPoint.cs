@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.AppLifecycle;
+using UniGetUI.AgentSkills.Cli;
 using UniGetUI.Core.Data;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.Tools;
@@ -24,6 +25,12 @@ namespace UniGetUI
                 if (ShouldPrepareCliConsole(args))
                 {
                     WindowsConsoleHost.PrepareCliIO();
+                }
+
+                if (IsSkillsCommand(args))
+                {
+                    Environment.ExitCode = SkillsCli.RunAsync(args[1..]).GetAwaiter().GetResult();
+                    return;
                 }
 
                 if (SharedPreUiCommandDispatcher.TryHandle(args, SharedPreUiCommandDispatcher.WinUiExitCodes) is { } preUiExitCode)
@@ -77,8 +84,11 @@ namespace UniGetUI
 
         private static bool ShouldPrepareCliConsole(IReadOnlyList<string> args)
         {
-            return IpcCliSyntax.HasVerbCommand(args);
+            return IsSkillsCommand(args) || IpcCliSyntax.HasVerbCommand(args);
         }
+
+        private static bool IsSkillsCommand(IReadOnlyList<string> args) =>
+            args.Count > 0 && args[0].Equals("skills", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// UniGetUI app main entry point

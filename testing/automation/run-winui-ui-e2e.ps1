@@ -303,6 +303,23 @@ try {
         throw 'UniGetUI main window was not found.'
     }
 
+    Write-Host 'Verifying Agent Skills remains opt-in'
+    Invoke-Element (Find-ElementByAutomationId $window 'AgentSkillsSettingsEntry' -TimeoutSeconds 120)
+    $skillsSwitch = Find-ToggleByAutomationId $window 'AgentSkillsEnabled'
+    $skillsToggle = [System.Windows.Automation.TogglePattern]$skillsSwitch.GetCurrentPattern(
+        [System.Windows.Automation.TogglePattern]::Pattern
+    )
+    if ($skillsToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+        throw 'Agent Skills was enabled by default.'
+    }
+    $skillsToggle.Toggle()
+    [void](Find-ElementByAutomationId $window 'AgentSkillsMode')
+    $skillsToggle.Toggle()
+    if ($skillsToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+        throw 'Agent Skills could not be disabled.'
+    }
+    Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
+
     Invoke-Element (Find-ElementByAutomationId $window 'OperationsSettingsEntry' -TimeoutSeconds 120)
     [void](Find-ElementByAutomationId $window 'InstallerFileNameScheme')
     [void](Find-ElementByAutomationId $window 'ExpandEnvVarsWithPercentSyntax')
@@ -342,6 +359,13 @@ try {
     Select-LastComboBoxItem $backupCountSelector
     [void](Find-ElementByAutomationId $window 'MaxLocalBackupCountCustom')
 
+    Write-Host 'Opening Manager Health from Settings'
+    Invoke-Element (Find-ElementByAutomationId $window 'SettingsBackButton')
+    Invoke-Element (Find-ElementByAutomationId $window 'ManagersSettingsShortcut')
+    Invoke-Element (Find-ElementByAutomationId $window 'ManagerHealthEntry')
+    [void](Find-ElementByAutomationId $window 'ManagerHealthFilter')
+    [void](Find-ElementByAutomationId $window 'ManagerHealthCheckAgain')
+
     Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
     $appProcess = Start-Process `
         -FilePath $executable `
@@ -369,13 +393,6 @@ try {
     }
 
     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
-
-    Write-Host 'Opening Manager Health'
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    Invoke-Element (Find-ElementByAutomationId $root 'ManagersNavigationButton')
-    Invoke-Element (Find-ElementByAutomationId $root 'ManagerHealthEntry')
-    [void](Find-ElementByAutomationId $root 'ManagerHealthFilter')
-    [void](Find-ElementByAutomationId $root 'ManagerHealthCheckAgain')
 
     Write-Host 'Enabling the release date column on Discover'
     $redirect = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `

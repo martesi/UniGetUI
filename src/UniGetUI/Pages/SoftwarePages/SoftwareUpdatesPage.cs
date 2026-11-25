@@ -18,6 +18,7 @@ using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.PackageClasses;
 using UniGetUI.PackageEngine.PackageLoader;
 using UniGetUI.Pages.DialogPages;
+using UniGetUI.Pages.SettingsPages.GeneralPages;
 using Windows.Networking.Connectivity;
 using Windows.UI.Text;
 
@@ -61,7 +62,13 @@ namespace UniGetUI.Interface.SoftwarePages
                     Glyph = "\uE895",
                 }
             )
-        { }
+        {
+            UpgradablePackagesLoader.Instance.FinishedLoading += (_, _) => MainApp.Dispatcher.TryEnqueue(() =>
+            {
+                if (Settings.Get(Settings.K.EnableAgentSkills) && !MainApp.Instance.IsQuitting)
+                    _ = AgentSkillsPage.Updates.CheckAsync();
+            });
+        }
 
         public override BetterMenu GenerateContextMenu()
         {

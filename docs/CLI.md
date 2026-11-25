@@ -15,6 +15,17 @@ unigetui package install --manager dotnet-tool --id dotnetsay --version 2.1.4 --
 unigetui operation wait --id 123 --timeout 300
 ```
 
+## Agent Skills
+
+On Classic, open **Settings → Agent Skills & Plugins** and turn it on to use the WinUI library. Skills are separate from package managers. Public skills.sh discovery is off unless you explicitly enable it and submit a search.
+
+`UniGetUI.exe skills --help` runs the bundled skill CLI without starting the UI or connecting to the IPC daemon, even when the GUI extension is off:
+
+```powershell
+.\UniGetUI.exe skills list
+.\UniGetUI.exe skills add <source>
+```
+
 ## Global transport options
 
 These options select how the CLI connects to the local UniGetUI automation session.
