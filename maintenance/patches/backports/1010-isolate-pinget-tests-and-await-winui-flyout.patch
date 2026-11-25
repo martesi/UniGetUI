@@ -1,0 +1,119 @@
+From ef8817ba18929c993c270cb9520c5e3b6f816e7f Mon Sep 17 00:00:00 2001
+From: dot <dot@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 12:52:59 -0800
+Subject: [PATCH] Isolate Pinget test records and wait for WinUI flyout
+ dismissal
+
+Classic-Source-Commit: ef8817ba18929c993c270cb9520c5e3b6f816e7f
+---
+ .../WinGetManagerTests.cs                     | 12 +++----
+ testing/automation/run-winui-ui-e2e.ps1       | 34 +++++++++----------
+ 2 files changed, 22 insertions(+), 24 deletions(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+index 5636d91d..706ec1c3 100644
+--- a/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/WinGetManagerTests.cs
+@@ -2413,7 +2413,7 @@ public sealed class WinGetManagerTests : IDisposable
+         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+         var package = new PackageBuilder()
+             .WithManager(manager)
+-            .WithId("Contoso.Tool")
++            .WithId("Contoso.Tool.NoUpgrade")
+             .WithVersion("1.0.0")
+             .WithNewVersion("2.0.0")
+             .Build();
+@@ -2431,7 +2431,7 @@ public sealed class WinGetManagerTests : IDisposable
+         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+         var package = new PackageBuilder()
+             .WithManager(manager)
+-            .WithId("Contoso.Tool")
++            .WithId("Contoso.Tool.StillOffered")
+             .WithVersion("1.0.0")
+             .WithNewVersion("2.0.0")
+             .Build();
+@@ -2444,8 +2444,8 @@ public sealed class WinGetManagerTests : IDisposable
+                     new ListMatch
+                     {
+                         Name = "Contoso Tool",
+-                        Id = "Contoso.Tool",
+-                        LocalId = "Contoso.Tool",
++                        Id = "Contoso.Tool.StillOffered",
++                        LocalId = "Contoso.Tool.StillOffered",
+                         InstalledVersion = "1.0.0",
+                         AvailableVersion = "2.0.0",
+                     },
+@@ -2494,7 +2494,7 @@ public sealed class WinGetManagerTests : IDisposable
+         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+         var package = new PackageBuilder()
+             .WithManager(manager)
+-            .WithId("Contoso.Tool")
++            .WithId("Contoso.Tool.UnavailableSource")
+             .WithVersion("1.0.0")
+             .WithNewVersion("2.0.0")
+             .Build();
+@@ -2517,7 +2517,7 @@ public sealed class WinGetManagerTests : IDisposable
+         SetCliToolKind(manager, WinGetCliToolKind.BundledPinget);
+         var package = new PackageBuilder()
+             .WithManager(manager)
+-            .WithId("Contoso.Tool")
++            .WithId("Contoso.Tool.LookupError")
+             .WithVersion("1.0.0")
+             .WithNewVersion("2.0.0")
+             .Build();
+diff --git a/testing/automation/run-winui-ui-e2e.ps1 b/testing/automation/run-winui-ui-e2e.ps1
+index 022bd17d..13f673a6 100644
+--- a/testing/automation/run-winui-ui-e2e.ps1
++++ b/testing/automation/run-winui-ui-e2e.ps1
+@@ -90,13 +90,10 @@ function Open-ColumnToggle {
+     param(
+         [System.Windows.Automation.AutomationElement] $Root,
+         [System.Windows.Automation.ExpandCollapsePattern] $OrderMenu,
+-        [string] $Column,
+-        [string] $Phase
++        [string] $Column
+     )
+ 
+-    $menuState = $OrderMenu.Current.ExpandCollapseState
+-    Write-Host "Columns menu for '$Column' (${Phase}): order flyout is $menuState"
+-    if ($menuState -ne [System.Windows.Automation.ExpandCollapseState]::Expanded) {
++    if ($OrderMenu.Current.ExpandCollapseState -eq [System.Windows.Automation.ExpandCollapseState]::Collapsed) {
+         $OrderMenu.Expand()
+     }
+     $columnsMenu = Find-ElementByAutomationId $Root 'ColumnsMenu'
+@@ -131,21 +128,22 @@ function Set-ColumnVisibility {
+     $orderMenu = [System.Windows.Automation.ExpandCollapsePattern]$orderButton.GetCurrentPattern(
+         [System.Windows.Automation.ExpandCollapsePattern]::Pattern
+     )
+-    try {
+-        $toggle = Open-ColumnToggle $Root $orderMenu $Column 'initial'
+-        if ($toggle.Current.ToggleState -ne $expected) {
+-            $toggle.Toggle()
+-            $toggle = Open-ColumnToggle $Root $orderMenu $Column 'after toggle'
+-        }
+-        $actual = $toggle.Current.ToggleState
++    $toggle = Open-ColumnToggle $Root $orderMenu $Column
++    $current = $toggle.Current.ToggleState
++    Write-Host "Column '$Column' menu state is $current; setting $expected and checking the UI."
++    if ($current -ne $expected) {
++        $toggle.Toggle() # Invokes the item and dismisses the flyout.
+     }
+-    finally {
+-        if ($orderMenu.Current.ExpandCollapseState -eq [System.Windows.Automation.ExpandCollapseState]::Expanded) {
+-            $orderMenu.Collapse()
+-        }
++    else {
++        $orderMenu.Collapse()
+     }
+-    if ($actual -ne $expected) {
+-        throw "Columns menu item '$Column' was $actual, expected $expected."
++
++    $deadline = (Get-Date).AddSeconds(10)
++    while ($orderMenu.Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Collapsed) {
++        if ((Get-Date) -ge $deadline) {
++            throw "Order By flyout did not close after setting column '$Column' to $expected."
++        }
++        Start-Sleep -Milliseconds 100
+     }
+ }
+ 

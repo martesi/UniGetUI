@@ -1,0 +1,158 @@
+From 8997bfe07dd36a6121d50188da4678d04c955d5d Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 18:19:31 +0800
+Subject: [PATCH] Restore Classic release replay and WinUI build artifacts
+
+
+Classic-Source-Commit: 8997bfe07dd36a6121d50188da4678d04c955d5d
+---
+ .gitattributes                        |  3 +-
+ .github/workflows/classic-release.yml | 40 ++++++++++++++++++++++-----
+ .github/workflows/winui-ui-e2e.yml    | 18 ++++++++++++
+ 3 files changed, 53 insertions(+), 8 deletions(-)
+
+diff --git a/.gitattributes b/.gitattributes
+index 1b8a169a..d9692574 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -1,2 +1,3 @@
+ src/UniGetUI.PackageEngine.Managers.Chocolatey/choco-cli/** linguist-vendored
+-.githooks/* text eol=lf
+\ No newline at end of file
++.githooks/* text eol=lf
++maintenance/patches/** text eol=lf
+diff --git a/.github/workflows/classic-release.yml b/.github/workflows/classic-release.yml
+index f26edf4c..6c960c69 100644
+--- a/.github/workflows/classic-release.yml
++++ b/.github/workflows/classic-release.yml
+@@ -4,7 +4,7 @@ on:
+   workflow_dispatch:
+     inputs:
+       version:
+-        description: 'Numeric Classic version, e.g. 2026.2.1.1'
++        description: 'Numeric Classic version, e.g. 2026.2.7.1'
+         required: true
+         type: string
+       draft:
+@@ -29,7 +29,7 @@ jobs:
+           set -euo pipefail
+           version='${{ inputs.version }}'
+           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+-            echo 'Classic release versions must be numeric four-part versions such as 2026.2.1.1.' >&2
++            echo 'Classic release versions must be numeric four-part versions such as 2026.2.7.1.' >&2
+             exit 1
+           fi
+           echo "value=$version" >> "$GITHUB_OUTPUT"
+@@ -42,34 +42,59 @@ jobs:
+       matrix:
+         platform: [x64, arm64]
+     steps:
+-      - name: Checkout
++      - name: Checkout patch stack
+         uses: actions/checkout@v6
++        with:
++          fetch-depth: 0
++
++      - name: Replay and verify Classic source
++        id: replay
++        shell: pwsh
++        run: |
++          $worktree = Join-Path '${{ runner.temp }}' 'unigetui-classic-${{ matrix.platform }}'
++          ./scripts/apply-patch-stack.ps1 -WorktreePath $worktree | Out-Host
++
++          $metadata = Get-Content './maintenance/patch-stack.json' -Raw | ConvertFrom-Json
++          $expectedCommit = [string] $metadata.classic_source_commit
++          $expectedTree = (git rev-parse "$expectedCommit^{tree}").Trim()
++          if ($LASTEXITCODE -ne 0) { throw "Could not resolve expected Classic tree for $expectedCommit." }
++
++          $actualTree = (git -C $worktree rev-parse 'HEAD^{tree}').Trim()
++          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the replayed Classic tree.' }
++          if ($actualTree -ne $expectedTree) {
++            throw "Replayed Classic tree $actualTree does not match expected tree $expectedTree."
++          }
++
++          Write-Host "Release source verified at tree $actualTree"
++          "path=$worktree" >> $env:GITHUB_OUTPUT
+ 
+       - name: Install .NET
+         uses: actions/setup-dotnet@v5
+         with:
+-          global-json-file: global.json
++          global-json-file: ${{ steps.replay.outputs.path }}/global.json
+ 
+       - name: Install Inno Setup
+         shell: pwsh
+         run: choco install innosetup -y --no-progress
+ 
+       - name: Stamp Classic version
++        working-directory: ${{ steps.replay.outputs.path }}
+         shell: pwsh
+         run: ./scripts/set-version.ps1 -Version '${{ needs.validate.outputs.version }}'
+ 
+       - name: Restore
+-        working-directory: src
++        working-directory: ${{ steps.replay.outputs.path }}/src
+         shell: pwsh
+         run: dotnet restore UniGetUI.Windows.slnx /p:Platform=${{ matrix.platform }}
+ 
+       - name: Test package engine
+         if: matrix.platform == 'x64'
+-        working-directory: src
++        working-directory: ${{ steps.replay.outputs.path }}/src
+         shell: pwsh
+         run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64
+ 
+       - name: Publish WinUI Classic
++        working-directory: ${{ steps.replay.outputs.path }}
+         shell: pwsh
+         run: |
+           [xml]$props = Get-Content 'src/Directory.Build.props'
+@@ -106,6 +131,7 @@ jobs:
+           ./scripts/refresh-integrity-tree.ps1 -Path $PWD/unigetui_bin -FailOnUnexpectedFiles
+ 
+       - name: Build unsigned installer
++        working-directory: ${{ steps.replay.outputs.path }}
+         shell: pwsh
+         run: |
+           $platform = '${{ matrix.platform }}'
+@@ -128,7 +154,7 @@ jobs:
+         uses: actions/upload-artifact@v7
+         with:
+           name: classic-installer-${{ matrix.platform }}
+-          path: output/UniGetUI.Installer.${{ matrix.platform }}.exe
++          path: ${{ steps.replay.outputs.path }}/output/UniGetUI.Installer.${{ matrix.platform }}.exe
+           if-no-files-found: error
+ 
+   release:
+diff --git a/.github/workflows/winui-ui-e2e.yml b/.github/workflows/winui-ui-e2e.yml
+index ef33e7f6..f4127a8d 100644
+--- a/.github/workflows/winui-ui-e2e.yml
++++ b/.github/workflows/winui-ui-e2e.yml
+@@ -41,6 +41,24 @@ jobs:
+         working-directory: src
+         run: dotnet build UniGetUI/UniGetUI.csproj --no-restore --configuration Release /p:Platform=x64
+ 
++      - name: Verify WinUI executable
++        shell: pwsh
++        run: |
++          $exe = Get-ChildItem -Path src/UniGetUI/bin/x64/Release -Filter UniGetUI.exe -Recurse | Select-Object -First 1
++          if ($null -eq $exe) {
++              throw "The WinUI executable was not produced."
++          }
++          Write-Host "WinUI executable: $($exe.FullName)"
++
++      - name: Upload WinUI executable
++        if: success()
++        uses: actions/upload-artifact@v4
++        with:
++          name: unigetui-classic-winui-x64
++          path: src/UniGetUI/bin/x64/Release/
++          if-no-files-found: error
++          retention-days: 30
++
+       - name: Run WinUI UI E2E
+         shell: pwsh
+         run: ./testing/automation/run-winui-ui-e2e.ps1
+-- 
+2.52.0
+

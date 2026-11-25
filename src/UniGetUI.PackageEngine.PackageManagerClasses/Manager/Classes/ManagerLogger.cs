@@ -8,6 +8,7 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Classes
     public class ManagerLogger : IManagerLogger
     {
         private readonly IPackageManager Manager;
+        private readonly Action<LoggableTaskType, Process>? ProcessCreated;
 
         private readonly List<TaskLogger> operations = [];
         public IReadOnlyList<ITaskLogger> Operations
@@ -15,9 +16,13 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Classes
             get => (IReadOnlyList<ITaskLogger>)operations;
         }
 
-        public ManagerLogger(IPackageManager manager)
+        public ManagerLogger(
+            IPackageManager manager,
+            Action<LoggableTaskType, Process>? processCreated = null
+        )
         {
             Manager = manager;
+            ProcessCreated = processCreated;
         }
 
         public IProcessTaskLogger CreateNew(LoggableTaskType type, Process process)
@@ -36,6 +41,7 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Classes
                 process.StartInfo.Arguments
             );
             operations.Add(operation);
+            ProcessCreated?.Invoke(type, process);
             return operation;
         }
 

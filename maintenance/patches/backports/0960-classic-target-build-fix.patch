@@ -1,0 +1,56 @@
+From 13674ed4290f6a681cb347a3fa57494c1a625991 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 19:13:49 +0800
+Subject: [PATCH] Fix Classic package operation build targets
+
+Classic-Source-Commit: 13674ed4290f6a681cb347a3fa57494c1a625991
+
+---
+ src/UniGetUI.PackageEngine.Operations/PackageOperations.cs | 3 +++
+ src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs        | 2 +-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+index d93e7d19..b40d5d33 100644
+--- a/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
++++ b/src/UniGetUI.PackageEngine.Operations/PackageOperations.cs
+@@ -13,6 +13,7 @@ using UniGetUI.PackageEngine.PackageClasses;
+ using UniGetUI.PackageEngine.ManagerClasses.Manager;
+ using UniGetUI.PackageEngine.PackageLoader;
+ using UniGetUI.PackageEngine.Serializable;
++using UniGetUI.PackageEngine.Structs;
+ using UniGetUI.PackageOperations;
+ #if WINDOWS
+ using UniGetUI.PackageEngine.Managers.WingetManager;
+@@ -315,6 +316,7 @@ namespace UniGetUI.PackageEngine.Operations
+                     new Dictionary<string, object?> { { "package", Package.Name } }
+                 );
+             }
++#if WINDOWS
+             else if (
+                 result is OperationVeredict.Failure
+                 && Package.Manager is WinGet winget
+@@ -326,6 +328,7 @@ namespace UniGetUI.PackageEngine.Operations
+                     new Dictionary<string, object?> { { "package", Package.Name } }
+                 );
+             }
++#endif
+             return Task.FromResult(result);
+         }
+ 
+diff --git a/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
+index 81588901..1a01a4c4 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
+@@ -137,7 +137,7 @@ public sealed class PipManagerTests : IDisposable
+         Assert.Equal(sitePackages, Pip.ResolveInstallLocation(banner, "python.exe", "PyYAML", _ => false));
+     }
+ 
+-    private void AllowCustomManagerPaths(bool allowed) =>
++    private static void AllowCustomManagerPaths(bool allowed) =>
+         SecureSettings.ApplyForUser(
+             Environment.UserName,
+             SecureSettings.ResolveKey(SecureSettings.K.AllowCustomManagerPaths),
+-- 
+2.52.0
+

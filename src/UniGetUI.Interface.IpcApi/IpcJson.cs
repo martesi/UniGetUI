@@ -90,6 +90,8 @@ internal static class IpcJson
 [JsonSerializable(typeof(IpcManagerMaintenanceActionResult))]
 [JsonSerializable(typeof(IpcManagerCapabilitiesInfo))]
 [JsonSerializable(typeof(IpcManagerInfo))]
+[JsonSerializable(typeof(IpcManagerHealthInfo))]
+[JsonSerializable(typeof(IpcManagerListingHealthInfo))]
 [JsonSerializable(typeof(IpcSourceInfo))]
 [JsonSerializable(typeof(IpcSourceRequest))]
 [JsonSerializable(typeof(IpcSourceOperationResult))]

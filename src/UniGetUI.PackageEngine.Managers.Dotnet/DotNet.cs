@@ -18,6 +18,17 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
 {
     public class DotNet : BaseNuGet
     {
+        protected override IEnumerable<ManagerMaintenanceAction> GetExtraMaintenanceActions()
+        {
+            yield return new ManagerMaintenanceAction
+            {
+                Id = "clear-cache",
+                Title = CoreTools.Translate("Clear cache"),
+                Description = CoreTools.Translate("Delete the NuGet HTTP cache used to look up .NET tools."),
+                RunAsync = () => RunMaintenanceCommandAsync(Status.ExecutablePath, "nuget locals http-cache --clear"),
+            };
+        }
+
         public static string[] FALSE_PACKAGE_IDS = [""];
         public static string[] FALSE_PACKAGE_VERSIONS = [""];
 
@@ -25,6 +36,7 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
         {
             Capabilities = new ManagerCapabilities
             {
+                CanReinstallOnUpdate = true,
                 CanRunAsAdmin = true,
                 CanDownloadInstaller = true,
                 SupportsCustomScopes = true,
@@ -50,6 +62,8 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
             {
                 Id = "dotnet-tool",
                 Name = ".NET Tool",
+                SetupGuide = "PACKAGE_MANAGERS.md#net-tool",
+                InstallCommands = new(Windows: "winget install --exact --id Microsoft.DotNet.SDK.10"),
                 Description = CoreTools.Translate(
                     "A repository full of tools and executables designed with Microsoft's .NET ecosystem in mind.<br>Contains: <b>.NET related tools and scripts</b>"
                 ),

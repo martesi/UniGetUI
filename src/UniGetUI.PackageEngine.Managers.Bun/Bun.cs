@@ -18,10 +18,24 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
 {
     public class Bun : PackageManager
     {
+        protected override IEnumerable<ManagerMaintenanceAction> GetExtraMaintenanceActions()
+        {
+            yield return new ManagerMaintenanceAction
+            {
+                Id = "clear-cache",
+                Title = CoreTools.Translate("Clear cache"),
+                Description = CoreTools.Translate("Delete the packages Bun keeps in its global cache."),
+                RunAsync = () => RunMaintenanceCommandAsync(Status.ExecutablePath, WithCallArguments("pm cache rm")),
+            };
+        }
+
         public Bun()
         {
             Capabilities = new ManagerCapabilities
             {
+                CanReinstallOnUpdate = true,
+                ReinstallsOnUpdateOnlyGlobalPackages = true,
+                SupportsCustomVersionsOnUpdate = false,
                 CanRunAsAdmin = true,
                 SupportsCustomVersions = true,
                 CanDownloadInstaller = true,
@@ -37,6 +51,8 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
             {
                 Id = "bun",
                 Name = "Bun",
+                SetupGuide = "PACKAGE_MANAGERS.md#bun",
+                InstallCommands = new(Windows: "winget install --exact --id Oven-sh.Bun"),
                 Description = CoreTools.Translate("Fast JavaScript runtime, bundler, and package manager"),
                 IconId = IconType.Bun,
                 ColorIconId = "bun_color",
@@ -75,7 +91,7 @@ namespace UniGetUI.PackageEngine.Managers.BunManager
             {
                 logger.Error(e);
                 logger.Close(1);
-                return [];
+                throw;
             }
         }
 

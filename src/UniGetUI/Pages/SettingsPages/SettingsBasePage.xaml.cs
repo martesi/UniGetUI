@@ -106,6 +106,7 @@ namespace UniGetUI.Pages.SettingsPages
             if (e == typeof(ManagersHomepage))
             {
                 MainApp.Instance.MainWindow.NavigationPage.NavigateTo(Interface.PageType.Managers);
+                return;
             }
             if (e.IsSubclassOf(typeof(PackageManager)))
             {

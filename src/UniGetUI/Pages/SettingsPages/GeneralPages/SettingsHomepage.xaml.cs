@@ -56,6 +56,9 @@ namespace UniGetUI.Pages.SettingsPages
         private void Internet(object sender, RoutedEventArgs e) =>
             NavigationRequested?.Invoke(this, typeof(Internet));
 
+        private void AgentSkills(object sender, RoutedEventArgs e) =>
+            NavigationRequested?.Invoke(this, typeof(AgentSkillsPage));
+
         private void ManagersShortcut(object sender, RoutedEventArgs e) =>
             NavigationRequested?.Invoke(this, typeof(ManagersHomepage));
     }

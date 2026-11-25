@@ -10,6 +10,7 @@ using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
 using UniGetUI.PackageEngine.Enums;
+using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.ManagerClasses.Classes;
 using UniGetUI.PackageEngine.ManagerClasses.Manager;
 using UniGetUI.PackageEngine.PackageClasses;
@@ -23,6 +24,50 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
         // Add/Remove-programs identifiers legitimately contain spaces, for example
         // "ARP\Machine\X86\Microsoft Copilot"; GetIdNamePiece quotes them.
         public override bool IdentifiersAreQuotedOnCommandLine => true;
+
+        public override bool ExpectsInstalledPackages => true;
+
+        protected override IEnumerable<ManagerMaintenanceAction> GetExtraMaintenanceActions()
+        {
+            if (!OperatingSystem.IsWindows())
+                yield break;
+
+            yield return new ManagerMaintenanceAction
+            {
+                Id = "repair-winget",
+                AvailableWhenNotReady = true,
+                Title = CoreTools.Translate("Reset WinGet"),
+                Description = CoreTools.Translate(
+                    "Clear WinGet's cache, reset its sources, repair it and reset App Installer. Requires administrator rights."
+                ),
+                RequiresElevation = true,
+                RunAsync = () =>
+                    WinGetRepair.RunAsync(() =>
+                        RunMaintenanceProcessAsync(CoreData.PowerShell5, WinGetRepair.Arguments, elevated: true)
+                    ),
+            };
+            yield return new ManagerMaintenanceAction
+            {
+                Id = "reset-sources",
+                AvailableWhenNotReady = true,
+                Title = CoreTools.Translate("Reset sources"),
+                Description = CoreTools.Translate(
+                    "Restore WinGet's default sources and drop any source added since. Requires administrator rights."
+                ),
+                RequiresElevation = true,
+                RunAsync = () =>
+                    RunMaintenanceCommandAsync(
+                        Path.Join(
+                            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                            "Microsoft",
+                            "WindowsApps",
+                            SystemWinGetExecutableName
+                        ),
+                        "source reset --force",
+                        elevated: true
+                    ),
+            };
+        }
 
         internal const string CliToolPreferenceEnvironmentVariable = "UNIGETUI_WINGET_CLI";
         internal const string ComApiPolicyEnvironmentVariable = "UNIGETUI_WINGET_COM";
@@ -109,6 +154,9 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
         {
             Capabilities = new ManagerCapabilities
             {
+                // Re-enable after validating the reinstall target before uninstalling (#5778).
+                CanReinstallOnUpdate = false,
+                SupportsCustomVersionsOnUpdate = false,
                 CanRunAsAdmin = true,
                 CanSkipIntegrityChecks = true,
                 CanRunInteractively = true,
@@ -143,6 +191,7 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
             {
                 Id = "winget",
                 Name = "Winget",
+                SetupGuide = "PACKAGE_MANAGERS.md#winget",
                 DisplayName = "WinGet",
                 Description = CoreTools.Translate(
                     "Microsoft's official package manager. Full of well-known and verified packages<br>Contains: <b>General Software, Microsoft Store apps</b>"
@@ -242,6 +291,10 @@ namespace UniGetUI.PackageEngine.Managers.WingetManager
         {
             return PingetPackageDetailsProvider.TryGetInstallerHostsForVersion(package, version);
         }
+
+        public bool ReportedUnconfirmedUpgradeLookup(
+            UniGetUI.PackageEngine.Interfaces.IPackage package
+        ) => WinGetPkgOperationHelper.ReportedUnconfirmedUpgradeLookup(package);
 
         protected override IReadOnlyList<Package> FindPackages_UnSafe(string query)
         {

@@ -1,0 +1,741 @@
+From 97463445b21fe77c93ddfb3131e35e56966854e9 Mon Sep 17 00:00:00 2001
+From: martesi <96113508+martesi@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 19:13:18 +0800
+Subject: [PATCH] Protect app-owned Python environments in Classic (#5678)
+
+Upstream-Commit: 31f7fc8abc54a1ebedf3a6ef28a50c52239ec0dd
+Upstream-PR: https://github.com/Devolutions/UniGetUI/pull/5678
+---
+ src/Languages/lang_en.json                    |  10 +
+ .../SettingsEngine_Names.cs                   |   2 +
+ .../Helpers/PipPkgDetailsHelper.cs            |  11 +-
+ .../Pip.cs                                    | 304 +++++++++++++++---
+ .../PythonEnvironmentKind.cs                  |  11 +
+ .../Manager/PackageManager.cs                 |  25 +-
+ .../PipManagerTests.cs                        | 110 +++++++
+ .../ManagersPages/PackageManager.xaml.cs      |  64 ++++
+ 8 files changed, 482 insertions(+), 55 deletions(-)
+ create mode 100644 src/UniGetUI.PackageEngine.Managers.Pip/PythonEnvironmentKind.cs
+
+diff --git a/src/Languages/lang_en.json b/src/Languages/lang_en.json
+index a875e4b5..43797f11 100644
+--- a/src/Languages/lang_en.json
++++ b/src/Languages/lang_en.json
+@@ -722,6 +722,16 @@
+   "Adding source {source} to {manager}": "Adding source {source} to {manager}",
+   "Source added successfully": "Source added successfully",
+   "The source {source} was added to {manager} successfully": "The source {source} was added to {manager} successfully",
++  "UniGetUI only manages the Python environments checked below. Virtual environments, conda environments and embedded Pythons usually belong to other apps, so they are not managed unless you check them.": "UniGetUI only manages the Python environments checked below. Virtual environments, conda environments and embedded Pythons usually belong to other apps, so they are not managed unless you check them.",
++  "Python environments": "Python environments",
++  "No Python interpreters were found": "No Python interpreters were found",
++  "Virtual environment": "Virtual environment",
++  "Conda environment": "Conda environment",
++  "Embedded Python": "Embedded Python",
++  "Microsoft Store alias": "Microsoft Store alias",
++  "System Python": "System Python",
++  "In use": "In use",
++  "Unrecognized Python": "Unrecognized Python",
+   "Could not add source": "Could not add source",
+   "Could not add source {source} to {manager}": "Could not add source {source} to {manager}",
+   "Removing source {source}": "Removing source {source}",
+diff --git a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+index 04d6d18e..4777d1aa 100644
+--- a/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
++++ b/src/UniGetUI.Core.Settings/SettingsEngine_Names.cs
+@@ -110,6 +110,7 @@ public static partial class Settings
+         DisableInstallerHostChangeWarning,
+         BunPreferLatestVersions,
+         DisablePipHttpUpdateCheck,
++        PipEnvironmentOverrides,
+         RedactUsernameInLog,
+         DisableReleaseNotesOnUpdate,
+         LastKnownBuildNumber,
+@@ -235,6 +236,7 @@ public static partial class Settings
+             K.DisableInstallerHostChangeWarning => "DisableInstallerHostChangeWarning",
+             K.BunPreferLatestVersions => "BunPreferLatestVersions",
+             K.DisablePipHttpUpdateCheck => "DisablePipHttpUpdateCheck",
++            K.PipEnvironmentOverrides => "PipEnvironmentOverrides",
+             K.RedactUsernameInLog => "RedactUsernameInLog",
+             K.DisableReleaseNotesOnUpdate => "DisableReleaseNotesOnUpdate",
+             K.LastKnownBuildNumber => "LastKnownBuildNumber",
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgDetailsHelper.cs b/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgDetailsHelper.cs
+index 961d69ca..8ad15ee5 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgDetailsHelper.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/Helpers/PipPkgDetailsHelper.cs
+@@ -133,13 +133,12 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+ 
+         protected override string? GetInstallLocation_UnSafe(IPackage package)
+         {
+-            var full_path = Path.Join(
+-                Path.GetDirectoryName(Manager.Status.ExecutablePath),
+-                "Lib",
+-                "site-packages",
+-                package.Id
++            return Pip.ResolveInstallLocation(
++                Manager.Status.Version,
++                Manager.Status.ExecutablePath,
++                package.Id,
++                Directory.Exists
+             );
+-            return Directory.Exists(full_path) ? full_path : Path.GetDirectoryName(full_path);
+         }
+ 
+         protected override IReadOnlyList<string> GetInstallableVersions_UnSafe(IPackage package)
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+index c116f3b8..ecdd4be3 100644
+--- a/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/Pip.cs
+@@ -1,5 +1,6 @@
+ using System.Collections.Concurrent;
+ using System.Diagnostics;
++using System.Globalization;
+ using System.Net;
+ using System.Text;
+ using System.Text.Json;
+@@ -8,6 +9,7 @@ using System.Text.RegularExpressions;
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.Logging;
+ using UniGetUI.Core.SettingsEngine;
++using UniGetUI.Core.SettingsEngine.SecureSettings;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.Interface.Enums;
+ using UniGetUI.PackageEngine.Classes.Manager;
+@@ -459,6 +461,42 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+             return match.Success ? match.Groups["version"].Value : null;
+         }
+ 
++        [GeneratedRegex(
++            @"^pip \S+ from (?<path>.+?)[\\/]pip[\\/]? \(python ",
++            RegexOptions.CultureInvariant
++        )]
++        private static partial Regex SitePackagesPattern();
++
++        internal static string? ParseSitePackagesDirectory(string? pipVersionOutput)
++        {
++            if (pipVersionOutput is null)
++                return null;
++
++            Match match = SitePackagesPattern().Match(pipVersionOutput.Trim());
++            return match.Success ? match.Groups["path"].Value : null;
++        }
++
++        internal static string ResolveInstallLocation(
++            string? pipVersionOutput,
++            string executablePath,
++            string packageId,
++            Func<string, bool> directoryExists
++        )
++        {
++            string sitePackages =
++                ParseSitePackagesDirectory(pipVersionOutput)
++                ?? Path.Join(Path.GetDirectoryName(executablePath), "Lib", "site-packages");
++
++            foreach (string name in new[] { packageId, packageId.Replace('-', '_') })
++            {
++                string candidate = Path.Join(sitePackages, name);
++                if (directoryExists(candidate))
++                    return candidate;
++            }
++
++            return sitePackages;
++        }
++
+         private static readonly SemaphoreSlim _updateFetchSemaphore = new(6, 6);
+         private static readonly TimeSpan UpdateResolutionBudget = TimeSpan.FromSeconds(45);
+ 
+@@ -918,67 +956,247 @@ namespace UniGetUI.PackageEngine.Managers.PipManager
+ 
+         public override IReadOnlyList<string> FindCandidateExecutableFiles()
+         {
+-            var FoundPaths = CoreTools.WhichMultiple("python");
+-            if (!OperatingSystem.IsWindows() && !FoundPaths.Any())
+-                FoundPaths = CoreTools.WhichMultiple("python3");
+-            List<string> Paths = [];
++            return GetPythonCandidates().Select(candidate => candidate.Path).ToList();
++        }
+ 
+-            if (FoundPaths.Any())
+-                foreach (var Path in FoundPaths)
+-                    Paths.Add(Path);
++        public sealed record PythonCandidate(string Path, PythonEnvironmentKind Kind, bool Managed);
+ 
+-            try
++        private IReadOnlyList<PythonCandidate> _lastCandidates = [];
++
++        public IReadOnlyList<PythonCandidate> GetPythonCandidates()
++        {
++            IEnumerable<string> onPath = OperatingSystem.IsWindows()
++                ? CoreTools.WhichMultiple("python")
++                : CoreTools.WhichMultiple("python3").Concat(CoreTools.WhichMultiple("python"));
++            IReadOnlyList<string> installed = OperatingSystem.IsWindows()
++                ? FindInstalledPythons(GetPythonInstallRoots())
++                : [];
++            string? selected = GetUserSelectedExecutablePath();
++            if (!string.IsNullOrWhiteSpace(selected))
+             {
+-                List<string> DirsToSearch = [];
+-                string ProgramFiles = @"C:\Program Files";
+-                string? UserPythonInstallDir = null;
+-                string? AppData = Environment.GetEnvironmentVariable("APPDATA");
++                onPath = onPath.Append(selected);
++                if (CanUseSelectedExecutable(selected))
++                {
++                    _lastCandidates = RankCandidates(onPath, installed)
++                        .Select(candidate =>
++                            IsSameEnvironment(candidate.Path, selected)
++                                ? candidate with { Managed = true }
++                                : candidate
++                        )
++                        .ToList();
++                    return _lastCandidates;
++                }
++            }
++            _lastCandidates = RankCandidates(onPath, installed);
++            return _lastCandidates;
++        }
+ 
+-                if (AppData != null)
+-                    UserPythonInstallDir = Path.Combine(AppData, "Programs", "Python");
++        private static string[] GetPythonInstallRoots()
++        {
++            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
++            return
++            [
++                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
++                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
++                localAppData.Length > 0 ? Path.Join(localAppData, "Programs", "Python") : "",
++                localAppData.Length > 0 ? Path.Join(localAppData, "Python") : "",
++            ];
++        }
+ 
+-                if (Directory.Exists(ProgramFiles))
+-                    DirsToSearch.Add(ProgramFiles);
+-                if (Directory.Exists(UserPythonInstallDir))
+-                    DirsToSearch.Add(UserPythonInstallDir);
++        [GeneratedRegex(
++            @"^(?:Python|pythoncore-)(?<major>[0-9])\.?(?<minor>[0-9]{1,3})(?:[^0-9]|$)",
++            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase
++        )]
++        private static partial Regex PythonInstallDirectoryPattern();
+ 
+-                foreach (var Dir in DirsToSearch)
++        internal static IReadOnlyList<string> FindInstalledPythons(IEnumerable<string> roots)
++        {
++            List<(Version Version, string Path)> found = [];
++            foreach (string root in roots.Distinct(StringComparer.OrdinalIgnoreCase))
++            {
++                if (!Path.IsPathRooted(root) || !Directory.Exists(root))
++                    continue;
++                try
+                 {
+-                    string DirName = Path.GetFileName(Dir);
+-                    string PythonPath = Path.Join(Dir, "python.exe");
+-                    if (DirName.StartsWith("Python") && File.Exists(PythonPath))
+-                        Paths.Add(PythonPath);
++                    foreach (string directory in Directory.EnumerateDirectories(root))
++                    {
++                        Match match = PythonInstallDirectoryPattern().Match(Path.GetFileName(directory));
++                        string executable = Path.Join(directory, "python.exe");
++                        if (!match.Success || !File.Exists(executable))
++                            continue;
++                        found.Add((
++                            new Version(
++                                int.Parse(match.Groups["major"].Value, CultureInfo.InvariantCulture),
++                                int.Parse(match.Groups["minor"].Value, CultureInfo.InvariantCulture)
++                            ),
++                            executable
++                        ));
++                    }
++                }
++                catch (Exception ex)
++                {
++                    Logger.Debug($"Pip: {root} could not be searched for Python installs ({ex.Message})");
+                 }
+             }
+-            catch (Exception) { }
++            return found.OrderByDescending(item => item.Version).Select(item => item.Path).ToList();
++        }
++
++        internal static IReadOnlyList<PythonCandidate> RankCandidates(
++            IEnumerable<string> onPath,
++            IEnumerable<string> installed
++        ) =>
++            onPath
++                .Concat(installed)
++                .DistinctBy(GetCandidateIdentity, StringComparer.Ordinal)
++                .Select(path =>
++                {
++                    PythonEnvironmentKind kind = ClassifyEnvironment(path);
++                    return new PythonCandidate(path, kind, IsEnvironmentManaged(path, kind));
++                })
++                .OrderBy(candidate =>
++                    !candidate.Managed ? 2
++                    : candidate.Kind is PythonEnvironmentKind.StoreAlias && IsStoreInstallerStub(candidate.Path) ? 1
++                    : 0
++                )
++                .ToList();
+ 
+-            return Paths;
++        private static string GetCandidateIdentity(string path) =>
++            GetEnvironmentKey(path) ?? (OperatingSystem.IsWindows() ? path.ToLowerInvariant() : path);
++
++        public static bool IsAppExecutionAlias(string path) =>
++            OperatingSystem.IsWindows()
++            && string.Equals(
++                Path.GetFileName(Path.GetDirectoryName(path)),
++                "WindowsApps",
++                StringComparison.OrdinalIgnoreCase
++            );
++
++        internal static bool IsStoreInstallerStub(string aliasPath)
++        {
++            try
++            {
++                string? directory = Path.GetDirectoryName(Path.GetFullPath(aliasPath));
++                return directory is not null
++                    && !Directory.EnumerateDirectories(directory, "PythonSoftwareFoundation.*").Any();
++            }
++            catch (Exception)
++            {
++                return false;
++            }
+         }
+ 
++        public static PythonEnvironmentKind ClassifyEnvironment(string executablePath)
++        {
++            string? directory;
++            try
++            {
++                directory = Path.GetDirectoryName(Path.GetFullPath(executablePath));
++            }
++            catch (Exception)
++            {
++                return PythonEnvironmentKind.Unknown;
++            }
++            if (directory is null)
++                return PythonEnvironmentKind.Unknown;
++
++            string? parent = Path.GetDirectoryName(directory);
++            if (File.Exists(Path.Join(directory, "pyvenv.cfg"))
++                || (parent is not null && File.Exists(Path.Join(parent, "pyvenv.cfg"))))
++                return PythonEnvironmentKind.VirtualEnvironment;
++            if (IsCondaNamedEnvironment(directory)
++                || (parent is not null && IsCondaNamedEnvironment(parent)))
++                return PythonEnvironmentKind.CondaEnvironment;
++            if (IsAppExecutionAlias(executablePath))
++                return PythonEnvironmentKind.StoreAlias;
++            try
++            {
++                if (Directory.EnumerateFiles(directory, "python*._pth").Any())
++                    return PythonEnvironmentKind.Embedded;
++            }
++            catch (Exception)
++            {
++                return PythonEnvironmentKind.Unknown;
++            }
++            return PythonEnvironmentKind.System;
++        }
++
++        private static bool IsCondaNamedEnvironment(string directory) =>
++            Directory.Exists(Path.Join(directory, "conda-meta"))
++            && string.Equals(Path.GetFileName(Path.GetDirectoryName(directory)), "envs", StringComparison.OrdinalIgnoreCase);
++
++        private static string? GetEnvironmentKey(string executablePath)
++        {
++            try
++            {
++                string directory = Path.GetDirectoryName(Path.GetFullPath(executablePath)) ?? executablePath;
++                return OperatingSystem.IsWindows() ? directory.ToLowerInvariant() : directory;
++            }
++            catch (Exception)
++            {
++                return null;
++            }
++        }
++
++        public static bool IsSameEnvironment(string executableA, string executableB) =>
++            GetEnvironmentKey(executableA) is { } keyA && GetEnvironmentKey(executableB) is { } keyB && keyA == keyB;
++
++        public static bool IsManagedByDefault(PythonEnvironmentKind kind) =>
++            kind is PythonEnvironmentKind.System or PythonEnvironmentKind.StoreAlias;
++
++        public static bool CanOptInEnvironments() =>
++            SecureSettings.Get(SecureSettings.K.AllowCustomManagerPaths);
++
++        public static bool? GetEnvironmentChoice(string executablePath)
++        {
++            if (GetEnvironmentKey(executablePath) is not { } key)
++                return null;
++            return Settings.GetDictionaryItem<string, string>(Settings.K.PipEnvironmentOverrides, key) switch
++            {
++                "managed" when CanOptInEnvironments() => true,
++                "ignored" => false,
++                _ => null,
++            };
++        }
++
++        public static bool IsEnvironmentManaged(string executablePath) =>
++            IsEnvironmentManaged(executablePath, ClassifyEnvironment(executablePath));
++
++        public static bool IsEnvironmentManaged(string executablePath, PythonEnvironmentKind kind) =>
++            GetEnvironmentChoice(executablePath) ?? IsManagedByDefault(kind);
++
++        public static void SetEnvironmentManaged(string executablePath, bool managed)
++        {
++            if (GetEnvironmentKey(executablePath) is not { } key)
++                return;
++            if (!managed)
++                Settings.SetDictionaryItem(Settings.K.PipEnvironmentOverrides, key, "ignored");
++            else if (IsManagedByDefault(ClassifyEnvironment(executablePath)))
++                Settings.RemoveDictionaryKey<string, string>(Settings.K.PipEnvironmentOverrides, key);
++            else if (CanOptInEnvironments())
++                Settings.SetDictionaryItem(Settings.K.PipEnvironmentOverrides, key, "managed");
++        }
++
++        protected override bool CanSelectAutomatically(string candidate) =>
++            _lastCandidates.FirstOrDefault(item => item.Path == candidate)?.Managed
++                ?? IsEnvironmentManaged(candidate);
++
++        protected override bool CanUseSelectedExecutable(string path) =>
++            GetEnvironmentChoice(path) is not false;
++
++        public bool IsChosenExecutable(string path) =>
++            GetUserSelectedExecutablePath() is { } selected
++            && IsSameEnvironment(selected, path)
++            && CanUseSelectedExecutable(selected);
++
+         protected override void _loadManagerExecutableFile(
+             out bool found,
+             out string path,
+             out string callArguments
+         )
+         {
+-            // On non-Windows, prefer pip3/pip as standalone executables (avoids "No module named pip"
+-            // errors on systems where pip is installed as a command but not as a Python module).
+-            // Fall back to python/python3 + "-m pip" if no standalone pip is found.
+-            if (!OperatingSystem.IsWindows())
+-            {
+-                var pipPaths = CoreTools.WhichMultiple("pip3").Concat(CoreTools.WhichMultiple("pip")).ToList();
+-                if (pipPaths.Count > 0)
+-                {
+-                    found = true;
+-                    path = pipPaths[0];
+-                    callArguments = "";
+-                    return;
+-                }
+-            }
+-
+-            var (_found, _path) = GetExecutableFile();
+-            found = _found;
+-            path = _path;
++            var (pythonFound, python) = GetExecutableFile();
++            found = pythonFound;
++            path = pythonFound ? python : "";
+             callArguments = "-m pip ";
+         }
+ 
+diff --git a/src/UniGetUI.PackageEngine.Managers.Pip/PythonEnvironmentKind.cs b/src/UniGetUI.PackageEngine.Managers.Pip/PythonEnvironmentKind.cs
+new file mode 100644
+index 00000000..94b9e686
+--- /dev/null
++++ b/src/UniGetUI.PackageEngine.Managers.Pip/PythonEnvironmentKind.cs
+@@ -0,0 +1,11 @@
++namespace UniGetUI.PackageEngine.Managers.PipManager;
++
++public enum PythonEnvironmentKind
++{
++    System,
++    StoreAlias,
++    VirtualEnvironment,
++    CondaEnvironment,
++    Embedded,
++    Unknown,
++}
+diff --git a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+index a58a77ac..12c1a401 100644
+--- a/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
++++ b/src/UniGetUI.PackageEngine.PackageManagerClasses/Manager/PackageManager.cs
+@@ -236,9 +236,13 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+         /// <returns>A tuple containing: a boolean that represents whether the path was found or not; the path to the file if found.</returns>
+         public abstract IReadOnlyList<string> FindCandidateExecutableFiles();
+ 
++        protected virtual bool CanSelectAutomatically(string candidate) => true;
++
++        protected virtual bool CanUseSelectedExecutable(string path) => true;
++
+         public Tuple<bool, string> GetExecutableFile()
+         {
+-            var candidates = FindCandidateExecutableFiles();
++            var candidates = FindCandidateExecutableFiles().Where(CanSelectAutomatically).ToList();
+ 
+             // If custom package manager paths are DISABLED, get the first one (as old UniGetUI did) and return it.
+             if (!SecureSettings.Get(SecureSettings.K.AllowCustomManagerPaths))
+@@ -274,6 +278,12 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+                         $"The selected executable path {exeSelection} for manager {Name} does not exist, the default one will be used if available..."
+                     );
+                 }
++                else if (!CanUseSelectedExecutable(exeSelection))
++                {
++                    Logger.Warn(
++                        $"The selected executable path {exeSelection} for manager {Name} has been excluded, the default one will be used if available..."
++                    );
++                }
+ 
+                 else
+                 {
+@@ -290,11 +300,14 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+             }
+         }
+ 
+-        protected bool IsUserSelectedExecutablePath(string path)
++        protected bool IsUserSelectedExecutablePath(string path) =>
++            GetUserSelectedExecutablePath()?.Equals(path, StringComparison.OrdinalIgnoreCase) == true;
++
++        protected string? GetUserSelectedExecutablePath()
+         {
+             if (!SecureSettings.Get(SecureSettings.K.AllowCustomManagerPaths))
+             {
+-                return false;
++                return null;
+             }
+ 
+             string? exeSelection = Settings.GetDictionaryItem<string, string>(
+@@ -302,9 +315,9 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
+                 Name
+             );
+ 
+-            return !string.IsNullOrEmpty(exeSelection)
+-                && File.Exists(exeSelection)
+-                && exeSelection.Equals(path, StringComparison.OrdinalIgnoreCase);
++            return !string.IsNullOrEmpty(exeSelection) && File.Exists(exeSelection)
++                ? exeSelection
++                : null;
+         }
+ 
+         /// <summary>
+diff --git a/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs b/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
+index 18d50958..81588901 100644
+--- a/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
++++ b/src/UniGetUI.PackageEngine.Tests/PipManagerTests.cs
+@@ -1,5 +1,6 @@
+ using UniGetUI.Core.Data;
+ using UniGetUI.Core.SettingsEngine;
++using UniGetUI.Core.SettingsEngine.SecureSettings;
+ using UniGetUI.Core.Tools;
+ using UniGetUI.PackageEngine.Enums;
+ using UniGetUI.PackageEngine.Managers.PipManager;
+@@ -31,6 +32,10 @@ public sealed class PipManagerTests : IDisposable
+         Directory.CreateDirectory(_testRoot);
+         CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
+         Directory.CreateDirectory(CoreData.UniGetUIUserConfigurationDirectory);
++        string secureSettingsRoot = Path.Combine(_testRoot, "SecureSettings");
++        SecureSettings.TEST_SecureSettingsRootOverride = secureSettingsRoot;
++        Directory.CreateDirectory(secureSettingsRoot);
++        AllowCustomManagerPaths(false);
+         Settings.ResetSettings();
+         Settings.Set(Settings.K.EnableProxy, false);
+         Settings.Set(Settings.K.EnableProxyAuth, false);
+@@ -39,6 +44,8 @@ public sealed class PipManagerTests : IDisposable
+ 
+     public void Dispose()
+     {
++        AllowCustomManagerPaths(false);
++        SecureSettings.TEST_SecureSettingsRootOverride = null;
+         Settings.ResetSettings();
+         CoreData.TEST_DataDirectoryOverride = null;
+         if (Directory.Exists(_testRoot))
+@@ -47,6 +54,109 @@ public sealed class PipManagerTests : IDisposable
+         }
+     }
+ 
++    [Fact]
++    public void PipClassifiesAppOwnedPythonEnvironmentsAndSkipsThemAutomatically()
++    {
++        string venvPython = CreateFile("app", "venv", "Scripts", "python.exe");
++        CreateFile("app", "venv", "pyvenv.cfg");
++        string systemPython = CreateFile("Python314", "python.exe");
++
++        Assert.Equal(PythonEnvironmentKind.VirtualEnvironment, Pip.ClassifyEnvironment(venvPython));
++        Assert.Equal(PythonEnvironmentKind.System, Pip.ClassifyEnvironment(systemPython));
++        Assert.False(Pip.IsEnvironmentManaged(venvPython));
++        Assert.True(Pip.IsEnvironmentManaged(systemPython));
++        Assert.Equal(new(true, systemPython), new ScriptedPip([venvPython, systemPython]).GetExecutableFile());
++    }
++
++    [Fact]
++    public void SelectedPythonEnvironmentAppearsInTheManagementList()
++    {
++        string selected = CreateFile("other-app", "venv", "Scripts", "python.exe");
++        CreateFile("other-app", "venv", "pyvenv.cfg");
++        var pip = new Pip();
++        AllowCustomManagerPaths(true);
++        Settings.SetDictionaryItem(Settings.K.ManagerPaths, pip.Name, selected);
++
++        Assert.Contains(pip.GetPythonCandidates(), candidate =>
++            Pip.IsSameEnvironment(candidate.Path, selected)
++        );
++    }
++
++    [Fact]
++    public void SelectedAppOwnedPythonShowsAsManagedAndCanBeExcludedAgain()
++    {
++        string selected = CreateFile("other-app", "venv", "Scripts", "python.exe");
++        CreateFile("other-app", "venv", "pyvenv.cfg");
++        var pip = new Pip();
++        AllowCustomManagerPaths(true);
++        Settings.SetDictionaryItem(Settings.K.ManagerPaths, pip.Name, selected);
++
++        Pip.PythonCandidate active = Assert.Single(
++            pip.GetPythonCandidates(),
++            candidate => Pip.IsSameEnvironment(candidate.Path, selected)
++        );
++        Assert.True(active.Managed);
++        Assert.True(pip.IsChosenExecutable(selected));
++
++        Pip.SetEnvironmentManaged(selected, false);
++
++        Pip.PythonCandidate ignored = Assert.Single(
++            pip.GetPythonCandidates(),
++            candidate => Pip.IsSameEnvironment(candidate.Path, selected)
++        );
++        Assert.False(ignored.Managed);
++        Assert.False(pip.IsChosenExecutable(selected));
++        Assert.NotEqual(selected, pip.GetExecutableFile().Item2);
++    }
++
++    [Fact]
++    public void OptingIntoAnAppOwnedEnvironmentRequiresCustomPathsToBeAllowed()
++    {
++        string venvPython = CreateFile("other-app", "venv", "Scripts", "python.exe");
++        CreateFile("other-app", "venv", "pyvenv.cfg");
++
++        Pip.SetEnvironmentManaged(venvPython, true);
++        Assert.False(Pip.IsEnvironmentManaged(venvPython));
++
++        AllowCustomManagerPaths(true);
++        Pip.SetEnvironmentManaged(venvPython, true);
++        Assert.True(Pip.IsEnvironmentManaged(venvPython));
++
++        AllowCustomManagerPaths(false);
++        Assert.False(Pip.IsEnvironmentManaged(venvPython));
++    }
++
++    [Fact]
++    public void InstallLocationUsesTheSitePackagesReportedByPip()
++    {
++        string sitePackages = Path.Combine(_testRoot, "app", "venv", "Lib", "site-packages");
++        string banner = $"pip 26.0 from {Path.Combine(sitePackages, "pip")} (python 3.13)";
++        string expected = Path.Combine(sitePackages, "requests");
++
++        Assert.Equal(expected, Pip.ResolveInstallLocation(banner, "python.exe", "requests", path => path == expected));
++        Assert.Equal(sitePackages, Pip.ResolveInstallLocation(banner, "python.exe", "PyYAML", _ => false));
++    }
++
++    private void AllowCustomManagerPaths(bool allowed) =>
++        SecureSettings.ApplyForUser(
++            Environment.UserName,
++            SecureSettings.ResolveKey(SecureSettings.K.AllowCustomManagerPaths),
++            allowed
++        );
++
++    private string CreateFile(params string[] segments)
++    {
++        string path = Path.Combine([_testRoot, .. segments]);
++        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
++        File.WriteAllText(path, "");
++        return path;
++    }
++
++    private sealed class ScriptedPip(IReadOnlyList<string> candidates) : Pip
++    {
++        public override IReadOnlyList<string> FindCandidateExecutableFiles() => candidates;
++    }
++
+     [Fact]
+     public void SearchHelpersParseSimpleIndexAndRankPrefixMatchesFirst()
+     {
+diff --git a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
+index 6379b3fd..b6386dbc 100644
+--- a/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
++++ b/src/UniGetUI/Pages/SettingsPages/ManagersPages/PackageManager.xaml.cs
+@@ -587,6 +587,16 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
+                 ManagerLogs.CornerRadius = new CornerRadius(8, 8, 0, 0);
+                 AppExecutionAliasWarningLabel.Text =
+                     "If Python cannot be found or is not listing packages but is installed on the system, you may need to disable the \"python.exe\" App Execution Alias in the settings.";
++
++                Pip pip = (Pip)Manager;
++                SettingsCard environmentCard = new()
++                {
++                    Header = CoreTools.Translate("Python environments"),
++                    CornerRadius = new CornerRadius(8),
++                    BorderThickness = new Thickness(1),
++                };
++                PopulatePipEnvironmentCard(pip, environmentCard);
++                ExtraControls.Children.Add(environmentCard);
+             }
+             else
+             {
+@@ -599,6 +609,60 @@ namespace UniGetUI.Pages.SettingsPages.GeneralPages
+         private void ShowVersionHyperlink_Click(object sender, RoutedEventArgs e) =>
+             ApplyManagerState(true);
+ 
++        private void PopulatePipEnvironmentCard(Pip pip, SettingsCard card)
++        {
++            StackPanel environmentList = new() { Spacing = 8 };
++            environmentList.Children.Add(new TextBlock
++            {
++                Text = CoreTools.Translate(
++                    "UniGetUI only manages the Python environments checked below. Virtual environments, conda environments and embedded Pythons usually belong to other apps, so they are not managed unless you check them."
++                ),
++                TextWrapping = TextWrapping.Wrap,
++                FontSize = 12,
++            });
++
++            IReadOnlyList<Pip.PythonCandidate> candidates = pip.GetPythonCandidates();
++            if (candidates.Count == 0)
++            {
++                environmentList.Children.Add(new TextBlock
++                {
++                    Text = CoreTools.Translate("No Python interpreters were found"),
++                });
++            }
++
++            foreach (Pip.PythonCandidate candidate in candidates)
++            {
++                string kind = CoreTools.Translate(candidate.Kind switch
++                {
++                    PythonEnvironmentKind.VirtualEnvironment => "Virtual environment",
++                    PythonEnvironmentKind.CondaEnvironment => "Conda environment",
++                    PythonEnvironmentKind.Embedded => "Embedded Python",
++                    PythonEnvironmentKind.StoreAlias => "Microsoft Store alias",
++                    PythonEnvironmentKind.System => "System Python",
++                    _ => "Unrecognized Python",
++                });
++                bool inUse = Pip.IsSameEnvironment(candidate.Path, Manager!.Status.ExecutablePath);
++                CheckBox manageEnvironment = new()
++                {
++                    Content = $"{candidate.Path} — {kind}{(inUse ? " (" + CoreTools.Translate("In use") + ")" : "")}",
++                    IsChecked = candidate.Managed,
++                    IsEnabled = candidate.Managed || Pip.CanOptInEnvironments(),
++                };
++                async void SaveEnvironmentChoice(object? _, RoutedEventArgs __)
++                {
++                    environmentList.IsEnabled = false;
++                    Pip.SetEnvironmentManaged(candidate.Path, manageEnvironment.IsChecked is true);
++                    await ReloadPackageManager();
++                    PopulatePipEnvironmentCard(pip, card);
++                }
++                manageEnvironment.Checked += SaveEnvironmentChoice;
++                manageEnvironment.Unchecked += SaveEnvironmentChoice;
++                environmentList.Children.Add(manageEnvironment);
++            }
++
++            card.Content = environmentList;
++        }
++
+         void ApplyManagerState(bool ShowVersion = false)
+         {
+             if (Manager is null)
+-- 
+2.52.0
+
