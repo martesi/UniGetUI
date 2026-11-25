@@ -1,7 +1,26 @@
 name: WinUI UI E2E
 
 on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'src/**/*.cs'
+      - 'src/**/*.xaml'
+      - 'src/**/*.csproj'
+      - 'src/**/*.props'
+      - 'src/**/*.targets'
+      - 'src/**/*.sln'
+      - 'src/**/*.slnx'
+      - 'testing/automation/run-winui-ui-e2e.ps1'
+      - '.github/workflows/winui-ui-e2e.yml'
+      - 'global.json'
+      - '!src/UniGetUI.Avalonia/**'
+      - '!src/UniGetUI.Avalonia.slnx'
   workflow_dispatch:
+
+concurrency:
+  group: winui-ui-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   winui-ui-e2e:

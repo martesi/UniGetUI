@@ -1,7 +1,25 @@
 name: CLI Headless E2E
 
 on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'src/**/*.cs'
+      - 'src/**/*.csproj'
+      - 'src/**/*.props'
+      - 'src/**/*.targets'
+      - 'src/**/*.sln'
+      - 'src/**/*.slnx'
+      - 'testing/automation/**'
+      - '.github/workflows/cli-headless-e2e.yml'
+      - 'global.json'
+      - '!src/UniGetUI.Avalonia/**'
+      - '!src/UniGetUI.Avalonia.slnx'
   workflow_dispatch:
+
+concurrency:
+  group: cli-headless-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   cli-headless-e2e:
