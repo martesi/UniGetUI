@@ -108,3 +108,5 @@ backports/1020-port-manager-health-to-classic-winui.patch
 backports/1030-import-agent-skills-backend.patch
 backports/1040-wire-agent-skills-in-classic-winui.patch
 backports/1050-test-standalone-agent-skills-cli.patch
+backports/1060-register-manager-health-winui-page.patch
+backports/1070-unify-agent-skills-and-bulk-actions.patch

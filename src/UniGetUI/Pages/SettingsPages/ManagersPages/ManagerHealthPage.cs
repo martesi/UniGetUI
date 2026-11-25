@@ -41,6 +41,7 @@ public sealed partial class ManagerHealthPage : Page, ISettingsPage
 
     public ManagerHealthPage()
     {
+        InitializeComponent();
         filter.PlaceholderText = CoreTools.Translate("Filter managers");
         AutomationProperties.SetName(filter, filter.PlaceholderText);
         AutomationProperties.SetAutomationId(filter, "ManagerHealthFilter");

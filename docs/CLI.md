@@ -19,6 +19,8 @@ unigetui operation wait --id 123 --timeout 300
 
 On Classic, open **Settings → Agent Skills & Plugins** and turn it on to use the WinUI library. Skills are separate from package managers. Public skills.sh discovery is off unless you explicitly enable it and submit a search.
 
+The **Discover**, **Installed**, **Updates**, and **Sources** views share the same **Type** and **Tool** filters. **Install all** only includes the visible, uninstalled skills from one source; choose the target agents before confirming. **Update all skills** only updates the detected skill updates shown by the current filters. Plugins do not report detected updates there: in **Installed**, select a tool that supports plugin updates to run its own update action for the visible managed plugins.
+
 `UniGetUI.exe skills --help` runs the bundled skill CLI without starting the UI or connecting to the IPC daemon, even when the GUI extension is off:
 
 ```powershell
