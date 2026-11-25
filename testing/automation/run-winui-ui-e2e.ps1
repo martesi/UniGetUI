@@ -370,6 +370,13 @@ try {
 
     [void](Find-ElementByAutomationId ([System.Windows.Automation.AutomationElement]::RootElement) 'ExportPackagesToCsv')
 
+    Write-Host 'Opening Manager Health'
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    Invoke-Element (Find-ElementByAutomationId $root 'ManagersNavigationButton')
+    Invoke-Element (Find-ElementByAutomationId $root 'ManagerHealthEntry')
+    [void](Find-ElementByAutomationId $root 'ManagerHealthFilter')
+    [void](Find-ElementByAutomationId $root 'ManagerHealthCheckAgain')
+
     Write-Host 'Enabling the release date column on Discover'
     $redirect = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) `
         -ArgumentList 'unigetui://showDiscoverPage' -PassThru

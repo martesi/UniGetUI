@@ -7,6 +7,7 @@ using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
 using UniGetUI.PackageEngine.Enums;
+using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.ManagerClasses.Classes;
 using UniGetUI.PackageEngine.ManagerClasses.Manager;
 using UniGetUI.PackageEngine.Managers.Choco;
@@ -18,6 +19,17 @@ namespace UniGetUI.PackageEngine.Managers.ChocolateyManager
 {
     public class Chocolatey : BaseNuGet
     {
+        protected override IEnumerable<ManagerMaintenanceAction> GetExtraMaintenanceActions()
+        {
+            yield return new ManagerMaintenanceAction
+            {
+                Id = "clear-cache",
+                Title = CoreTools.Translate("Clear cache"),
+                Description = CoreTools.Translate("Delete the package metadata Chocolatey keeps in its local cache."),
+                RunAsync = () => RunMaintenanceCommandAsync(Status.ExecutablePath, WithCallArguments("cache remove -y")),
+            };
+        }
+
         public static readonly string[] FALSE_PACKAGE_IDS =
         [
             "Directory",
