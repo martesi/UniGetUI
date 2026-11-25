@@ -97,7 +97,7 @@ jobs:
         if: matrix.platform == 'x64'
         working-directory: src
         shell: pwsh
-        run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64
+        run: dotnet test UniGetUI.PackageEngine.Tests/UniGetUI.PackageEngine.Tests.csproj --no-restore --verbosity minimal /p:Platform=x64 /m:1
 
       - name: Publish WinUI Classic
         shell: pwsh

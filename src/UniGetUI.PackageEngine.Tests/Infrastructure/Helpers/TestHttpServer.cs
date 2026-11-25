@@ -85,11 +85,20 @@ internal sealed class TestHttpServer : IDisposable
 
     private async Task ListenAsync()
     {
-        while (true)
+        while (!_disposed)
         {
             try
             {
-                HttpListenerContext context = await _listener.GetContextAsync();
+                HttpListenerContext context;
+                try
+                {
+                    context = await _listener.GetContextAsync();
+                }
+                catch (ArgumentException ex) when (_disposed && ex.ParamName == "handle")
+                {
+                    // Windows may try to bind the accept queue just as Dispose closes it.
+                    break;
+                }
 
                 lock (_requestPaths)
                 {
